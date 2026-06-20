@@ -180,6 +180,14 @@ def fine_axis_coords(n_sub: int = 4) -> np.ndarray:
     return np.asarray(out, dtype=np.float64)
 
 
+def standard_ip_keys(nx: int = 4, ny: int = 4) -> np.ndarray:
+    rows: list[list[int]] = []
+    for elem in range(1, int(nx) * int(ny) + 1):
+        for ip in range(1, 9):
+            rows.append([elem, ip, 0])
+    return np.asarray(rows, dtype=np.int64)
+
+
 def standard_css8_row_map(nx: int = 4, ny: int = 4) -> np.ndarray:
     fine_x = fine_axis_coords(nx)
     fine_y = fine_axis_coords(ny)
@@ -299,7 +307,9 @@ def build_shape4_nodes(shape4: np.ndarray) -> np.ndarray:
     return nodes
 
 
-def build_point_features(shape4: np.ndarray, *, include_id_features: bool = True) -> tuple[np.ndarray, dict[str, Any]]:
+def build_shape4_ip_geometry(shape4: np.ndarray) -> dict[str, np.ndarray]:
+    """Reconstruct the CSS8 reference integration-point geometry from shape4."""
+
     shapes = np.asarray(shape4, dtype=np.float64).reshape(-1, 4)
     row = standard_css8_row_map()
     elements = css8_elements()
@@ -320,14 +330,39 @@ def build_point_features(shape4: np.ndarray, *, include_id_features: bool = True
             jmat[si, ri] = jj
             detj[si, ri] = float(np.linalg.det(jj))
             invj[si, ri] = np.linalg.inv(jj)
+    gp = row[:, 3].astype(np.int64).reshape(128)
+    local = np.asarray([GAUSS_POINTS[int(v)] for v in gp], dtype=np.float64).reshape(128, 3)
+    frame = np.asarray([frame_at_params(shape, 0.5 * row[:, 10], 0.5 * row[:, 9]) for shape in shapes], dtype=np.float64)
+    return {
+        "row_map": row.astype(np.float64),
+        "ip_keys": standard_ip_keys().astype(np.int64),
+        "ip_xi": row[:, 9:12].astype(np.float64),
+        "ip_local": local,
+        "ip_xyz": xyz,
+        "ip_frame": frame,
+        "ip_J": jmat,
+        "ip_invJ": invj,
+        "ip_detJ": detj,
+    }
+
+
+def build_point_features(shape4: np.ndarray, *, include_id_features: bool = True) -> tuple[np.ndarray, dict[str, Any]]:
+    shapes = np.asarray(shape4, dtype=np.float64).reshape(-1, 4)
+    geom = build_shape4_ip_geometry(shapes)
+    row = geom["row_map"]
+    xyz = geom["ip_xyz"]
+    jmat = geom["ip_J"]
+    invj = geom["ip_invJ"]
+    detj = geom["ip_detJ"]
+    frame = geom["ip_frame"]
+    n_shape = int(shapes.shape[0])
     xi = row[:, 9].reshape(1, 128)
     eta = row[:, 10].reshape(1, 128)
     zeta = row[:, 11].reshape(1, 128)
-    gp = row[:, 3].reshape(128)
-    local_r = np.asarray([GAUSS_POINTS[int(v)][0] for v in gp], dtype=np.float64).reshape(1, 128)
-    local_s = np.asarray([GAUSS_POINTS[int(v)][1] for v in gp], dtype=np.float64).reshape(1, 128)
-    local_t = np.asarray([GAUSS_POINTS[int(v)][2] for v in gp], dtype=np.float64).reshape(1, 128)
-    frame = np.asarray([frame_at_params(shape, 0.5 * row[:, 10], 0.5 * row[:, 9]) for shape in shapes], dtype=np.float64)
+    local = geom["ip_local"]
+    local_r = local[:, 0].reshape(1, 128)
+    local_s = local[:, 1].reshape(1, 128)
+    local_t = local[:, 2].reshape(1, 128)
     point = np.concatenate(
         [
             np.broadcast_to(xi, (n_shape, 128)).reshape(n_shape, 128, 1),
@@ -393,6 +428,24 @@ def build_point_features(shape4: np.ndarray, *, include_id_features: bool = True
         "detJ_abs_min": float(np.min(np.abs(detj))),
     }
     return point.astype(np.float32), meta
+
+
+def build_point_features_unique(shape4: np.ndarray, *, include_id_features: bool = True) -> tuple[np.ndarray, dict[str, Any]]:
+    """Build shape4 point features once per unique geometry and expand back."""
+
+    shapes = np.asarray(shape4, dtype=np.float32).reshape(-1, 4)
+    if shapes.shape[0] == 0:
+        dummy = np.asarray([[1.0, 0.01, 0.0, 0.0]], dtype=np.float32)
+        point, meta = build_point_features(dummy, include_id_features=include_id_features)
+        return point[:0].astype(np.float32), {**meta, "unique_shape4_count": 0, "computed_unique_shape4": True}
+    unique_shape4, inverse = np.unique(shapes, axis=0, return_inverse=True)
+    point_unique, meta = build_point_features(unique_shape4, include_id_features=include_id_features)
+    point = point_unique[np.asarray(inverse, dtype=np.int64)]
+    return point.astype(np.float32), {
+        **meta,
+        "unique_shape4_count": int(unique_shape4.shape[0]),
+        "computed_unique_shape4": True,
+    }
 
 
 class SobolevArrayDataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]):

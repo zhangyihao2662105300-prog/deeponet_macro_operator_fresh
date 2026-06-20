@@ -75,15 +75,29 @@ The DeepONet form is:
 
 ```text
 Branch input = standardized [shape4, q48_raw]       # [B,52]
-Trunk input  = deterministic 128-IP CSS8 features   # [B,P,F]
+Trunk input  = point/IP features                     # [B,P,F]
 Output       = standardized LE                      # [B,P,6]
 AD B         = d(LE_norm)/d(q48_norm)               # [B,P,6,48]
 ```
 
-The trunk features are built from the fixed 4x4 CSS8 topology and `shape4`.
-They include macro natural coordinates, local element Gauss coordinates, exact
-point coordinates, local frames, element Jacobian, inverse Jacobian, determinant
-features, and optional element/IP id features.
+For generic data, trunk features should be stored in the compact data as
+`point_features`, `ip_xyz`, `ip_J`, `ip_detJ`, etc.  For the current TRUE176
+20260620 compacts, those fields were omitted, but they can be reconstructed
+from the audited shape4/CSS8 generation contract:
+
+```text
+shape4 -> 50 CSS8 nodes -> 16 CSS8 elements -> 128 standard Gauss rows
+```
+
+The explicit training source for this dataset is therefore:
+
+```text
+--point-feature-source shape4-audited
+```
+
+That is different from a blind fallback: original sample NPZ files contain
+`ip_keys`, and the audit script checks that their row order is
+`element 1 IP1..IP8, ..., element 16 IP1..IP8`.
 
 The key files are:
 
@@ -99,6 +113,12 @@ src/macro_deeponet/true176_data.py
 
 src/macro_deeponet/train_true176_deeponet_sobolev.py
     LE + AD-B Sobolev trainer
+
+src/macro_deeponet/train_true176_generic_sobolev.py
+    LE + AD-B trainer with explicit data/shape4-audited point features
+
+scripts/audit_true176_shape4_ip_contract.py
+    Checks original sample ip_keys before using shape4-audited reconstruction
 
 scripts/launch_true176_deeponet_128ip_sobolev_ddp_linux.sh
     Linux DDP launcher matching the parameter style of fc4117d
@@ -184,6 +204,7 @@ CODE=$BASE/deeponet_macro_operator_fresh
 DATA=$BASE/true176_shape4_qraw_128ip_training_data_20260620
 OUT_DIR=$BASE/run_logs_128ip_fullframe_20260620/deeponet_true176_128ip_sobolev_ddp_v1
 COMPACT_LIST=                  # optional override
+POINT_FEATURE_SOURCE=shape4-audited
 NPROC=3
 BATCH_SIZE=4
 JAC_COLS_PER_GPU=8
@@ -198,13 +219,14 @@ launcher automatically writes a Linux-resolved five-compact list under
 Single-process/debug run:
 
 ```bash
-PYTHONPATH=src python3 -m macro_deeponet.train_true176_deeponet_sobolev \
+PYTHONPATH=src python3 -m macro_deeponet.train_true176_generic_sobolev \
   --compact-list /path/to/compact_paths_linux.txt \
   --out-dir runs/deeponet_true176_debug \
   --epochs 2 \
   --batch-size 2 \
   --max-frames-per-compact 16 \
   --target-ips 0,1,2,3 \
+  --point-feature-source shape4-audited \
   --jacobian-columns 0,1,2,3 \
   --jacobian-columns-per-batch 2 \
   --eval-columns 0,1,2,3 \
@@ -216,17 +238,30 @@ Windows debug run against the E-drive full dataset:
 ```powershell
 cd D:\IS-FEM\deeponet_macro_operator_fresh
 $env:PYTHONPATH = "D:\IS-FEM\deeponet_macro_operator_fresh\src"
-py -m macro_deeponet.train_true176_deeponet_sobolev `
+py -m macro_deeponet.train_true176_generic_sobolev `
   --compact-list E:\true176_shape4_qraw_128ip_training_data_20260620\compact_paths.txt `
   --out-dir runs\true176_E_main5_debug `
   --epochs 1 `
   --batch-size 2 `
   --max-frames-per-compact 4 `
   --target-ips 0,1 `
+  --point-feature-source shape4-audited `
   --jacobian-columns 0,1 `
   --jacobian-columns-per-batch 1 `
   --eval-columns 0,1 `
   --include-id-features
+```
+
+Audit the available original sample files before treating shape4 reconstruction
+as the physical point source:
+
+```powershell
+cd D:\IS-FEM\deeponet_macro_operator_fresh
+$env:PYTHONPATH = "D:\IS-FEM\deeponet_macro_operator_fresh\src"
+py scripts\audit_true176_shape4_ip_contract.py `
+  --compact-list E:\true176_shape4_qraw_128ip_training_data_20260620\compact_paths.txt `
+  --sample-glob "D:\IS-FEM\t176_cyl100_pilot6_cases001_020_full48\**\css8_shape4_nonzero_sample_*.npz" `
+  --out runs\true176_shape4_ip_contract_audit.json
 ```
 
 ## Data contract for future Abaqus/fine-mesh data

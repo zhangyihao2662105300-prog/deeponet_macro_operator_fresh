@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Synchronize TRUE176 compact files to the generic point-feature schema.
 
@@ -7,8 +7,9 @@ array when explicit real integration-point fields are present.
 
 Default behavior is safe: it refuses to generate point features from shape4,
 because that would assume the standard row-map points match the LE/B labels.
-Use ``--legacy-shape4-fallback`` only after a coordinate/order audit proves that
-this assumption is valid for the dataset.
+Use ``--shape4-audited`` only after ``audit_true176_shape4_ip_contract.py`` or
+an equivalent coordinate/order audit proves that this assumption is valid for
+the dataset. ``--legacy-shape4-fallback`` remains as a compatibility spelling.
 
 Canonical output fields added to each compact:
 
@@ -67,6 +68,7 @@ def main() -> None:
     p.add_argument("--out-root", required=True)
     p.add_argument("--target-ips", default=",".join(str(i) for i in range(128)))
     p.add_argument("--include-id-features", action="store_true")
+    p.add_argument("--shape4-audited", action="store_true")
     p.add_argument("--legacy-shape4-fallback", action="store_true")
     p.add_argument("--out-list-name", default="compact_paths_generic_points.txt")
     args = p.parse_args()
@@ -90,7 +92,7 @@ def main() -> None:
             source_row=source_row,
             shape4=shape4,
             target_ips=target_ips,
-            source="auto" if args.legacy_shape4_fallback else "data",
+            source="shape4-audited" if args.shape4_audited else ("auto" if args.legacy_shape4_fallback else "data"),
             include_id_features=bool(args.include_id_features),
             allow_shape4_fallback=bool(args.legacy_shape4_fallback),
         )

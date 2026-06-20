@@ -33,7 +33,7 @@ from typing import Any, Iterable
 
 import numpy as np
 
-from .true176_data import build_point_features, standard_css8_row_map
+from .true176_data import build_point_features_unique, standard_css8_row_map
 
 FEATURE_KEYS = ("point_features", "ip_features", "trunk_features")
 FEATURE_NAME_KEYS = ("point_feature_names", "ip_feature_names", "trunk_feature_names")
@@ -126,6 +126,30 @@ def _id_features(target_ips: list[int], batch: int) -> tuple[np.ndarray, list[st
     ]
 
 
+def _shape4_audited_features(
+    shape4: np.ndarray,
+    *,
+    target_ips: list[int],
+    include_id_features: bool,
+    source_name: str,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    point_all, meta = build_point_features_unique(shape4, include_id_features=bool(include_id_features))
+    audit_note = (
+        "Reconstructed from the TRUE176 shape4 CSS8 generation contract. "
+        "This is valid only for compacts whose LE/B rows follow standard ip_keys "
+        "[elem 1 IP1..IP8, ..., elem 16 IP1..IP8]. Run "
+        "scripts/audit_true176_shape4_ip_contract.py on available sample NPZ files "
+        "or generation sidecars before using it as a physical data source."
+    )
+    return point_all[:, target_ips, :].astype(np.float32), {
+        **meta,
+        "point_feature_source": source_name,
+        "shape4_ip_contract": "standard_css8_elem_major_ip_major",
+        "audit_required": True,
+        "audit_note": audit_note,
+    }
+
+
 def load_point_features_from_compacts(
     *,
     compact_paths: list[str],
@@ -141,21 +165,36 @@ def load_point_features_from_compacts(
 
     ``source='data'`` requires explicit point data in every compact.  ``source='auto'``
     uses explicit data when available and can fall back to shape4 only if
-    ``allow_shape4_fallback`` is true.  ``source='shape4'`` is the legacy route.
+    ``allow_shape4_fallback`` is true.  ``source='shape4-audited'`` reconstructs
+    the point geometry from the TRUE176 shape4 generation contract.  ``source='shape4'``
+    remains a legacy compatibility route.
     """
 
     key = str(source).strip().lower()
-    if key not in {"data", "auto", "shape4"}:
-        raise ValueError("point feature source must be one of: data, auto, shape4")
+    key = key.replace("_", "-")
+    if key not in {"data", "auto", "shape4", "shape4-audited"}:
+        raise ValueError("point feature source must be one of: data, auto, shape4-audited, shape4")
 
     target_ips = [int(v) for v in target_ips]
     source_index = np.asarray(source_index, dtype=np.int64).reshape(-1)
     source_row = np.asarray(source_row, dtype=np.int64).reshape(-1)
     shape4 = np.asarray(shape4, dtype=np.float32).reshape(-1, 4)
 
+    if key == "shape4-audited":
+        return _shape4_audited_features(
+            shape4,
+            target_ips=target_ips,
+            include_id_features=bool(include_id_features),
+            source_name="shape4_reconstructed_audited",
+        )
+
     if key == "shape4":
-        point_all, meta = build_point_features(shape4, include_id_features=bool(include_id_features))
-        return point_all[:, target_ips, :].astype(np.float32), {**meta, "point_feature_source": "shape4_generated_explicit"}
+        return _shape4_audited_features(
+            shape4,
+            target_ips=target_ips,
+            include_id_features=bool(include_id_features),
+            source_name="shape4_generated_legacy_explicit",
+        )
 
     chunks: list[np.ndarray] = []
     names: list[str] | None = None
@@ -193,7 +232,7 @@ def load_point_features_from_compacts(
                     if key == "auto" and bool(allow_shape4_fallback):
                         # Fill this compact from shape4-generated features for backward compatibility only.
                         local_shape = np.asarray(z["shape4"], dtype=np.float32)[rows].reshape(-1, 4)
-                        point_local, meta_local = build_point_features(local_shape, include_id_features=bool(include_id_features))
+                        point_local, meta_local = build_point_features_unique(local_shape, include_id_features=bool(include_id_features))
                         arr = point_local[:, target_ips, :].astype(np.float32)
                         cur_names = list(meta_local.get("feature_names", _field_names("shape4_generated", arr.shape[-1])))
                         used = {"compact": str(path), "mode": "shape4_generated_fallback", "feature_dim": int(arr.shape[-1])}
@@ -236,7 +275,7 @@ def load_point_features_from_compacts(
             "you have audited that they match the Abaqus label coordinates."
         )
         if key == "auto" and bool(allow_shape4_fallback):
-            point_all, meta = build_point_features(shape4, include_id_features=bool(include_id_features))
+            point_all, meta = build_point_features_unique(shape4, include_id_features=bool(include_id_features))
             return point_all[:, target_ips, :].astype(np.float32), {**meta, "point_feature_source": "shape4_generated_global_fallback", "warning": message}
         raise ValueError(message)
 

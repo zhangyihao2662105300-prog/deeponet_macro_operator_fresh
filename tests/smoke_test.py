@@ -159,6 +159,28 @@ def test_generic_point_feature_loader_marks_shape4_fallback() -> None:
         assert meta["point_feature_source"] == "shape4_generated_fallback"
 
 
+def test_generic_point_feature_loader_shape4_audited() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "shape4_contract_compact.npz"
+        shape4 = np.asarray([[1.2, 0.1, 0.0, 0.0], [1.2, 0.1, 0.0, 0.0]], dtype=np.float32)
+        np.savez(path, shape4=shape4)
+        points, meta = load_point_features_from_compacts(
+            compact_paths=[str(path)],
+            source_index=np.zeros(2, dtype=np.int64),
+            source_row=np.arange(2, dtype=np.int64),
+            shape4=shape4,
+            target_ips=[0, 7, 127],
+            source="shape4-audited",
+            include_id_features=True,
+            allow_shape4_fallback=False,
+        )
+        assert points.shape[0] == 2
+        assert points.shape[1] == 3
+        assert meta["point_feature_source"] == "shape4_reconstructed_audited"
+        assert meta["shape4_ip_contract"] == "standard_css8_elem_major_ip_major"
+        assert meta["unique_shape4_count"] == 1
+
+
 def test_tiny_overfit_loss_decreases() -> None:
     torch.manual_seed(19)
     dataset = SyntheticMacroDataset(SyntheticConfig(num_samples=256, seed=19))
@@ -191,5 +213,6 @@ if __name__ == "__main__":
     test_true176_loader_rejects_non_full48_b()
     test_generic_point_feature_loader_reads_real_fields()
     test_generic_point_feature_loader_marks_shape4_fallback()
+    test_generic_point_feature_loader_shape4_audited()
     test_tiny_overfit_loss_decreases()
     print("smoke_test.py: all checks passed")

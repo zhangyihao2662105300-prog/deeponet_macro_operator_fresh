@@ -4,8 +4,10 @@ set -euo pipefail
 BASE="${BASE:-/home/ydh/桌面/zhangyihao}"
 CODE="${CODE:-$BASE/deeponet_macro_operator_fresh}"
 DATA="${DATA:-$BASE/true176_shape4_qraw_128ip_training_data_20260620}"
-OUT_DIR="${OUT_DIR:-$BASE/run_logs_128ip_fullframe_20260620/deeponet_true176_128ip_sobolev_ddp_v1}"
+OUT_DIR="${OUT_DIR:-$BASE/run_logs_128ip_fullframe_20260620/deeponet_true176_128ip_sobolev_ddp_v2_generic_points}"
 COMPACT_LIST="${COMPACT_LIST:-}"
+POINT_FEATURE_SOURCE="${POINT_FEATURE_SOURCE:-data}"
+ALLOW_SHAPE4_POINT_FEATURE_FALLBACK="${ALLOW_SHAPE4_POINT_FEATURE_FALLBACK:-0}"
 EPOCHS="${EPOCHS:-120}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-1}"
@@ -80,10 +82,11 @@ CMD=(
   python3 -m torch.distributed.run
   --nproc_per_node "$NPROC"
   --standalone
-  -m macro_deeponet.train_true176_deeponet_sobolev
+  -m macro_deeponet.train_true176_generic_sobolev
   --compact-list "$COMPACT_LIST"
   --out-dir "$OUT_DIR"
   --target-ips "$TARGET_IPS"
+  --point-feature-source "$POINT_FEATURE_SOURCE"
   --epochs "$EPOCHS"
   --batch-size "$BATCH_SIZE"
   --eval-batch-size "$EVAL_BATCH_SIZE"
@@ -119,6 +122,10 @@ CMD=(
   --ddp
 )
 
+if [[ "$ALLOW_SHAPE4_POINT_FEATURE_FALLBACK" != "0" ]]; then
+  CMD+=(--allow-shape4-point-feature-fallback)
+fi
+
 if [[ "$MAX_FRAMES_PER_COMPACT" != "0" ]]; then
   CMD+=(--max-frames-per-compact "$MAX_FRAMES_PER_COMPACT")
 fi
@@ -135,6 +142,8 @@ printf "\n" >> "$OUT_DIR/command.txt"
   echo "OUT_DIR=$OUT_DIR"
   echo "DATA=$DATA"
   echo "COMPACT_LIST=$COMPACT_LIST"
+  echo "POINT_FEATURE_SOURCE=$POINT_FEATURE_SOURCE"
+  echo "ALLOW_SHAPE4_POINT_FEATURE_FALLBACK=$ALLOW_SHAPE4_POINT_FEATURE_FALLBACK"
   echo "EPOCHS=$EPOCHS"
   echo "BATCH_SIZE=$BATCH_SIZE"
   echo "EVAL_BATCH_SIZE=$EVAL_BATCH_SIZE"

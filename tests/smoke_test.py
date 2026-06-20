@@ -16,6 +16,7 @@ from macro_deeponet.geometry import (
     shape_functions_hex8,
 )
 from macro_deeponet.models import MacroDeepONet, True176Shape4QrawDeepONet
+from macro_deeponet.point_features import load_point_features_from_compacts
 from macro_deeponet.true176_data import build_point_features, load_one_compact
 from macro_deeponet.train_true176_deeponet_sobolev import ad_jacobian
 
@@ -99,6 +100,65 @@ def test_true176_loader_rejects_non_full48_b() -> None:
             raise AssertionError("loader accepted a compact file with B last dimension != 48")
 
 
+def test_generic_point_feature_loader_reads_real_fields() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "real_points_compact.npz"
+        n = 3
+        ip_xyz = np.stack(
+            [
+                np.linspace(-1.0, 1.0, 128, dtype=np.float32),
+                np.linspace(0.0, 2.0, 128, dtype=np.float32),
+                np.linspace(2.0, 3.0, 128, dtype=np.float32),
+            ],
+            axis=1,
+        )
+        ip_detj = np.linspace(0.1, 0.2, 128, dtype=np.float32)
+        np.savez(
+            path,
+            shape4=np.zeros((n, 4), dtype=np.float32),
+            q48_raw=np.zeros((n, 48), dtype=np.float32),
+            LE128_base=np.zeros((n, 128, 6), dtype=np.float32),
+            B_LE128_forward=np.zeros((n, 128, 6, 48), dtype=np.float32),
+            ip_xyz=ip_xyz,
+            ip_detJ=ip_detj,
+        )
+        points, meta = load_point_features_from_compacts(
+            compact_paths=[str(path)],
+            source_index=np.zeros(n, dtype=np.int64),
+            source_row=np.arange(n, dtype=np.int64),
+            shape4=np.zeros((n, 4), dtype=np.float32),
+            target_ips=[0, 7, 127],
+            source="data",
+            include_id_features=False,
+            allow_shape4_fallback=False,
+        )
+        assert points.shape == (n, 3, 4)
+        assert meta["point_feature_source"] == "data_generic"
+        assert meta["feature_names"] == ["ip_xyz_x", "ip_xyz_y", "ip_xyz_z", "ip_detJ"]
+        assert np.allclose(points[:, 0, :3], ip_xyz[0])
+        assert np.allclose(points[:, -1, 3], ip_detj[127])
+
+
+def test_generic_point_feature_loader_marks_shape4_fallback() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "missing_points_compact.npz"
+        shape4 = np.asarray([[1.2, 0.1, 0.0, 0.0], [1.3, 0.08, 0.05, 0.1]], dtype=np.float32)
+        np.savez(path, shape4=shape4)
+        points, meta = load_point_features_from_compacts(
+            compact_paths=[str(path)],
+            source_index=np.zeros(2, dtype=np.int64),
+            source_row=np.arange(2, dtype=np.int64),
+            shape4=shape4,
+            target_ips=[0, 1],
+            source="auto",
+            include_id_features=True,
+            allow_shape4_fallback=True,
+        )
+        assert points.shape[0] == 2
+        assert points.shape[1] == 2
+        assert meta["point_feature_source"] == "shape4_generated_fallback"
+
+
 def test_tiny_overfit_loss_decreases() -> None:
     torch.manual_seed(19)
     dataset = SyntheticMacroDataset(SyntheticConfig(num_samples=256, seed=19))
@@ -129,5 +189,7 @@ if __name__ == "__main__":
     test_forward_and_autograd_shapes()
     test_true176_point_features_and_ad_shapes()
     test_true176_loader_rejects_non_full48_b()
+    test_generic_point_feature_loader_reads_real_fields()
+    test_generic_point_feature_loader_marks_shape4_fallback()
     test_tiny_overfit_loss_decreases()
     print("smoke_test.py: all checks passed")

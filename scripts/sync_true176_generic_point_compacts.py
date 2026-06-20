@@ -30,7 +30,7 @@ from pathlib import Path
 import numpy as np
 
 from macro_deeponet.point_features import load_point_features_from_compacts
-from macro_deeponet.true176_data import load_one_compact, parse_target_ips
+from macro_deeponet.true176_data import parse_target_ips
 
 
 def read_list(path: Path) -> list[str]:
@@ -53,6 +53,14 @@ def copy_with_point_features(src: Path, dst: Path, *, point_features: np.ndarray
     np.savez_compressed(str(dst), **payload)
 
 
+def load_shape4_only(src: Path) -> np.ndarray:
+    with np.load(str(src), allow_pickle=True) as z:
+        if "shape4" not in z.files:
+            raise KeyError(f"{src}: missing shape4")
+        shape4 = np.asarray(z["shape4"], dtype=np.float32).reshape(-1, 4)
+    return shape4
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--compact-list", required=True)
@@ -72,15 +80,15 @@ def main() -> None:
     out_paths: list[str] = []
     reports = []
     for i, src in enumerate(src_paths):
-        loaded = load_one_compact(src)
-        n = int(loaded["shape4"].shape[0])
+        shape4 = load_shape4_only(src)
+        n = int(shape4.shape[0])
         source_index = np.zeros(n, dtype=np.int64)
         source_row = np.arange(n, dtype=np.int64)
         point, meta = load_point_features_from_compacts(
             compact_paths=[str(src)],
             source_index=source_index,
             source_row=source_row,
-            shape4=loaded["shape4"],
+            shape4=shape4,
             target_ips=target_ips,
             source="auto" if args.legacy_shape4_fallback else "data",
             include_id_features=bool(args.include_id_features),

@@ -83,6 +83,8 @@ def _slice_point_array(arr: np.ndarray, *, rows: np.ndarray, target_ips: list[in
     rows = np.asarray(rows, dtype=np.int64).reshape(-1)
     ips = np.asarray(target_ips, dtype=np.int64).reshape(-1)
 
+    if vals.ndim == 1 and vals.shape[0] == 128:
+        vals = vals[:, None]
     if vals.ndim < 2:
         raise ValueError(f"{source_key}: expected at least point array rank 2, got shape {vals.shape}")
 
@@ -207,12 +209,25 @@ def load_point_features_from_compacts(
                 cur_names = list(cur_names) + id_names
                 used["appended_id_features"] = True
 
+            if len(cur_names) != int(arr.shape[-1]):
+                raise ValueError(
+                    f"feature names for {path} have length {len(cur_names)}, "
+                    f"but feature dimension is {arr.shape[-1]}"
+                )
+
             if names is None:
                 names = list(cur_names)
             elif len(names) != len(cur_names):
                 raise ValueError(f"feature dimension/name mismatch in {path}: expected {len(names)}, got {len(cur_names)}")
             chunks.append(arr)
             sources_used.append(used)
+
+    if missing and not (key == "auto" and bool(allow_shape4_fallback)):
+        raise ValueError(
+            "Missing explicit point features in one or more compact files: "
+            + ", ".join(missing)
+            + ". Add point_features/ip_features/trunk_features or raw fields such as ip_xi, ip_xyz, ip_J, ip_detJ."
+        )
 
     if not chunks:
         message = (
@@ -226,8 +241,17 @@ def load_point_features_from_compacts(
         raise ValueError(message)
 
     point = np.concatenate(chunks, axis=0).astype(np.float32)
+    if point.shape[0] != shape4.shape[0]:
+        raise ValueError(f"point feature frame count {point.shape[0]} does not match loaded frames {shape4.shape[0]}")
+    modes = {str(item.get("mode", "")) for item in sources_used}
+    if modes == {"shape4_generated_fallback"}:
+        point_feature_source = "shape4_generated_fallback"
+    elif "shape4_generated_fallback" in modes:
+        point_feature_source = "data_generic_with_shape4_fallback"
+    else:
+        point_feature_source = "data_generic"
     meta = {
-        "point_feature_source": "data_generic",
+        "point_feature_source": point_feature_source,
         "feature_names": names or _field_names("point_feature", point.shape[-1]),
         "feature_dim": int(point.shape[-1]),
         "point_count": int(point.shape[1]),

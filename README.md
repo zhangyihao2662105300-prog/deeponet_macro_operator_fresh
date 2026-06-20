@@ -41,6 +41,10 @@ macro-element strain-field learning for shell/solid-style elements.
 
 ## Current scope
 
+This repository now contains two levels.
+
+### 1. Clean Hex8 prototype
+
 This first version is deliberately small and independent:
 
 - 8-node isoparametric hexahedral macro geometry.
@@ -54,7 +58,51 @@ This first version is deliberately small and independent:
 - Synthetic training data is generated from affine, rigid translation, and
   rigid rotation displacement fields over randomized macro geometries.
 
-No previous repository data or scripts are required.
+### 2. TRUE176 / CSS8 4x4 128-IP DeepONet route
+
+This is the production-facing route aligned with the current NNSE training
+launcher commit `fc4117d`.
+
+Current data contract:
+
+```text
+input  = shape4[4] + q48_raw[48]
+output = LE[target_ips, 6]
+B      = d LE / d q48_raw
+```
+
+The DeepONet form is:
+
+```text
+Branch input = standardized [shape4, q48_raw]       # [B,52]
+Trunk input  = deterministic 128-IP CSS8 features   # [B,P,F]
+Output       = standardized LE                      # [B,P,6]
+AD B         = d(LE_norm)/d(q48_norm)               # [B,P,6,48]
+```
+
+The trunk features are built from the fixed 4x4 CSS8 topology and `shape4`.
+They include macro natural coordinates, local element Gauss coordinates, exact
+point coordinates, local frames, element Jacobian, inverse Jacobian, determinant
+features, and optional element/IP id features.
+
+The key files are:
+
+```text
+src/macro_deeponet/models.py
+    MacroDeepONet                  # clean Hex8 prototype
+    True176Shape4QrawDeepONet      # TRUE176/CSS8 128-IP model
+
+src/macro_deeponet/true176_data.py
+    compact npz loader
+    shape4 -> 128-IP point-feature builder
+    Sobolev dataset wrapper
+
+src/macro_deeponet/train_true176_deeponet_sobolev.py
+    LE + AD-B Sobolev trainer
+
+scripts/launch_true176_deeponet_128ip_sobolev_ddp_linux.sh
+    Linux DDP launcher matching the parameter style of fc4117d
+```
 
 ## Install
 
@@ -77,7 +125,7 @@ $env:PYTHONPATH = "D:\IS-FEM\deeponet_macro_operator_fresh\src"
 py tests\smoke_test.py
 ```
 
-## Tiny training run
+## Tiny Hex8 prototype training run
 
 ```powershell
 cd D:\IS-FEM\deeponet_macro_operator_fresh
@@ -86,6 +134,45 @@ py -m macro_deeponet.train --epochs 20 --samples 2048 --batch-size 128
 ```
 
 The output checkpoint is written to `runs/fresh_deeponet/best.pt` by default.
+
+## TRUE176 128-IP Sobolev/DDP training
+
+On Linux, with the same `compact_paths_linux.txt` layout as the current NNSE
+launcher:
+
+```bash
+cd /home/ydh/桌面/zhangyihao/deeponet_macro_operator_fresh
+bash scripts/launch_true176_deeponet_128ip_sobolev_ddp_linux.sh
+```
+
+Important environment overrides:
+
+```bash
+BASE=/home/ydh/桌面/zhangyihao
+CODE=$BASE/deeponet_macro_operator_fresh
+DATA=$BASE/true176_shape4_qraw_128ip_training_data_20260620
+OUT_DIR=$BASE/run_logs_128ip_fullframe_20260620/deeponet_true176_128ip_sobolev_ddp_v1
+NPROC=3
+BATCH_SIZE=4
+JAC_COLS_PER_GPU=8
+JACOBIAN_METHOD=forward
+```
+
+Single-process/debug run:
+
+```bash
+PYTHONPATH=src python3 -m macro_deeponet.train_true176_deeponet_sobolev \
+  --compact-list /path/to/compact_paths_linux.txt \
+  --out-dir runs/deeponet_true176_debug \
+  --epochs 2 \
+  --batch-size 2 \
+  --max-frames-per-compact 16 \
+  --target-ips 0,1,2,3 \
+  --jacobian-columns 0,1,2,3 \
+  --jacobian-columns-per-batch 2 \
+  --eval-columns 0,1,2,3 \
+  --include-id-features
+```
 
 ## Data contract for future Abaqus/fine-mesh data
 
@@ -101,3 +188,16 @@ epsilon:    [6] or [3]           # physical strain components
 For fine-mesh Gauss-point data, first invert the macro isoparametric map
 `x = x_macro(xi)` to obtain the query coordinate `xi`, then train the operator
 on `(q_b, X, xi) -> epsilon_ref`.
+
+For the current TRUE176/CSS8 dataset, this is specialized to fixed 128 CSS8
+integration points:
+
+```text
+shape4:        [4]
+q48_raw:       [48]
+LE128_base:    [128, 6]
+B_LE128_forward: [128, 6, 48]
+```
+
+The derivative supervision is always with respect to the same raw coordinate
+used as model input: `q48_raw`.

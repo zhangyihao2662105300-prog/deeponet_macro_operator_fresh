@@ -118,6 +118,18 @@ standardization uses `mean/std` on the already dimensionless branch/trunk
 features.  `H` may be added as a separate physical parameter later, but it is
 not needed to repair pure geometric similarity scaling.
 
+The scaling law can be checked directly:
+
+```powershell
+cd D:\IS-FEM\deeponet_macro_operator_fresh
+$env:PYTHONPATH = "D:\IS-FEM\deeponet_macro_operator_fresh\src"
+py scripts\validate_isoparametric_scaling.py
+```
+
+This samples random positive-orientation Hex8 elements and verifies
+`x/J/invJ/detJ`, linear engineering strain, and `B=dLE/dq` under
+`X_phys=H*X_hat` and `q_phys=H*q_hat`.
+
 For generic data, trunk features should be stored in the compact data as
 `point_features`, `ip_xyz`, `ip_J`, `ip_detJ`, etc.  In physical mode, prebuilt
 `point_features` must have scale-aware names: raw physical fields such as

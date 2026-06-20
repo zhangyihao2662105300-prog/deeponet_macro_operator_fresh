@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import sys
 import tempfile
 from pathlib import Path
 
@@ -28,6 +29,12 @@ from macro_deeponet.true176_data import (
 )
 from macro_deeponet.train_true176_deeponet_sobolev import ad_jacobian
 from macro_deeponet.train_true176_generic_sobolev import train as train_true176_generic
+
+ROOT = Path(__file__).resolve().parents[1]
+sys_path_text = str(ROOT / "scripts")
+if sys_path_text not in sys.path:
+    sys.path.insert(0, sys_path_text)
+from validate_isoparametric_scaling import run_validation as run_isoparametric_scaling_validation
 
 
 def test_geometry_identities() -> None:
@@ -189,6 +196,11 @@ def test_true176_physical_scale_transforms_branch_and_b() -> None:
     assert meta["b_target_transform"] == "H * B_phys"
     assert np.allclose(b_hat[0], 6.0)
     assert np.allclose(b_hat[1], 12.0)
+
+
+def test_isoparametric_similarity_scaling_laws() -> None:
+    report = run_isoparametric_scaling_validation(seed=1234, trials=4, points_per_trial=3)
+    assert report["passed"], report
 
 
 def test_true176_physical_scale_rejects_shape4_branch_geometry() -> None:
@@ -435,6 +447,7 @@ if __name__ == "__main__":
     test_true176_keep_node_order_matches_q48_contract()
     test_true176_loader_uses_explicit_xkeep_when_available()
     test_true176_physical_scale_transforms_branch_and_b()
+    test_isoparametric_similarity_scaling_laws()
     test_true176_physical_scale_rejects_shape4_branch_geometry()
     test_true176_physical_scale_transforms_raw_point_fields()
     test_true176_physical_scale_rejects_unnamed_point_features()

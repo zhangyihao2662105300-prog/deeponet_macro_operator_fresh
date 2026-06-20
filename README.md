@@ -142,7 +142,10 @@ For generic data, trunk features should be stored in the compact data as
 `point_features` must have scale-aware names: raw physical fields such as
 `ip_xyz_*`, `ip_J_*`, `ip_invJ_*`, `ip_detJ`, or explicit dimensionless names
 such as `*_hat`.  Anonymous columns like `point_features_0` are rejected because
-the trainer cannot know whether to divide them by `H`.
+the trainer cannot know whether to divide them by `H`.  Physical arbitrary
+geometry also cannot use `--point-feature-source shape4-audited` by default;
+that route is only allowed with `--allow-physical-shape4-trunk` when the explicit
+physical geometry is exactly an H-scaled TRUE176 shape4 geometry.
 
 For the current TRUE176 20260620 compacts, `X_keep`, `X_macro`, and those trunk
 fields were omitted, but the needed geometry can be reconstructed from the

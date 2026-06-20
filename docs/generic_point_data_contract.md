@@ -97,6 +97,17 @@ Dimensionless features must be named explicitly, for example `*_hat`,
 such as `point_features_0` are rejected in physical mode because their length
 units cannot be inferred.
 
+Physical arbitrary geometry must not use `shape4-audited` Trunk features.  That
+route is valid for the current normalized TRUE176 data, and for physical data
+only when explicit `X_keep`/`X_macro` is exactly an H-scaled TRUE176 shape4
+geometry.  The trainer therefore rejects:
+
+```text
+--scale-mode physical --point-feature-source shape4-audited
+```
+
+unless `--allow-physical-shape4-trunk` is explicitly set.
+
 The repository includes numerical checks for the isoparametric map and these
 similarity laws:
 

@@ -28,7 +28,10 @@ from macro_deeponet.true176_data import (
     transform_b_target_for_q_coordinate,
 )
 from macro_deeponet.train_true176_deeponet_sobolev import ad_jacobian
-from macro_deeponet.train_true176_generic_sobolev import train as train_true176_generic
+from macro_deeponet.train_true176_generic_sobolev import (
+    train as train_true176_generic,
+    validate_point_feature_source_for_scale,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 sys_path_text = str(ROOT / "scripts")
@@ -233,6 +236,32 @@ def test_true176_physical_scale_rejects_shape4_branch_geometry() -> None:
             assert "shape4" in str(exc) or "explicit physical" in str(exc)
         else:
             raise AssertionError(f"physical scale accepted shape4-only geometry for {mode}")
+
+
+def test_true176_physical_scale_rejects_shape4_trunk_by_default() -> None:
+    point_meta = {"point_feature_source": "shape4_reconstructed_audited"}
+    try:
+        validate_point_feature_source_for_scale(
+            scale_mode="physical",
+            requested_source="shape4-audited",
+            point_meta=point_meta,
+        )
+    except ValueError as exc:
+        assert "cannot use shape4-audited" in str(exc)
+    else:
+        raise AssertionError("physical scale accepted shape4-audited Trunk without opt-in")
+
+    validate_point_feature_source_for_scale(
+        scale_mode="physical",
+        requested_source="shape4-audited",
+        point_meta=point_meta,
+        allow_physical_shape4_trunk=True,
+    )
+    validate_point_feature_source_for_scale(
+        scale_mode="physical",
+        requested_source="data",
+        point_meta={"point_feature_source": "data_generic"},
+    )
 
 
 def test_true176_physical_scale_transforms_raw_point_fields() -> None:
@@ -463,6 +492,7 @@ if __name__ == "__main__":
     test_isoparametric_mapping_laws()
     test_true176_css8_macro_mapping_laws()
     test_true176_physical_scale_rejects_shape4_branch_geometry()
+    test_true176_physical_scale_rejects_shape4_trunk_by_default()
     test_true176_physical_scale_transforms_raw_point_fields()
     test_true176_physical_scale_rejects_unnamed_point_features()
     test_true176_full_xnodes_branch_is_available_as_ablation()

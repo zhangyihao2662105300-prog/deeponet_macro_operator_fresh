@@ -80,6 +80,29 @@ def _unwrap(model: nn.Module) -> nn.Module:
     return model.module if isinstance(model, DDP) else model
 
 
+def validate_point_feature_source_for_scale(
+    *,
+    scale_mode: str,
+    requested_source: str,
+    point_meta: dict[str, Any],
+    allow_physical_shape4_trunk: bool = False,
+) -> None:
+    """Prevent physical arbitrary geometry from silently using shape4 Trunk fields."""
+
+    if canonical_scale_mode(scale_mode) != "physical":
+        return
+    requested = str(requested_source).strip().lower().replace("_", "-")
+    meta_source = str(point_meta.get("point_feature_source", "")).strip().lower()
+    uses_shape4 = requested in {"shape4", "shape4-audited"} or "shape4" in meta_source
+    if uses_shape4 and not bool(allow_physical_shape4_trunk):
+        raise ValueError(
+            "scale_mode=physical cannot use shape4-audited/shape4-generated Trunk features by default. "
+            "For arbitrary physical geometry, provide data/raw point fields such as ip_xyz/ip_J/ip_invJ/ip_detJ "
+            "or prebuilt dimensionless *_hat point_features. Use --allow-physical-shape4-trunk only when the "
+            "explicit physical X_keep/X_macro is exactly an H-scaled TRUE176 shape4 geometry."
+        )
+
+
 def train(args: argparse.Namespace) -> dict[str, Any]:
     ctx = _distributed_context(args)
     rank = int(ctx["rank"])
@@ -147,6 +170,12 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         source=str(args.point_feature_source),
         include_id_features=bool(args.include_id_features),
         allow_shape4_fallback=bool(args.allow_shape4_point_feature_fallback),
+    )
+    validate_point_feature_source_for_scale(
+        scale_mode=scale_mode,
+        requested_source=str(args.point_feature_source),
+        point_meta=point_meta,
+        allow_physical_shape4_trunk=bool(args.allow_physical_shape4_trunk),
     )
     point_feature_names = list(point_meta.get("feature_names", [f"point_feature_{i}" for i in range(point_raw.shape[-1])]))
     point_raw, point_scale_meta = transform_point_features_for_scale(
@@ -382,6 +411,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--branch-feature-mode", default="xkeep-qraw", choices=["shape4-qraw", "xkeep-qraw", "xnodes-qraw"])
     p.add_argument("--point-feature-source", default="data", choices=["data", "auto", "shape4-audited", "shape4"])
     p.add_argument("--allow-shape4-point-feature-fallback", action="store_true")
+    p.add_argument("--allow-physical-shape4-trunk", action="store_true")
     p.add_argument("--scale-mode", default="normalized", choices=["normalized", "physical"])
     p.add_argument("--b-label-coordinate", default="auto", choices=["auto", "physical", "dimensionless"])
     p.add_argument("--detj-scale-dim", type=int, default=3)

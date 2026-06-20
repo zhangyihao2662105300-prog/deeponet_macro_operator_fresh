@@ -29,7 +29,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
 from .models import True176Shape4QrawDeepONet
-from .point_features import load_point_features_from_compacts
+from .point_features import load_point_features_from_compacts, transform_point_features_for_scale
 from .train_true176_deeponet_sobolev import (
     ad_jacobian,
     compact_paths_from_args,
@@ -45,11 +45,13 @@ from .train_true176_deeponet_sobolev import (
 from .true176_data import (
     SobolevArrayDataset,
     build_branch_features,
+    canonical_scale_mode,
     load_compacts,
     parse_int_list,
     parse_target_ips,
     split_indices,
     stats,
+    transform_b_target_for_q_coordinate,
 )
 
 
@@ -94,6 +96,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
 
     compact_paths = compact_paths_from_args(args)
     target_ips = parse_target_ips(str(args.target_ips))
+    scale_mode = canonical_scale_mode(str(args.scale_mode))
     data = load_compacts(
         compact_paths,
         frame_stride=int(args.frame_stride),
@@ -109,18 +112,26 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         mode=str(args.branch_feature_mode),
         keep_node_coords=data.keep_node_coords,
         macro_nodes=data.macro_nodes,
+        length_scale=data.length_scale,
+        scale_mode=scale_mode,
     )
     le_raw = data.le[:, target_ips, :].astype(np.float32)
     b_raw = data.b[:, target_ips, :, :].astype(np.float32)
+    b_train, b_scale_meta = transform_b_target_for_q_coordinate(
+        b_raw,
+        data.length_scale,
+        scale_mode=scale_mode,
+        b_label_coordinate=str(args.b_label_coordinate),
+    )
 
     x_mean, x_std = stats(x_raw[train_idx], axis=0)
     le_mean, le_std = stats(le_raw[train_idx], axis=0)
     q_start = int(branch_meta["q_start"])
     q_dim = int(branch_meta["q_dim"])
     q_std = x_std.reshape(-1)[q_start : q_start + q_dim]
-    j_norm_target = (b_raw * q_std.reshape(1, 1, 1, 48) / le_std.reshape(1, len(target_ips), 6, 1)).astype(np.float32)
+    j_norm_target = (b_train * q_std.reshape(1, 1, 1, 48) / le_std.reshape(1, len(target_ips), 6, 1)).astype(np.float32)
     skip_init = np.mean(j_norm_target[train_idx], axis=0).astype(np.float32)
-    b_global_rms = float(np.sqrt(np.mean(np.asarray(b_raw, dtype=np.float64)[train_idx] ** 2)))
+    b_global_rms = float(np.sqrt(np.mean(np.asarray(b_train, dtype=np.float64)[train_idx] ** 2)))
 
     point_raw, point_meta = load_point_features_from_compacts(
         compact_paths=data.compact_paths,
@@ -132,6 +143,15 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         include_id_features=bool(args.include_id_features),
         allow_shape4_fallback=bool(args.allow_shape4_point_feature_fallback),
     )
+    point_feature_names = list(point_meta.get("feature_names", [f"point_feature_{i}" for i in range(point_raw.shape[-1])]))
+    point_raw, point_scale_meta = transform_point_features_for_scale(
+        point_raw,
+        point_feature_names,
+        data.length_scale,
+        scale_mode=scale_mode,
+        detj_scale_dim=int(args.detj_scale_dim),
+    )
+    point_meta = {**point_meta, "scale_transform": point_scale_meta}
     if point_raw.shape[:2] != le_raw.shape[:2]:
         raise ValueError(f"point features {point_raw.shape[:2]} do not align with LE labels {le_raw.shape[:2]}")
 
@@ -215,6 +235,19 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 "val_frames": int(val_idx.size),
                 "point_meta": point_meta,
                 "branch_meta": branch_meta,
+                "scale_meta": {
+                    "scale_mode": scale_mode,
+                    "length_scale_source": data.length_scale_source,
+                    "length_scale_min": float(np.min(data.length_scale)),
+                    "length_scale_max": float(np.max(data.length_scale)),
+                    "q_branch_coordinate": branch_meta.get("q_coordinate"),
+                    "b_label_coordinate": str(args.b_label_coordinate),
+                    "b_scale_meta": b_scale_meta,
+                    "physical_normalization": (
+                        "normalized: identity; physical: q_hat=q/H, X_hat=X/H, "
+                        "J_hat=J/H, invJ_hat=H*invJ, detJ_hat=detJ/H^detj_scale_dim, B_hat=H*B_phys"
+                    ),
+                },
                 "b_global_rms": b_global_rms,
                 "init_report": init_report,
                 "generic_point_contract": True,
@@ -301,8 +334,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         do_eval = epoch == 1 or epoch % int(args.eval_every) == 0 or epoch == int(args.epochs)
         if do_eval and is_main:
             eval_model = _unwrap(model)
-            row.update(evaluate(eval_model, x_norm, point_norm, le_raw, b_raw, j_norm_target, train_eval_idx, norms, device, int(args.eval_batch_size), eval_columns, str(args.jacobian_method), "train"))
-            row.update(evaluate(eval_model, x_norm, point_norm, le_raw, b_raw, j_norm_target, val_eval_idx, norms, device, int(args.eval_batch_size), eval_columns, str(args.jacobian_method), "val"))
+            row.update(evaluate(eval_model, x_norm, point_norm, le_raw, b_train, j_norm_target, train_eval_idx, norms, device, int(args.eval_batch_size), eval_columns, str(args.jacobian_method), "train"))
+            row.update(evaluate(eval_model, x_norm, point_norm, le_raw, b_train, j_norm_target, val_eval_idx, norms, device, int(args.eval_batch_size), eval_columns, str(args.jacobian_method), "val"))
             row["score"] = float(row.get("val_LE_rel", row["loss"])) + float(row.get("val_AD_B_rel", 0.0))
             if float(row["score"]) < best_score:
                 best_score = float(row["score"])
@@ -313,6 +346,11 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                         "args": vars(args),
                         "target_ips": target_ips,
                         "point_meta": point_meta,
+                        "scale_meta": {
+                            "scale_mode": scale_mode,
+                            "length_scale_source": data.length_scale_source,
+                            "b_scale_meta": b_scale_meta,
+                        },
                         "best_score": best_score,
                         "epoch": epoch,
                     },
@@ -339,6 +377,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--branch-feature-mode", default="xkeep-qraw", choices=["shape4-qraw", "xkeep-qraw", "xnodes-qraw"])
     p.add_argument("--point-feature-source", default="data", choices=["data", "auto", "shape4-audited", "shape4"])
     p.add_argument("--allow-shape4-point-feature-fallback", action="store_true")
+    p.add_argument("--scale-mode", default="normalized", choices=["normalized", "physical"])
+    p.add_argument("--b-label-coordinate", default="auto", choices=["auto", "physical", "dimensionless"])
+    p.add_argument("--detj-scale-dim", type=int, default=3)
     p.add_argument("--epochs", type=int, default=120)
     p.add_argument("--batch-size", type=int, default=4)
     p.add_argument("--eval-batch-size", type=int, default=1)

@@ -84,6 +84,34 @@ AD B         = d(LE_norm)/d(q48_norm)               # [B,P,6,48]
 nodes.  These are the macro-level geometric coordinates visible together with
 `q48_raw`; the 34 non-control CSS8 grid nodes are not Branch inputs.
 
+Length scaling is handled before the usual machine-learning mean/std
+standardization.  Current TRUE176 compacts are dimensionless and use:
+
+```text
+scale_mode = normalized
+H = 1
+q_coordinate = q48_raw in normalized length
+B_label = dLE/dq48_raw
+```
+
+For future physical-size compacts, provide `H`/`length_scale` and use
+`--scale-mode physical`.  The trainer then uses:
+
+```text
+q_hat    = q48_raw / H
+X_hat    = X_keep / H
+x_hat    = x / H
+J_hat    = J / H
+invJ_hat = H * invJ
+detJ_hat = detJ / H^3
+B_hat    = H * B_phys
+```
+
+The Sobolev loss is trained against `B_hat = dLE/dq_hat`, then the normal ML
+standardization uses `mean/std` on the already dimensionless branch/trunk
+features.  `H` may be added as a separate physical parameter later, but it is
+not needed to repair pure geometric similarity scaling.
+
 For generic data, trunk features should be stored in the compact data as
 `point_features`, `ip_xyz`, `ip_J`, `ip_detJ`, etc.  For the current TRUE176
 20260620 compacts, `X_keep`, `X_macro`, and those trunk fields were omitted, but
@@ -221,6 +249,7 @@ OUT_DIR=$BASE/run_logs_128ip_fullframe_20260620/deeponet_true176_128ip_sobolev_d
 COMPACT_LIST=                  # optional override
 POINT_FEATURE_SOURCE=shape4-audited
 BRANCH_FEATURE_MODE=xkeep-qraw
+SCALE_MODE=normalized
 NPROC=3
 BATCH_SIZE=4
 JAC_COLS_PER_GPU=8

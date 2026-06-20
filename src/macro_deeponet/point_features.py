@@ -33,7 +33,7 @@ from typing import Any, Iterable
 
 import numpy as np
 
-from .true176_data import build_point_features_unique, standard_css8_row_map
+from .true176_data import build_point_features_unique, canonical_scale_mode, length_scale_column, standard_css8_row_map
 
 FEATURE_KEYS = ("point_features", "ip_features", "trunk_features")
 FEATURE_NAME_KEYS = ("point_feature_names", "ip_feature_names", "trunk_feature_names")
@@ -124,6 +124,69 @@ def _id_features(target_ips: list[int], batch: int) -> tuple[np.ndarray, list[st
         "elem_x_center_id",
         "elem_y_center_id",
     ]
+
+
+def transform_point_features_for_scale(
+    point: np.ndarray,
+    feature_names: list[str],
+    length_scale: np.ndarray,
+    *,
+    scale_mode: str,
+    detj_scale_dim: int = 3,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Convert physical point fields to dimensionless isoparametric features.
+
+    This operates by feature name.  Raw-field names such as ``ip_xyz_*``,
+    ``ip_J_*``, ``ip_invJ_*`` and ``ip_detJ`` are treated as physical fields.
+    Existing ``*_hat`` features are assumed already dimensionless.
+    """
+
+    mode = canonical_scale_mode(scale_mode)
+    arr = np.asarray(point, dtype=np.float32).copy()
+    names = [str(v) for v in feature_names]
+    if arr.shape[-1] != len(names):
+        raise ValueError(f"point feature dimension {arr.shape[-1]} does not match feature_names length {len(names)}")
+    h = length_scale_column(length_scale, arr.shape[0]).reshape(arr.shape[0], 1)
+    if mode == "normalized":
+        return arr, {
+            "scale_mode": mode,
+            "point_feature_scale_transform": "identity",
+            "H_min": float(np.min(h)),
+            "H_max": float(np.max(h)),
+        }
+
+    h_point = h.reshape(arr.shape[0], 1)
+    transformed: list[dict[str, Any]] = []
+    det_dim = int(detj_scale_dim)
+    for i, name in enumerate(names):
+        low = name.lower()
+        if "_hat" in low or low.endswith("hat"):
+            continue
+        if low.startswith(("ip_xyz_", "ip_coords_", "ip_coordinates_", "integration_point_xyz_", "gauss_xyz_")):
+            arr[:, :, i] = arr[:, :, i] / h_point
+            transformed.append({"feature": name, "rule": "divide_by_H"})
+        elif low.startswith(("ip_j_", "ip_jacobian_", "j128_", "jmat_", "ip_jmat_")):
+            arr[:, :, i] = arr[:, :, i] / h_point
+            transformed.append({"feature": name, "rule": "divide_by_H"})
+        elif low.startswith(("ip_invj_", "ip_inverse_jacobian_", "invj128_", "invj_", "ip_invj_")):
+            arr[:, :, i] = arr[:, :, i] * h_point
+            transformed.append({"feature": name, "rule": "multiply_by_H"})
+        elif low in {"ip_detj", "detj128", "detj", "ip_detj"} or low.startswith(("ip_detj_", "detj128_", "detj_")):
+            arr[:, :, i] = arr[:, :, i] / (h_point ** det_dim)
+            transformed.append({"feature": name, "rule": f"divide_by_H^{det_dim}"})
+        elif low in {"log_abs_detj", "log_abs_ip_detj", "ip_log_abs_detj"}:
+            arr[:, :, i] = arr[:, :, i] - float(det_dim) * np.log(h_point)
+            transformed.append({"feature": name, "rule": f"subtract_{det_dim}_logH"})
+
+    return arr.astype(np.float32), {
+        "scale_mode": mode,
+        "point_feature_scale_transform": "physical_to_dimensionless_by_feature_name",
+        "detJ_scale_dim": det_dim,
+        "transformed_feature_count": int(len(transformed)),
+        "transformed_features": transformed[:64],
+        "H_min": float(np.min(h)),
+        "H_max": float(np.max(h)),
+    }
 
 
 def _shape4_audited_features(

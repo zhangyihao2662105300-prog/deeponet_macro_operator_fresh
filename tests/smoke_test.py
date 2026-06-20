@@ -16,7 +16,7 @@ from macro_deeponet.geometry import (
     shape_functions_hex8,
 )
 from macro_deeponet.models import MacroDeepONet, True176Shape4QrawDeepONet
-from macro_deeponet.point_features import load_point_features_from_compacts
+from macro_deeponet.point_features import load_point_features_from_compacts, transform_point_features_for_scale
 from macro_deeponet.true176_data import (
     build_branch_features,
     build_keep_node_coords_unique,
@@ -24,6 +24,7 @@ from macro_deeponet.true176_data import (
     keep_node_ids,
     load_compacts,
     load_one_compact,
+    transform_b_target_for_q_coordinate,
 )
 from macro_deeponet.train_true176_deeponet_sobolev import ad_jacobian
 
@@ -154,6 +155,53 @@ def test_true176_loader_uses_explicit_xkeep_when_available() -> None:
         assert branch.shape == (n, 96)
         assert branch_meta["macro_geometry_source"] == "compact_X_keep"
         assert np.allclose(branch[:, 48:].reshape(n, 16, 3), x_keep.reshape(1, 16, 3))
+
+
+def test_true176_physical_scale_transforms_branch_and_b() -> None:
+    shape4 = np.zeros((2, 4), dtype=np.float32)
+    q48 = np.full((2, 48), 2.0, dtype=np.float32)
+    x_keep = np.full((2, 16, 3), 4.0, dtype=np.float32)
+    h = np.asarray([[2.0], [4.0]], dtype=np.float32)
+
+    branch, branch_meta = build_branch_features(
+        shape4=shape4,
+        q48_raw=q48,
+        mode="xkeep-qraw",
+        keep_node_coords=x_keep,
+        length_scale=h,
+        scale_mode="physical",
+    )
+    assert branch_meta["scale_mode"] == "physical"
+    assert branch_meta["q_coordinate"] == "q_hat=q48_raw/H"
+    assert np.allclose(branch[0, :48], 1.0)
+    assert np.allclose(branch[1, :48], 0.5)
+    assert np.allclose(branch[0, 48:].reshape(16, 3), 2.0)
+    assert np.allclose(branch[1, 48:].reshape(16, 3), 1.0)
+
+    b_phys = np.full((2, 3, 6, 48), 3.0, dtype=np.float32)
+    b_hat, meta = transform_b_target_for_q_coordinate(
+        b_phys,
+        h,
+        scale_mode="physical",
+        b_label_coordinate="physical",
+    )
+    assert meta["b_target_transform"] == "H * B_phys"
+    assert np.allclose(b_hat[0], 6.0)
+    assert np.allclose(b_hat[1], 12.0)
+
+
+def test_true176_physical_scale_transforms_raw_point_fields() -> None:
+    point = np.asarray([[[2.0, 4.0, 0.25, 8.0]]], dtype=np.float32)
+    names = ["ip_xyz_x", "ip_J_00", "ip_invJ_00", "ip_detJ"]
+    scaled, meta = transform_point_features_for_scale(
+        point,
+        names,
+        np.asarray([[2.0]], dtype=np.float32),
+        scale_mode="physical",
+        detj_scale_dim=3,
+    )
+    assert meta["transformed_feature_count"] == 4
+    assert np.allclose(scaled[0, 0], [1.0, 2.0, 0.5, 1.0])
 
 
 def test_true176_full_xnodes_branch_is_available_as_ablation() -> None:
@@ -296,6 +344,8 @@ if __name__ == "__main__":
     test_true176_xkeep_branch_and_ad_shapes()
     test_true176_keep_node_order_matches_q48_contract()
     test_true176_loader_uses_explicit_xkeep_when_available()
+    test_true176_physical_scale_transforms_branch_and_b()
+    test_true176_physical_scale_transforms_raw_point_fields()
     test_true176_full_xnodes_branch_is_available_as_ablation()
     test_true176_loader_rejects_non_full48_b()
     test_generic_point_feature_loader_reads_real_fields()

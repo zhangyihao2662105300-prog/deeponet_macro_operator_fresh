@@ -41,6 +41,15 @@ NODE_SIGNS = np.asarray(
     ],
     dtype=np.float64,
 )
+LENGTH_SCALE_KEYS = (
+    "H",
+    "length_scale",
+    "length_scale_H",
+    "scale_H",
+    "element_H",
+    "element_length",
+    "macro_length_scale",
+)
 
 
 @dataclass(frozen=True)
@@ -50,6 +59,8 @@ class True176Arrays:
     q48_raw: np.ndarray
     le: np.ndarray
     b: np.ndarray
+    length_scale: np.ndarray
+    length_scale_source: str
     keep_node_coords: np.ndarray | None
     macro_nodes: np.ndarray | None
     sample_index: np.ndarray
@@ -65,6 +76,79 @@ def stats(arr: np.ndarray, axis: tuple[int, ...] | int, floor: float = 1.0e-8) -
     mean = vals.mean(axis=axis, keepdims=True).astype(np.float32)
     std = vals.std(axis=axis, keepdims=True).astype(np.float32)
     return mean, np.maximum(std, np.asarray(float(floor), dtype=np.float32)).astype(np.float32)
+
+
+def canonical_scale_mode(mode: str) -> str:
+    key = str(mode).strip().lower().replace("_", "-")
+    if key in {"normalized", "dimensionless", "hat"}:
+        return "normalized"
+    if key in {"physical", "dimensional"}:
+        return "physical"
+    raise ValueError("scale_mode must be normalized or physical")
+
+
+def length_scale_column(length_scale: np.ndarray | None, n: int) -> np.ndarray:
+    if length_scale is None:
+        out = np.ones((int(n), 1), dtype=np.float32)
+    else:
+        vals = np.asarray(length_scale, dtype=np.float32)
+        if vals.ndim == 0:
+            out = np.full((int(n), 1), float(vals), dtype=np.float32)
+        elif vals.shape == (1,):
+            out = np.full((int(n), 1), float(vals.reshape(-1)[0]), dtype=np.float32)
+        elif vals.shape == (int(n),):
+            out = vals.reshape(int(n), 1).astype(np.float32)
+        elif vals.shape == (int(n), 1):
+            out = vals.astype(np.float32)
+        else:
+            raise ValueError(f"length_scale must be scalar, [N], or [N,1]; got {vals.shape} for N={n}")
+    if np.any(~np.isfinite(out)) or np.any(out <= 0.0):
+        raise ValueError("length_scale/H must be finite and positive")
+    return out
+
+
+def transform_b_target_for_q_coordinate(
+    b_raw: np.ndarray,
+    length_scale: np.ndarray,
+    *,
+    scale_mode: str,
+    b_label_coordinate: str = "auto",
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Return B target in the same coordinate used by the branch q slice.
+
+    In physical scale mode the branch uses q_hat=q_phys/H, so a physical label
+    dLE/dq_phys must be multiplied by H to become dLE/dq_hat.
+    """
+
+    mode = canonical_scale_mode(scale_mode)
+    b = np.asarray(b_raw, dtype=np.float32)
+    h = length_scale_column(length_scale, b.shape[0]).reshape(b.shape[0], 1, 1, 1)
+    coord = str(b_label_coordinate).strip().lower().replace("_", "-")
+    if coord == "auto":
+        coord = "physical" if mode == "physical" else "dimensionless"
+    if coord in {"normalized", "dimensionless", "hat", "q-hat"}:
+        target = b
+        transform = "identity"
+        target_coordinate = "dLE/dq_hat" if mode == "physical" else "dLE/dq48_raw_normalized"
+    elif coord in {"physical", "dimensional", "q-phys"}:
+        if mode == "physical":
+            target = b * h
+            transform = "H * B_phys"
+            target_coordinate = "dLE/dq_hat"
+        else:
+            target = b
+            transform = "identity_physical_equals_normalized_H1"
+            target_coordinate = "dLE/dq48_raw_normalized"
+    else:
+        raise ValueError("b_label_coordinate must be auto, physical, or dimensionless")
+    return target.astype(np.float32), {
+        "scale_mode": mode,
+        "input_b_label_coordinate": coord,
+        "training_b_coordinate": target_coordinate,
+        "b_target_transform": transform,
+        "H_min": float(np.min(h)),
+        "H_max": float(np.max(h)),
+    }
 
 
 def parse_int_list(text: str, *, default: list[int] | None = None) -> list[int]:
@@ -134,6 +218,13 @@ def load_one_compact(path: str | Path, *, frame_stride: int = 1, max_frames: int
         sample_index, frame_number, case_id = sample_meta(n_total, sample_paths)
         le_key = "LE128_base" if "LE128_base" in z.files else "le"
         b_key = "B_LE128_forward" if "B_LE128_forward" in z.files else "b"
+        length_scale = np.ones((idx.size, 1), dtype=np.float32)
+        length_scale_source = "implicit_H_1"
+        for h_key in LENGTH_SCALE_KEYS:
+            if h_key in z.files:
+                length_scale = length_scale_column(np.asarray(z[h_key], dtype=np.float32), n_total)[idx]
+                length_scale_source = h_key
+                break
         keep_node_coords = None
         for keep_key in (
             "X_keep",
@@ -172,6 +263,8 @@ def load_one_compact(path: str | Path, *, frame_stride: int = 1, max_frames: int
             "q48_raw": require_shape(z, "q48_raw", (48,), n_total)[idx],
             "le": require_shape(z, le_key, (128, 6), n_total)[idx],
             "b": require_shape(z, b_key, (128, 6, 48), n_total)[idx],
+            "length_scale": length_scale,
+            "length_scale_source": length_scale_source,
             "keep_node_coords": keep_node_coords,
             "macro_nodes": macro_nodes,
             "sample_index": sample_index[idx],
@@ -203,6 +296,7 @@ def load_compacts(paths: Iterable[str], *, frame_stride: int = 1, max_frames_per
         keep_node_coords = None
     else:
         raise ValueError("Either every compact must provide X_keep/coords48/keep_node_coords, or none of them should.")
+    length_scale_sources = sorted({str(c["length_scale_source"]) for c in chunks})
     _, shape_index = np.unique(shape4, axis=0, return_inverse=True)
     return True176Arrays(
         compact_paths=[str(c["compact_path"]) for c in chunks],
@@ -210,6 +304,8 @@ def load_compacts(paths: Iterable[str], *, frame_stride: int = 1, max_frames_per
         q48_raw=np.concatenate([c["q48_raw"] for c in chunks], axis=0),
         le=np.concatenate([c["le"] for c in chunks], axis=0),
         b=np.concatenate([c["b"] for c in chunks], axis=0),
+        length_scale=length_scale_column(np.concatenate([c["length_scale"] for c in chunks], axis=0), shape4.shape[0]),
+        length_scale_source="+".join(length_scale_sources),
         keep_node_coords=keep_node_coords,
         macro_nodes=macro_nodes,
         sample_index=np.concatenate([c["sample_index"] for c in chunks], axis=0),
@@ -423,17 +519,32 @@ def build_branch_features(
     mode: str,
     keep_node_coords: np.ndarray | None = None,
     macro_nodes: np.ndarray | None = None,
+    length_scale: np.ndarray | None = None,
+    scale_mode: str = "normalized",
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Build branch features and record where the q48 slice lives."""
 
     key = str(mode).strip().lower().replace("_", "-")
+    scale_key = canonical_scale_mode(scale_mode)
     shape = np.asarray(shape4, dtype=np.float32).reshape(-1, 4)
-    q = np.asarray(q48_raw, dtype=np.float32).reshape(-1, 48)
-    if shape.shape[0] != q.shape[0]:
-        raise ValueError(f"shape4 frame count {shape.shape[0]} does not match q48 frame count {q.shape[0]}")
+    q_raw = np.asarray(q48_raw, dtype=np.float32).reshape(-1, 48)
+    if shape.shape[0] != q_raw.shape[0]:
+        raise ValueError(f"shape4 frame count {shape.shape[0]} does not match q48 frame count {q_raw.shape[0]}")
+    h_col = length_scale_column(length_scale, q_raw.shape[0])
+    h3 = h_col.reshape(-1, 1, 1)
+    q = q_raw / h_col if scale_key == "physical" else q_raw
+    scale_meta = {
+        "scale_mode": scale_key,
+        "length_scale_mode": "explicit_H_physical_to_dimensionless" if scale_key == "physical" else "implicit_or_already_dimensionless_H1",
+        "H_min": float(np.min(h_col)),
+        "H_max": float(np.max(h_col)),
+        "q_coordinate": "q_hat=q48_raw/H" if scale_key == "physical" else "q48_raw_in_normalized_length",
+        "geometry_units": "dimensionless_hat" if scale_key == "physical" else "already_dimensionless_or_dataset_units",
+    }
     if key == "shape4-qraw":
         x = np.concatenate([shape, q], axis=1).astype(np.float32)
         return x, {
+            **scale_meta,
             "branch_mode": "shape4-qraw",
             "branch_dim": int(x.shape[1]),
             "q_start": 4,
@@ -443,8 +554,10 @@ def build_branch_features(
     if key == "xkeep-qraw":
         if keep_node_coords is not None:
             keep = np.asarray(keep_node_coords, dtype=np.float32).reshape(-1, 16, 3)
-            if keep.shape[0] != q.shape[0]:
-                raise ValueError(f"X_keep frame count {keep.shape[0]} does not match q48 frame count {q.shape[0]}")
+            if keep.shape[0] != q_raw.shape[0]:
+                raise ValueError(f"X_keep frame count {keep.shape[0]} does not match q48 frame count {q_raw.shape[0]}")
+            if scale_key == "physical":
+                keep = keep / h3
             meta = {
                 "keep_node_count": 16,
                 "keep_node_ids": keep_node_ids().astype(np.int64),
@@ -454,8 +567,10 @@ def build_branch_features(
             }
         elif macro_nodes is not None:
             nodes = np.asarray(macro_nodes, dtype=np.float32).reshape(-1, 50, 3)
-            if nodes.shape[0] != q.shape[0]:
-                raise ValueError(f"X_macro frame count {nodes.shape[0]} does not match q48 frame count {q.shape[0]}")
+            if nodes.shape[0] != q_raw.shape[0]:
+                raise ValueError(f"X_macro frame count {nodes.shape[0]} does not match q48 frame count {q_raw.shape[0]}")
+            if scale_key == "physical":
+                nodes = nodes / h3
             ids = keep_node_ids()
             keep = nodes[:, ids - 1, :]
             meta = {
@@ -468,10 +583,13 @@ def build_branch_features(
             }
         else:
             keep, meta = build_keep_node_coords_unique(shape)
+            if scale_key == "physical":
+                keep = keep / h3
         x_keep_flat = keep.reshape(keep.shape[0], -1).astype(np.float32)
         x = np.concatenate([q, x_keep_flat], axis=1).astype(np.float32)
         return x, {
             **meta,
+            **scale_meta,
             "branch_mode": "xkeep-qraw",
             "branch_dim": int(x.shape[1]),
             "q_start": 0,
@@ -485,18 +603,21 @@ def build_branch_features(
             nodes, meta = build_macro_node_coords_unique(shape)
         else:
             nodes = np.asarray(macro_nodes, dtype=np.float32).reshape(-1, 50, 3)
-            if nodes.shape[0] != q.shape[0]:
-                raise ValueError(f"X_macro frame count {nodes.shape[0]} does not match q48 frame count {q.shape[0]}")
+            if nodes.shape[0] != q_raw.shape[0]:
+                raise ValueError(f"X_macro frame count {nodes.shape[0]} does not match q48 frame count {q_raw.shape[0]}")
             meta = {
                 "macro_node_count": 50,
                 "unique_shape4_count": int(np.unique(shape, axis=0).shape[0]) if shape.shape[0] else 0,
                 "macro_geometry_source": "compact_X_macro",
                 "node_order": "provided by compact; must match the element connectivity contract",
             }
+        if scale_key == "physical":
+            nodes = nodes / h3
         x_nodes_flat = nodes.reshape(nodes.shape[0], -1).astype(np.float32)
         x = np.concatenate([q, x_nodes_flat], axis=1).astype(np.float32)
         return x, {
             **meta,
+            **scale_meta,
             "branch_mode": "xnodes-qraw",
             "branch_dim": int(x.shape[1]),
             "q_start": 0,

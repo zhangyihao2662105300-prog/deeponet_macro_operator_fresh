@@ -29,6 +29,51 @@ B_LE128_forward[n, i, :, :]
 
 must describe the same physical integration point.
 
+## Length Scale Contract
+
+Geometry scaling is part of the isoparametric map, not just metadata.  The
+trainer therefore has two separate normalization layers:
+
+```text
+physical nondimensionalization:
+  X_hat    = X / H
+  q_hat    = q / H
+  x_hat    = x / H
+  J_hat    = J / H
+  invJ_hat = H * invJ
+  detJ_hat = detJ / H^3       # default for 3D CSS8 integration
+  B_hat    = H * B_phys       # because B_phys = dLE/dq_phys
+
+machine-learning standardization:
+  z_norm = (z_hat - mean) / std
+```
+
+Current TRUE176 compacts are treated as:
+
+```text
+scale_mode = normalized
+H = 1
+q_coordinate = q48_raw in normalized length
+B_LE128_forward = dLE/dq48_raw
+```
+
+Future physical-size compacts may provide:
+
+```text
+H / length_scale / macro_length_scale: [N] or [N,1]
+```
+
+and should train with:
+
+```bash
+--scale-mode physical
+--b-label-coordinate physical
+```
+
+If a shell formulation uses anisotropic in-plane/thickness scales or a 2D
+surface integration rule, the determinant exponent must be changed from the
+default `--detj-scale-dim 3` to the actual integration measure.
+
 ## Preferred fields
 
 The preferred compact schema is to store q48 control-node geometry and point

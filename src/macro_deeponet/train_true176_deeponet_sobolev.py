@@ -419,7 +419,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             le_loss = nn.functional.mse_loss(le_pred, leb)
             columns = sample_columns(train_columns_all, int(args.jacobian_columns_per_batch), col_rng)
             if columns:
-                j_pred = ad_jacobian(unwrap_model(model), xb, pb, columns, create_graph=True, method=str(args.jacobian_method))
+                # Use the DDP wrapper during training so the Sobolev-AD branch participates in normal DDP gradient synchronization.
+                j_pred = ad_jacobian(model, xb, pb, columns, create_graph=True, method=str(args.jacobian_method))
                 j_true = jb[:, :, :, columns]
                 j_norm_loss = nn.functional.mse_loss(j_pred, j_true)
                 q_std_cols = torch.as_tensor(q_std_np[np.asarray(columns, dtype=np.int64)], dtype=torch.float32, device=device)

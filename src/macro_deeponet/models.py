@@ -35,8 +35,25 @@ class MLP(nn.Module):
         return self.net(x)
 
 
+def activation_module(name: str) -> type[nn.Module]:
+    key = str(name).strip().lower()
+    if key == "tanh":
+        return nn.Tanh
+    if key == "silu":
+        return nn.SiLU
+    if key == "gelu":
+        return nn.GELU
+    if key == "relu":
+        return nn.ReLU
+    raise ValueError(f"unknown activation {name!r}")
+
+
 class MacroDeepONet(nn.Module):
-    """Geometry-conditioned DeepONet for ``(q_b, X)(xi) -> strain``."""
+    """Geometry-conditioned DeepONet for ``(q_b, X)(xi) -> strain``.
+
+    This is the original clean Hex8 prototype.  The TRUE176/CSS8 production-facing
+    model is ``True176Shape4QrawDeepONet`` below.
+    """
 
     def __init__(
         self,
@@ -101,3 +118,83 @@ class MacroDeepONet(nn.Module):
         b = self.branch(branch_in).view(-1, self.strain_dim, self.basis_dim)
         t = self.trunk(trunk_in).view(-1, self.strain_dim, self.basis_dim)
         return (b * t).sum(dim=-1) / (self.basis_dim**0.5) + self.bias
+
+
+class True176Shape4QrawDeepONet(nn.Module):
+    """DeepONet aligned with the current TRUE176/CSS8 128-IP Sobolev contract.
+
+    Contract, matching the fc4117d launcher/trainer in NNSE-NeuralNetworkShellElement:
+
+        branch input  x_norm    = standardized [shape4(4), q48_raw(48)] -> [B, 52]
+        trunk input   point_norm = standardized 128-IP geometry/features -> [B, P, F]
+        output        LE_norm    = standardized LE -> [B, P, 6]
+
+    The Sobolev/B label is not an independent output.  It is obtained by AD as
+    d(LE_norm)/d(q48_norm), then de-normalized outside the model.
+
+    A learnable q-skip term is included because the current 128-IP trainer uses a
+    strong linear-in-q baseline before the nonlinear residual.  This keeps the
+    DeepONet version compatible with the present Sobolev training behavior while
+    still using branch/trunk operator factorization for the residual field.
+    """
+
+    def __init__(
+        self,
+        *,
+        input_dim: int = 52,
+        point_dim: int,
+        ip_count: int = 128,
+        strain_dim: int = 6,
+        basis_dim: int = 96,
+        hidden_dim: int = 384,
+        branch_depth: int = 5,
+        trunk_depth: int = 5,
+        activation: str = "tanh",
+        skip_init: torch.Tensor | None = None,
+        train_skip: bool = True,
+        residual_scale: float = 1.0,
+    ) -> None:
+        super().__init__()
+        if input_dim < 52:
+            raise ValueError("TRUE176 input_dim must include shape4[4] + q48_raw[48]")
+        if point_dim <= 0:
+            raise ValueError("point_dim must be positive for the 128-IP DeepONet trunk")
+        self.input_dim = int(input_dim)
+        self.point_dim = int(point_dim)
+        self.ip_count = int(ip_count)
+        self.strain_dim = int(strain_dim)
+        self.basis_dim = int(basis_dim)
+        self.residual_scale = float(residual_scale)
+
+        act = activation_module(activation)
+        coeff_dim = self.strain_dim * self.basis_dim
+        self.branch = MLP(self.input_dim, coeff_dim, hidden_dim=hidden_dim, depth=branch_depth, activation=act)
+        self.trunk = MLP(self.point_dim, coeff_dim, hidden_dim=hidden_dim, depth=trunk_depth, activation=act)
+        self.bias = nn.Parameter(torch.zeros(self.strain_dim))
+
+        if skip_init is None:
+            skip = torch.zeros(self.ip_count, self.strain_dim, 48, dtype=torch.float32)
+        else:
+            skip = torch.as_tensor(skip_init, dtype=torch.float32).reshape(self.ip_count, self.strain_dim, 48)
+        self.skip_weight = nn.Parameter(skip, requires_grad=bool(train_skip))
+
+    def forward(self, x_norm: torch.Tensor, point_norm: torch.Tensor) -> torch.Tensor:
+        if x_norm.ndim != 2:
+            raise ValueError("x_norm must have shape [B,52]")
+        if point_norm.ndim != 3:
+            raise ValueError("point_norm must have shape [B,P,F]")
+        if x_norm.shape[-1] != self.input_dim:
+            raise ValueError(f"x_norm last dimension must be {self.input_dim}")
+        if point_norm.shape[-1] != self.point_dim:
+            raise ValueError(f"point_norm last dimension must be {self.point_dim}")
+        if point_norm.shape[1] != self.ip_count:
+            raise ValueError(f"point_norm point count must be {self.ip_count}")
+
+        qn = x_norm[:, 4:52]
+        skip = torch.einsum("paj,bj->bpa", self.skip_weight, qn)
+        b = self.branch(x_norm).view(-1, self.strain_dim, self.basis_dim)
+        t = self.trunk(point_norm.reshape(-1, self.point_dim)).view(
+            x_norm.shape[0], self.ip_count, self.strain_dim, self.basis_dim
+        )
+        residual = torch.einsum("bak,bpak->bpa", b, t) / (self.basis_dim**0.5)
+        return skip + self.residual_scale * residual + self.bias.view(1, 1, self.strain_dim)

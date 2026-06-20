@@ -126,9 +126,13 @@ class True176Shape4QrawDeepONet(nn.Module):
     Contract, matching the fc4117d launcher/trainer in NNSE-NeuralNetworkShellElement:
 
         branch input  x_norm    = standardized branch state -> [B, input_dim]
-                                = [shape4,q48] legacy or [q48,X_macro] isoparametric
+                                = [shape4,q48] legacy or [q48,X_keep] isoparametric
         trunk input   point_norm = standardized 128-IP geometry/features -> [B, P, F]
         output        LE_norm    = standardized LE -> [B, P, 6]
+
+    The current macro-visible default is [q48_raw(48), X_keep(16,3)] with
+    input_dim=96.  The older [shape4,q48] route and the full [q48,X_macro]
+    ablation can still be selected by the data loader.
 
     The Sobolev/B label is not an independent output.  It is obtained by AD as
     d(LE_norm)/d(q48_norm), then de-normalized outside the model.
@@ -187,7 +191,7 @@ class True176Shape4QrawDeepONet(nn.Module):
 
     def forward(self, x_norm: torch.Tensor, point_norm: torch.Tensor) -> torch.Tensor:
         if x_norm.ndim != 2:
-            raise ValueError("x_norm must have shape [B,52]")
+            raise ValueError(f"x_norm must have shape [B,{self.input_dim}]")
         if point_norm.ndim != 3:
             raise ValueError("point_norm must have shape [B,P,F]")
         if x_norm.shape[-1] != self.input_dim:

@@ -107,6 +107,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         shape4=data.shape4,
         q48_raw=data.q48_raw,
         mode=str(args.branch_feature_mode),
+        keep_node_coords=data.keep_node_coords,
         macro_nodes=data.macro_nodes,
     )
     le_raw = data.le[:, target_ips, :].astype(np.float32)
@@ -335,7 +336,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--compact-list", default="")
     p.add_argument("--out-dir", type=Path, required=True)
     p.add_argument("--target-ips", default=",".join(str(i) for i in range(128)))
-    p.add_argument("--branch-feature-mode", default="xnodes-qraw", choices=["shape4-qraw", "xnodes-qraw"])
+    p.add_argument("--branch-feature-mode", default="xkeep-qraw", choices=["shape4-qraw", "xkeep-qraw", "xnodes-qraw"])
     p.add_argument("--point-feature-source", default="data", choices=["data", "auto", "shape4-audited", "shape4"])
     p.add_argument("--allow-shape4-point-feature-fallback", action="store_true")
     p.add_argument("--epochs", type=int, default=120)

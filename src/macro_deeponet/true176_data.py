@@ -4,7 +4,7 @@ This module mirrors the current NNSE training contract without depending on the
 large NNSE repository at runtime:
 
     legacy branch = [shape4(4), q48_raw(48)]
-    current generic branch = [q48_raw(48), X_macro(50,3)]
+    current generic branch = [q48_raw(48), X_keep(16,3)]
     LE     = LE128_base          -> [frames, 128, 6]
     B      = B_LE128_forward     -> [frames, 128, 6, 48]
 
@@ -50,6 +50,7 @@ class True176Arrays:
     q48_raw: np.ndarray
     le: np.ndarray
     b: np.ndarray
+    keep_node_coords: np.ndarray | None
     macro_nodes: np.ndarray | None
     sample_index: np.ndarray
     frame_number: np.ndarray
@@ -133,6 +134,27 @@ def load_one_compact(path: str | Path, *, frame_stride: int = 1, max_frames: int
         sample_index, frame_number, case_id = sample_meta(n_total, sample_paths)
         le_key = "LE128_base" if "LE128_base" in z.files else "le"
         b_key = "B_LE128_forward" if "B_LE128_forward" in z.files else "b"
+        keep_node_coords = None
+        for keep_key in (
+            "X_keep",
+            "X_keep_ref",
+            "x_keep",
+            "xkeep",
+            "keep_node_coords",
+            "coords48",
+            "coords48_for_321",
+            "control_node_coords",
+            "control_nodes16",
+        ):
+            if keep_key in z.files:
+                raw_keep = np.asarray(z[keep_key], dtype=np.float32)
+                if raw_keep.shape == (16, 3):
+                    keep_node_coords = np.broadcast_to(raw_keep.reshape(1, 16, 3), (n_total, 16, 3)).copy()[idx]
+                elif raw_keep.shape == (n_total, 16, 3):
+                    keep_node_coords = raw_keep[idx]
+                else:
+                    raise ValueError(f"{compact}: expected {keep_key} shape [16,3] or [{n_total},16,3], got {raw_keep.shape}")
+                break
         macro_nodes = None
         for node_key in ("X_macro", "macro_node_coords", "x_macro", "macro_nodes", "nodes50"):
             if node_key in z.files:
@@ -150,6 +172,7 @@ def load_one_compact(path: str | Path, *, frame_stride: int = 1, max_frames: int
             "q48_raw": require_shape(z, "q48_raw", (48,), n_total)[idx],
             "le": require_shape(z, le_key, (128, 6), n_total)[idx],
             "b": require_shape(z, b_key, (128, 6, 48), n_total)[idx],
+            "keep_node_coords": keep_node_coords,
             "macro_nodes": macro_nodes,
             "sample_index": sample_index[idx],
             "frame_number": frame_number[idx],
@@ -174,6 +197,12 @@ def load_compacts(paths: Iterable[str], *, frame_stride: int = 1, max_frames_per
         macro_nodes = None
     else:
         raise ValueError("Either every compact must provide X_macro/macro_node_coords/nodes50, or none of them should.")
+    if all(c["keep_node_coords"] is not None for c in chunks):
+        keep_node_coords = np.concatenate([np.asarray(c["keep_node_coords"], dtype=np.float32) for c in chunks], axis=0)
+    elif all(c["keep_node_coords"] is None for c in chunks):
+        keep_node_coords = None
+    else:
+        raise ValueError("Either every compact must provide X_keep/coords48/keep_node_coords, or none of them should.")
     _, shape_index = np.unique(shape4, axis=0, return_inverse=True)
     return True176Arrays(
         compact_paths=[str(c["compact_path"]) for c in chunks],
@@ -181,6 +210,7 @@ def load_compacts(paths: Iterable[str], *, frame_stride: int = 1, max_frames_per
         q48_raw=np.concatenate([c["q48_raw"] for c in chunks], axis=0),
         le=np.concatenate([c["le"] for c in chunks], axis=0),
         b=np.concatenate([c["b"] for c in chunks], axis=0),
+        keep_node_coords=keep_node_coords,
         macro_nodes=macro_nodes,
         sample_index=np.concatenate([c["sample_index"] for c in chunks], axis=0),
         frame_number=np.concatenate([c["frame_number"] for c in chunks], axis=0),
@@ -349,11 +379,49 @@ def build_macro_node_coords_unique(shape4: np.ndarray) -> tuple[np.ndarray, dict
     }
 
 
+def keep_node_ids() -> np.ndarray:
+    keep: list[int] = []
+    for k in range(2):
+        for j in range(NY + 1):
+            for i in range(NX + 1):
+                if (int(i), int(j)) in {
+                    (0, 0),
+                    (NX // 2, 0),
+                    (NX, 0),
+                    (NX, NY // 2),
+                    (NX, NY),
+                    (NX // 2, NY),
+                    (0, NY),
+                    (0, NY // 2),
+                }:
+                    keep.append(node_id(i, j, k))
+    return np.asarray(keep, dtype=np.int64)
+
+
+def build_keep_node_coords_unique(shape4: np.ndarray) -> tuple[np.ndarray, dict[str, Any]]:
+    """Return coordinates of the 16 q48 control nodes as [N,16,3]."""
+
+    macro_nodes, meta = build_macro_node_coords_unique(shape4)
+    ids = keep_node_ids()
+    keep = macro_nodes[:, ids - 1, :]
+    source = str(meta.get("macro_geometry_source", "shape4_reconstructed_nodes"))
+    return keep.astype(np.float32), {
+        "unique_shape4_count": int(meta.get("unique_shape4_count", 0)),
+        "macro_geometry_source": source.replace("nodes", "keep_nodes") if "nodes" in source else source,
+        "reconstruction_macro_node_count": int(meta.get("macro_node_count", macro_nodes.shape[1])),
+        "keep_node_count": int(keep.shape[1]),
+        "keep_node_ids": ids.astype(np.int64),
+        "geometry_input": "X_keep[16,3]",
+        "node_order": "keep_nodes/q48 order",
+    }
+
+
 def build_branch_features(
     *,
     shape4: np.ndarray,
     q48_raw: np.ndarray,
     mode: str,
+    keep_node_coords: np.ndarray | None = None,
     macro_nodes: np.ndarray | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Build branch features and record where the q48 slice lives."""
@@ -371,6 +439,46 @@ def build_branch_features(
             "q_start": 4,
             "q_dim": 48,
             "geometry_input": "shape4[4]",
+        }
+    if key == "xkeep-qraw":
+        if keep_node_coords is not None:
+            keep = np.asarray(keep_node_coords, dtype=np.float32).reshape(-1, 16, 3)
+            if keep.shape[0] != q.shape[0]:
+                raise ValueError(f"X_keep frame count {keep.shape[0]} does not match q48 frame count {q.shape[0]}")
+            meta = {
+                "keep_node_count": 16,
+                "keep_node_ids": keep_node_ids().astype(np.int64),
+                "macro_geometry_source": "compact_X_keep",
+                "geometry_input": "X_keep[16,3]",
+                "node_order": "keep_nodes/q48 order",
+            }
+        elif macro_nodes is not None:
+            nodes = np.asarray(macro_nodes, dtype=np.float32).reshape(-1, 50, 3)
+            if nodes.shape[0] != q.shape[0]:
+                raise ValueError(f"X_macro frame count {nodes.shape[0]} does not match q48 frame count {q.shape[0]}")
+            ids = keep_node_ids()
+            keep = nodes[:, ids - 1, :]
+            meta = {
+                "keep_node_count": 16,
+                "keep_node_ids": ids.astype(np.int64),
+                "reconstruction_macro_node_count": 50,
+                "macro_geometry_source": "compact_X_macro_subset_keep_nodes",
+                "geometry_input": "X_keep[16,3]",
+                "node_order": "keep_nodes/q48 order",
+            }
+        else:
+            keep, meta = build_keep_node_coords_unique(shape)
+        x_keep_flat = keep.reshape(keep.shape[0], -1).astype(np.float32)
+        x = np.concatenate([q, x_keep_flat], axis=1).astype(np.float32)
+        return x, {
+            **meta,
+            "branch_mode": "xkeep-qraw",
+            "branch_dim": int(x.shape[1]),
+            "q_start": 0,
+            "q_dim": 48,
+            "geometry_input": "X_keep[16,3]",
+            "contract": "Branch=[q48_raw, X_keep_nodes]; Trunk=[xi, x(xi), J, invJ, detJ, ...]",
+            "visibility": "macro-element branch sees only q48 control-node coordinates",
         }
     if key == "xnodes-qraw":
         if macro_nodes is None:
@@ -396,7 +504,7 @@ def build_branch_features(
             "geometry_input": "X_macro[50,3]",
             "contract": "Branch=[q48_raw, X_macro_nodes]; Trunk=[xi, x(xi), J, invJ, detJ, ...]",
         }
-    raise ValueError("branch feature mode must be one of: shape4-qraw, xnodes-qraw")
+    raise ValueError("branch feature mode must be one of: shape4-qraw, xkeep-qraw, xnodes-qraw")
 
 
 def build_shape4_ip_geometry(shape4: np.ndarray) -> dict[str, np.ndarray]:

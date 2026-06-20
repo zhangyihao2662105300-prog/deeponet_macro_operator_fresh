@@ -17,7 +17,14 @@ from macro_deeponet.geometry import (
 )
 from macro_deeponet.models import MacroDeepONet, True176Shape4QrawDeepONet
 from macro_deeponet.point_features import load_point_features_from_compacts
-from macro_deeponet.true176_data import build_branch_features, build_point_features, load_one_compact
+from macro_deeponet.true176_data import (
+    build_branch_features,
+    build_keep_node_coords_unique,
+    build_point_features,
+    keep_node_ids,
+    load_compacts,
+    load_one_compact,
+)
 from macro_deeponet.train_true176_deeponet_sobolev import ad_jacobian
 
 
@@ -81,14 +88,15 @@ def test_true176_point_features_and_ad_shapes() -> None:
     assert torch.isfinite(j).all()
 
 
-def test_true176_xnodes_branch_and_ad_shapes() -> None:
+def test_true176_xkeep_branch_and_ad_shapes() -> None:
     shape4 = np.asarray([[1.2, 0.05, 0.10, 0.00], [1.4, 0.04, 0.08, 0.20]], dtype=np.float32)
     q48 = np.zeros((2, 48), dtype=np.float32)
-    branch, branch_meta = build_branch_features(shape4=shape4, q48_raw=q48, mode="xnodes-qraw")
+    branch, branch_meta = build_branch_features(shape4=shape4, q48_raw=q48, mode="xkeep-qraw")
     point, _meta = build_point_features(shape4, include_id_features=False)
-    assert branch.shape == (2, 198)
+    assert branch.shape == (2, 96)
     assert branch_meta["q_start"] == 0
-    assert branch_meta["geometry_input"] == "X_macro[50,3]"
+    assert branch_meta["geometry_input"] == "X_keep[16,3]"
+    assert branch_meta["visibility"] == "macro-element branch sees only q48 control-node coordinates"
 
     model = True176Shape4QrawDeepONet(
         input_dim=branch.shape[-1],
@@ -108,6 +116,52 @@ def test_true176_xnodes_branch_and_ad_shapes() -> None:
     j = ad_jacobian(model, x_norm, p_norm, [0, 3, 7], create_graph=False, method="forward")
     assert j.shape == (2, 128, 6, 3)
     assert torch.isfinite(j).all()
+
+
+def test_true176_keep_node_order_matches_q48_contract() -> None:
+    expected = np.asarray([1, 3, 5, 11, 15, 21, 23, 25, 26, 28, 30, 36, 40, 46, 48, 50], dtype=np.int64)
+    assert np.array_equal(keep_node_ids(), expected)
+
+    shape4 = np.asarray([[1.0, 0.01, 0.0, 0.0]], dtype=np.float32)
+    x_keep, meta = build_keep_node_coords_unique(shape4)
+    assert x_keep.shape == (1, 16, 3)
+    assert np.array_equal(meta["keep_node_ids"], expected)
+
+
+def test_true176_loader_uses_explicit_xkeep_when_available() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "xkeep_compact.npz"
+        n = 2
+        shape4 = np.zeros((n, 4), dtype=np.float32)
+        q48 = np.zeros((n, 48), dtype=np.float32)
+        x_keep = np.arange(16 * 3, dtype=np.float32).reshape(16, 3)
+        np.savez(
+            path,
+            shape4=shape4,
+            q48_raw=q48,
+            LE128_base=np.zeros((n, 128, 6), dtype=np.float32),
+            B_LE128_forward=np.zeros((n, 128, 6, 48), dtype=np.float32),
+            X_keep_ref=x_keep,
+            sample_paths=np.asarray(["case001"], dtype=str),
+        )
+        data = load_compacts([str(path)])
+        branch, branch_meta = build_branch_features(
+            shape4=data.shape4,
+            q48_raw=data.q48_raw,
+            mode="xkeep-qraw",
+            keep_node_coords=data.keep_node_coords,
+        )
+        assert branch.shape == (n, 96)
+        assert branch_meta["macro_geometry_source"] == "compact_X_keep"
+        assert np.allclose(branch[:, 48:].reshape(n, 16, 3), x_keep.reshape(1, 16, 3))
+
+
+def test_true176_full_xnodes_branch_is_available_as_ablation() -> None:
+    shape4 = np.asarray([[1.2, 0.05, 0.10, 0.00]], dtype=np.float32)
+    q48 = np.zeros((1, 48), dtype=np.float32)
+    branch, branch_meta = build_branch_features(shape4=shape4, q48_raw=q48, mode="xnodes-qraw")
+    assert branch.shape == (1, 198)
+    assert branch_meta["geometry_input"] == "X_macro[50,3]"
 
 
 def test_true176_loader_rejects_non_full48_b() -> None:
@@ -239,7 +293,10 @@ if __name__ == "__main__":
     test_synthetic_rigid_targets()
     test_forward_and_autograd_shapes()
     test_true176_point_features_and_ad_shapes()
-    test_true176_xnodes_branch_and_ad_shapes()
+    test_true176_xkeep_branch_and_ad_shapes()
+    test_true176_keep_node_order_matches_q48_contract()
+    test_true176_loader_uses_explicit_xkeep_when_available()
+    test_true176_full_xnodes_branch_is_available_as_ablation()
     test_true176_loader_rejects_non_full48_b()
     test_generic_point_feature_loader_reads_real_fields()
     test_generic_point_feature_loader_marks_shape4_fallback()

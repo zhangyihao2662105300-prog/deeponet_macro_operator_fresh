@@ -66,7 +66,7 @@ launcher commit `fc4117d`.
 Current data contract:
 
 ```text
-input  = q48_raw[48] + X_macro[50,3]
+input  = q48_raw[48] + X_keep[16,3]
 output = LE[target_ips, 6]
 B      = d LE / d q48_raw
 ```
@@ -74,25 +74,31 @@ B      = d LE / d q48_raw
 The DeepONet form is:
 
 ```text
-Branch input = standardized [q48_raw, X_macro]       # [B,198]
+Branch input = standardized [q48_raw, X_keep]        # [B,96]
 Trunk input  = point/IP features                     # [B,P,F]
 Output       = standardized LE                      # [B,P,6]
 AD B         = d(LE_norm)/d(q48_norm)               # [B,P,6,48]
 ```
 
+`X_keep` means the 16 reference coordinates attached to the 16 q48 control
+nodes.  These are the macro-level geometric coordinates visible together with
+`q48_raw`; the 34 non-control CSS8 grid nodes are not Branch inputs.
+
 For generic data, trunk features should be stored in the compact data as
 `point_features`, `ip_xyz`, `ip_J`, `ip_detJ`, etc.  For the current TRUE176
-20260620 compacts, both `X_macro` and those trunk fields were omitted, but they
-can be reconstructed from the audited shape4/CSS8 generation contract:
+20260620 compacts, `X_keep`, `X_macro`, and those trunk fields were omitted, but
+the needed geometry can be reconstructed from the audited shape4/CSS8 generation
+contract:
 
 ```text
-shape4 -> 50 CSS8 nodes -> 16 CSS8 elements -> 128 standard Gauss rows
+shape4 -> X_keep[16,3] for Branch
+shape4 -> 50 CSS8 nodes -> 16 CSS8 elements -> 128 standard Gauss rows for Trunk
 ```
 
 The explicit training sources for this dataset are therefore:
 
 ```text
---branch-feature-mode xnodes-qraw
+--branch-feature-mode xkeep-qraw
 --point-feature-source shape4-audited
 ```
 
@@ -101,10 +107,12 @@ That is different from a blind fallback: original sample NPZ files contain
 `element 1 IP1..IP8, ..., element 16 IP1..IP8`.
 
 This is the first step toward the general isoparametric form.  Geometry enters
-the branch as macro-node coordinates instead of the compressed `shape4[4]`.
-The displacement variable is still `q48_raw`, because the current label
-`B_LE128_forward` is `dLE/dq48_raw`.  A future `q_boundary[32,3]` branch requires
-matching derivative labels with respect to that variable.
+the branch as q48 control-node coordinates instead of the compressed
+`shape4[4]`.  The displacement variable is still `q48_raw`, because the current
+label `B_LE128_forward` is `dLE/dq48_raw`.  A future `q_boundary[32,3]` branch
+requires matching derivative labels with respect to that variable.  The full
+`xnodes-qraw` mode remains available only as an explicit ablation/full-internal-
+geometry experiment, not as the default macro-visible input.
 
 The key files are:
 
@@ -212,7 +220,7 @@ DATA=$BASE/true176_shape4_qraw_128ip_training_data_20260620
 OUT_DIR=$BASE/run_logs_128ip_fullframe_20260620/deeponet_true176_128ip_sobolev_ddp_v1
 COMPACT_LIST=                  # optional override
 POINT_FEATURE_SOURCE=shape4-audited
-BRANCH_FEATURE_MODE=xnodes-qraw
+BRANCH_FEATURE_MODE=xkeep-qraw
 NPROC=3
 BATCH_SIZE=4
 JAC_COLS_PER_GPU=8
@@ -234,7 +242,7 @@ PYTHONPATH=src python3 -m macro_deeponet.train_true176_generic_sobolev \
   --batch-size 2 \
   --max-frames-per-compact 16 \
   --target-ips 0,1,2,3 \
-  --branch-feature-mode xnodes-qraw \
+  --branch-feature-mode xkeep-qraw \
   --point-feature-source shape4-audited \
   --jacobian-columns 0,1,2,3 \
   --jacobian-columns-per-batch 2 \
@@ -254,7 +262,7 @@ py -m macro_deeponet.train_true176_generic_sobolev `
   --batch-size 2 `
   --max-frames-per-compact 4 `
   --target-ips 0,1 `
-  --branch-feature-mode xnodes-qraw `
+  --branch-feature-mode xkeep-qraw `
   --point-feature-source shape4-audited `
   --jacobian-columns 0,1 `
   --jacobian-columns-per-batch 1 `
@@ -294,10 +302,14 @@ integration points:
 
 ```text
 q48_raw:       [48]
-X_macro:       [50, 3]  # reconstructed from shape4 today, directly stored later
+X_keep:        [16, 3]  # q48 control-node coordinates, reconstructed today
 LE128_base:    [128, 6]
 B_LE128_forward: [128, 6, 48]
 ```
 
 The derivative supervision is always with respect to the same raw coordinate
 used as model input: `q48_raw`.
+
+For ablations or future richer data, `X_macro[50,3]` can still be stored and
+used by `--branch-feature-mode xnodes-qraw`, but that exposes internal CSS8 grid
+nodes and should not be treated as the default macro-element interface.

@@ -80,15 +80,35 @@ Output       = standardized LE                      # [B,P,6]
 AD B         = d(LE_norm)/d(q48_norm)               # [B,P,6,48]
 ```
 
-The default architecture follows the standard DeepONet/source-code pattern used
-in Physics-informed DeepONets and DeepXDE:
+The default architecture is now the finite-element flavored residual form:
 
 ```text
-concat-skip default:
+fe-linear-residual default:
   Branch:   one MLP over standardized [q48_raw, X_keep]
   Trunk:    one MLP over integration-point features
-  Coupling: segmented branch/trunk dot product for 6 LE channels
-  Baseline: learned linear q48 -> LE term, plus DeepONet residual
+  Baseline: B_base_norm(point_features) @ q48_norm
+  Residual: standard segmented branch/trunk dot product for 6 LE channels
+```
+
+This makes the dominant finite-element-like relation explicit:
+
+```text
+LE_norm = B_base_norm(point) q48_norm + DeepONet_residual(q48, X_keep, point)
+```
+
+`B_base_norm` is initialized from the mean training
+`d(LE_norm)/d(q48_norm)` and then corrected by a point-feature network.  It is
+not given sample labels in the forward pass; the labels are used only through
+the Sobolev/raw-B loss.  The raw-B auxiliary loss is enabled by default so the
+model is constrained after converting
+`J_norm = d(LE_norm)/d(q_norm)` back to `B = J_norm * LE_std / q_std`.
+The residual branch is zero-initialized by default, so the first prediction is
+the FE-like linear baseline rather than a random residual perturbation.
+
+The standard concat-skip DeepONet is kept as a baseline:
+
+```text
+--model-style concat-skip
 ```
 
 The NOEM/MIONet-style split-branch model is kept as an ablation:
@@ -200,7 +220,8 @@ The key files are:
 ```text
 src/macro_deeponet/models.py
     MacroDeepONet                  # clean Hex8 prototype
-    True176Shape4QrawDeepONet      # default TRUE176/CSS8 128-IP concat-skip model
+    FELinearResidualDeepONet       # default TRUE176/CSS8 FE-like baseline + residual model
+    True176Shape4QrawDeepONet      # standard TRUE176/CSS8 128-IP concat-skip baseline
     NOEMStyleMIONet                # NOEM/MIONet-style split-branch ablation
 
 src/macro_deeponet/true176_data.py

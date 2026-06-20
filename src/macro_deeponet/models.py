@@ -18,6 +18,7 @@ class MLP(nn.Module):
         hidden_dim: int = 128,
         depth: int = 4,
         activation: type[nn.Module] = nn.SiLU,
+        zero_last: bool = False,
     ) -> None:
         super().__init__()
         if depth < 1:
@@ -28,7 +29,11 @@ class MLP(nn.Module):
             layers.append(nn.Linear(last, hidden_dim))
             layers.append(activation())
             last = hidden_dim
-        layers.append(nn.Linear(last, out_dim))
+        final = nn.Linear(last, out_dim)
+        if zero_last:
+            nn.init.zeros_(final.weight)
+            nn.init.zeros_(final.bias)
+        layers.append(final)
         self.net = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -209,6 +214,118 @@ class True176Shape4QrawDeepONet(nn.Module):
         )
         residual = torch.einsum("bak,bpak->bpa", b, t) / (self.basis_dim**0.5)
         return skip + self.residual_scale * residual + self.bias.view(1, 1, self.strain_dim)
+
+
+class FELinearResidualDeepONet(nn.Module):
+    """TRUE176 model with an explicit FE-like linear B baseline.
+
+    The model writes the standardized strain field as
+
+        LE_norm = B_base_norm(point_features) @ q48_norm + DeepONet_residual.
+
+    ``B_base_norm`` is predicted only from Trunk/point features, so its
+    derivative with respect to q is explicit and can be supervised directly by
+    raw/physical B loss.  A static per-IP baseline initialized from the training
+    mean B is kept as a prior; the point-conditioned network learns the
+    geometry/IP-dependent correction.
+    """
+
+    def __init__(
+        self,
+        *,
+        input_dim: int,
+        point_dim: int,
+        q_start: int,
+        q_dim: int = 48,
+        ip_count: int = 128,
+        strain_dim: int = 6,
+        basis_dim: int = 96,
+        hidden_dim: int = 384,
+        branch_depth: int = 5,
+        trunk_depth: int = 5,
+        activation: str = "tanh",
+        skip_init: torch.Tensor | None = None,
+        train_skip: bool = True,
+        residual_scale: float = 1.0,
+        baseline_scale: float = 1.0,
+        train_point_baseline: bool = True,
+        zero_init_residual: bool = True,
+    ) -> None:
+        super().__init__()
+        if input_dim <= 0:
+            raise ValueError("input_dim must be positive")
+        if point_dim <= 0:
+            raise ValueError("point_dim must be positive")
+        if int(q_start) < 0 or int(q_dim) <= 0 or int(q_start) + int(q_dim) > int(input_dim):
+            raise ValueError("q_start/q_dim must select a valid q slice inside the branch input")
+        self.input_dim = int(input_dim)
+        self.point_dim = int(point_dim)
+        self.q_start = int(q_start)
+        self.q_dim = int(q_dim)
+        self.ip_count = int(ip_count)
+        self.strain_dim = int(strain_dim)
+        self.basis_dim = int(basis_dim)
+        self.residual_scale = float(residual_scale)
+        self.baseline_scale = float(baseline_scale)
+        self.train_point_baseline = bool(train_point_baseline)
+        self.zero_init_residual = bool(zero_init_residual)
+
+        act = activation_module(activation)
+        coeff_dim = self.strain_dim * self.basis_dim
+        self.branch = MLP(
+            self.input_dim,
+            coeff_dim,
+            hidden_dim=hidden_dim,
+            depth=branch_depth,
+            activation=act,
+            zero_last=self.zero_init_residual,
+        )
+        self.trunk = MLP(self.point_dim, coeff_dim, hidden_dim=hidden_dim, depth=trunk_depth, activation=act)
+        self.point_b_net = MLP(
+            self.point_dim,
+            self.strain_dim * self.q_dim,
+            hidden_dim=hidden_dim,
+            depth=trunk_depth,
+            activation=act,
+            zero_last=True,
+        )
+        for p in self.point_b_net.parameters():
+            p.requires_grad_(self.train_point_baseline)
+        self.bias = nn.Parameter(torch.zeros(self.strain_dim))
+
+        if skip_init is None:
+            static = torch.zeros(self.ip_count, self.strain_dim, self.q_dim, dtype=torch.float32)
+        else:
+            static = torch.as_tensor(skip_init, dtype=torch.float32).reshape(self.ip_count, self.strain_dim, self.q_dim)
+        self.static_b_norm = nn.Parameter(static, requires_grad=bool(train_skip))
+
+    def _linear_b_norm(self, point_norm: torch.Tensor) -> torch.Tensor:
+        delta = self.point_b_net(point_norm.reshape(-1, self.point_dim)).view(
+            point_norm.shape[0], self.ip_count, self.strain_dim, self.q_dim
+        )
+        return self.static_b_norm.unsqueeze(0) + self.baseline_scale * delta
+
+    def forward(self, x_norm: torch.Tensor, point_norm: torch.Tensor) -> torch.Tensor:
+        if x_norm.ndim != 2:
+            raise ValueError(f"x_norm must have shape [B,{self.input_dim}]")
+        if point_norm.ndim != 3:
+            raise ValueError("point_norm must have shape [B,P,F]")
+        if x_norm.shape[-1] != self.input_dim:
+            raise ValueError(f"x_norm last dimension must be {self.input_dim}")
+        if point_norm.shape[-1] != self.point_dim:
+            raise ValueError(f"point_norm last dimension must be {self.point_dim}")
+        if point_norm.shape[1] != self.ip_count:
+            raise ValueError(f"point_norm point count must be {self.ip_count}")
+
+        qn = x_norm[:, self.q_start : self.q_start + self.q_dim]
+        b_base = self._linear_b_norm(point_norm)
+        linear = torch.einsum("bpaj,bj->bpa", b_base, qn)
+        b = self.branch(x_norm).view(-1, self.strain_dim, self.basis_dim)
+        t = self.trunk(point_norm.reshape(-1, self.point_dim)).view(
+            x_norm.shape[0], self.ip_count, self.strain_dim, self.basis_dim
+        )
+        residual = torch.einsum("bak,bpak->bpa", b, t) / (self.basis_dim**0.5)
+        return linear + self.residual_scale * residual + self.bias.view(1, 1, self.strain_dim)
 
 
 class NOEMStyleMIONet(nn.Module):

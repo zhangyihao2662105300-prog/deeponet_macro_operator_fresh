@@ -16,7 +16,7 @@ from macro_deeponet.geometry import (
     shape_function_gradients_hex8,
     shape_functions_hex8,
 )
-from macro_deeponet.models import MacroDeepONet, NOEMStyleMIONet, True176Shape4QrawDeepONet
+from macro_deeponet.models import FELinearResidualDeepONet, MacroDeepONet, NOEMStyleMIONet, True176Shape4QrawDeepONet
 from macro_deeponet.point_features import load_point_features_from_compacts, transform_point_features_for_scale
 from macro_deeponet.true176_data import (
     build_branch_features,
@@ -163,6 +163,43 @@ def test_noem_style_mionet_splits_q_and_geometry() -> None:
     j = ad_jacobian(model, x_norm, p_norm, [0, 3, 7], create_graph=False, method="forward")
     assert j.shape == (2, 128, 6, 3)
     assert torch.isfinite(j).all()
+
+
+def test_fe_linear_residual_model_has_explicit_b_baseline() -> None:
+    shape4 = np.asarray([[1.2, 0.05, 0.10, 0.00], [1.4, 0.04, 0.08, 0.20]], dtype=np.float32)
+    q48 = np.zeros((2, 48), dtype=np.float32)
+    branch, branch_meta = build_branch_features(shape4=shape4, q48_raw=q48, mode="xkeep-qraw")
+    point, _meta = build_point_features(shape4, include_id_features=False)
+    q_start = int(branch_meta["q_start"])
+    q_dim = int(branch_meta["q_dim"])
+    skip = torch.zeros((128, 6, q_dim), dtype=torch.float32)
+    skip[:, :, 0] = 0.25
+    model = FELinearResidualDeepONet(
+        input_dim=branch.shape[-1],
+        point_dim=point.shape[-1],
+        ip_count=128,
+        basis_dim=12,
+        hidden_dim=32,
+        branch_depth=2,
+        trunk_depth=2,
+        q_start=q_start,
+        q_dim=q_dim,
+        skip_init=skip,
+        train_skip=False,
+        residual_scale=0.0,
+        train_point_baseline=False,
+    )
+    assert model.zero_init_residual
+    x_norm = torch.zeros(2, branch.shape[-1])
+    x_norm[:, q_start] = torch.tensor([2.0, -1.0])
+    p_norm = torch.as_tensor(point, dtype=torch.float32)
+    le = model(x_norm, p_norm)
+    assert le.shape == (2, 128, 6)
+    assert torch.allclose(le[0], torch.full((128, 6), 0.5), atol=1.0e-6)
+    assert torch.allclose(le[1], torch.full((128, 6), -0.25), atol=1.0e-6)
+    j = ad_jacobian(model, x_norm, p_norm, [0], create_graph=False, method="forward")
+    assert j.shape == (2, 128, 6, 1)
+    assert torch.allclose(j, torch.full_like(j, 0.25), atol=1.0e-6)
 
 
 def test_true176_keep_node_order_matches_q48_contract() -> None:
@@ -519,6 +556,7 @@ if __name__ == "__main__":
     test_true176_point_features_and_ad_shapes()
     test_true176_xkeep_branch_and_ad_shapes()
     test_noem_style_mionet_splits_q_and_geometry()
+    test_fe_linear_residual_model_has_explicit_b_baseline()
     test_true176_keep_node_order_matches_q48_contract()
     test_true176_loader_uses_explicit_xkeep_when_available()
     test_true176_physical_scale_transforms_branch_and_b()

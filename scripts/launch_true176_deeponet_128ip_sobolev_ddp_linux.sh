@@ -24,6 +24,11 @@ BASIS_DIM="${BASIS_DIM:-96}"
 HIDDEN_DIM="${HIDDEN_DIM:-384}"
 BRANCH_DEPTH="${BRANCH_DEPTH:-5}"
 TRUNK_DEPTH="${TRUNK_DEPTH:-5}"
+MODEL_STYLE="${MODEL_STYLE:-fe-linear-residual}"
+RESIDUAL_SCALE="${RESIDUAL_SCALE:-1.0}"
+FE_BASELINE_SCALE="${FE_BASELINE_SCALE:-1.0}"
+PHYSICAL_J_AUX_WEIGHT="${PHYSICAL_J_AUX_WEIGHT:-0.5}"
+BASELINE_JACOBIAN_WEIGHT="${BASELINE_JACOBIAN_WEIGHT:-1.0}"
 EVAL_EVERY="${EVAL_EVERY:-5}"
 LOG_EVERY="${LOG_EVERY:-1}"
 LR="${LR:-8e-5}"
@@ -104,13 +109,18 @@ CMD=(
   --branch-depth "$BRANCH_DEPTH"
   --trunk-depth "$TRUNK_DEPTH"
   --activation tanh
+  --model-style "$MODEL_STYLE"
+  --residual-scale "$RESIDUAL_SCALE"
+  --fe-baseline-scale "$FE_BASELINE_SCALE"
+  --baseline-jacobian-weight "$BASELINE_JACOBIAN_WEIGHT"
+  --baseline-j-loss-mode norm-plus-physical
   --include-id-features
   --jacobian-columns all
   --jacobian-columns-per-batch "$JAC_COLS_PER_GPU"
   --jacobian-method "$JACOBIAN_METHOD"
   --eval-columns "$EVAL_COLUMNS"
   --j-loss-mode norm-plus-physical
-  --physical-j-aux-weight 0.05
+  --physical-j-aux-weight "$PHYSICAL_J_AUX_WEIGHT"
   --physical-j-abs-weight 1.0
   --physical-j-rel-weight 0.02
   --physical-j-action-weight 0.05

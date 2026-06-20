@@ -280,6 +280,9 @@ def write_loss_history(out_dir: Path, history: list[dict[str, Any]]) -> None:
     keys = [
         "epoch", "loss", "le_loss_norm_mse", "j_loss_objective", "j_loss_norm_mse",
         "j_loss_abs_normed_mse", "j_loss_rel_eps_mse", "j_loss_action_mse", "lambda_j",
+        "baseline_j_loss_objective", "baseline_j_loss_norm_mse",
+        "baseline_j_loss_abs_normed_mse", "baseline_j_loss_rel_eps_mse",
+        "baseline_j_loss_action_mse",
         "train_LE_rel", "train_AD_B_rel", "train_AD_B_norm_rel", "val_LE_rel", "val_AD_B_rel", "score",
     ]
     with (out_dir / "loss_history.csv").open("w", newline="", encoding="utf-8") as f:

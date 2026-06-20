@@ -28,7 +28,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
-from .models import NOEMStyleMIONet, True176Shape4QrawDeepONet
+from .models import FELinearResidualDeepONet, NOEMStyleMIONet, True176Shape4QrawDeepONet
 from .point_features import load_point_features_from_compacts, transform_point_features_for_scale
 from .train_true176_deeponet_sobolev import (
     ad_jacobian,
@@ -125,10 +125,19 @@ def build_model(
         "activation": str(args.activation),
         "skip_init": torch.as_tensor(skip_init, dtype=torch.float32),
         "train_skip": not bool(args.freeze_skip),
+        "residual_scale": float(args.residual_scale),
         "q_start": int(q_start),
         "q_dim": int(q_dim),
     }
+    if style in {"fe-linear-residual", "fe-residual", "linear-residual"}:
+        return FELinearResidualDeepONet(
+            **common,
+            baseline_scale=float(args.fe_baseline_scale),
+            train_point_baseline=not bool(args.freeze_fe_point_baseline),
+            zero_init_residual=not bool(args.no_zero_init_residual),
+        )
     if style in {"noem-mionet", "mionet", "noem"}:
+        common.pop("residual_scale")
         return NOEMStyleMIONet(
             **common,
             use_q_skip=bool(args.use_q_skip),
@@ -136,12 +145,17 @@ def build_model(
         )
     if style in {"concat-skip", "legacy", "concat"}:
         return True176Shape4QrawDeepONet(**common)
-    raise ValueError("model_style must be one of: noem-mionet, concat-skip")
+    raise ValueError("model_style must be one of: fe-linear-residual, noem-mionet, concat-skip")
 
 
 def model_meta(model: nn.Module, branch_meta: dict[str, Any]) -> dict[str, Any]:
     base = _unwrap(model)
-    style = "noem-mionet" if isinstance(base, NOEMStyleMIONet) else "concat-skip"
+    if isinstance(base, FELinearResidualDeepONet):
+        style = "fe-linear-residual"
+    elif isinstance(base, NOEMStyleMIONet):
+        style = "noem-mionet"
+    else:
+        style = "concat-skip"
     meta = {
         "model_style": style,
         "input_dim": int(getattr(base, "input_dim")),
@@ -152,7 +166,23 @@ def model_meta(model: nn.Module, branch_meta: dict[str, Any]) -> dict[str, Any]:
         "basis_dim": int(getattr(base, "basis_dim")),
         "strain_dim": int(getattr(base, "strain_dim")),
     }
-    if isinstance(base, NOEMStyleMIONet):
+    if isinstance(base, FELinearResidualDeepONet):
+        meta.update(
+            {
+                "architecture_principle": (
+                    "FE-like linear B baseline plus standard branch/trunk DeepONet residual."
+                ),
+                "linear_baseline": "B_base_norm(point_features) @ q48_norm",
+                "static_baseline": "initialized from mean training d(LE_norm)/d(q48_norm)",
+                "point_baseline": "learned from Trunk/IP features only",
+                "residual": "standard single-branch DeepONet over [q48, geometry] and point features",
+                "baseline_scale": float(base.baseline_scale),
+                "residual_scale": float(base.residual_scale),
+                "train_point_baseline": bool(base.train_point_baseline),
+                "zero_init_residual": bool(base.zero_init_residual),
+            }
+        )
+    elif isinstance(base, NOEMStyleMIONet):
         meta.update(
             {
                 "architecture_principle": (
@@ -175,6 +205,7 @@ def model_meta(model: nn.Module, branch_meta: dict[str, Any]) -> dict[str, Any]:
                 ),
                 "branch": "single MLP over the full standardized branch vector [q48, geometry]",
                 "use_q_skip": True,
+                "residual_scale": float(base.residual_scale),
             }
         )
     return meta
@@ -362,6 +393,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                     ),
                 },
                 "b_global_rms": b_global_rms,
+                "jacobian_target_relation": "J_norm = B_train * q_std / LE_std; B_train = J_norm * LE_std / q_std",
                 "init_report": init_report,
                 "generic_point_contract": True,
             },
@@ -373,7 +405,20 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
         model.train()
-        sums = {"loss": 0.0, "le": 0.0, "j": 0.0, "j_norm": 0.0, "j_abs": 0.0, "j_rel": 0.0, "j_action": 0.0}
+        sums = {
+            "loss": 0.0,
+            "le": 0.0,
+            "j": 0.0,
+            "j_norm": 0.0,
+            "j_abs": 0.0,
+            "j_rel": 0.0,
+            "j_action": 0.0,
+            "baseline_j": 0.0,
+            "baseline_j_norm": 0.0,
+            "baseline_j_abs": 0.0,
+            "baseline_j_rel": 0.0,
+            "baseline_j_action": 0.0,
+        }
         count = 0
         t0 = time.time()
         for xb, pb, leb, jb in train_loader:
@@ -409,12 +454,49 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                     j_obj = j_phys_loss
                 else:
                     j_obj = j_norm_loss + float(args.physical_j_aux_weight) * j_phys_loss
+                baseline_j_obj = torch.zeros((), dtype=xb.dtype, device=device)
+                baseline_j_norm_loss = torch.zeros((), dtype=xb.dtype, device=device)
+                baseline_j_parts = {
+                    "j_loss_abs_normed_mse": baseline_j_obj,
+                    "j_loss_rel_eps_mse": baseline_j_obj,
+                    "j_loss_action_mse": baseline_j_obj,
+                }
+                base_model = _unwrap(model)
+                if isinstance(base_model, FELinearResidualDeepONet) and float(args.baseline_jacobian_weight) > 0.0:
+                    b_base = base_model._linear_b_norm(pb)[:, :, :, columns]
+                    baseline_j_norm_loss = nn.functional.mse_loss(b_base, j_true)
+                    baseline_j_phys_loss, baseline_j_parts = physical_j_loss(
+                        b_base,
+                        j_true,
+                        le_std_t,
+                        q_std_cols,
+                        b_global_rms=b_global_rms,
+                        rel_eps_scale=float(args.physical_j_rel_eps_scale),
+                        abs_weight=float(args.physical_j_abs_weight),
+                        rel_weight=float(args.physical_j_rel_weight),
+                        action_weight=float(args.physical_j_action_weight),
+                        action_directions=int(args.physical_j_action_directions),
+                        rng=action_rng,
+                    )
+                    if str(args.baseline_j_loss_mode) == "norm":
+                        baseline_j_obj = baseline_j_norm_loss
+                    elif str(args.baseline_j_loss_mode) == "physical":
+                        baseline_j_obj = baseline_j_phys_loss
+                    else:
+                        baseline_j_obj = baseline_j_norm_loss + float(args.physical_j_aux_weight) * baseline_j_phys_loss
             else:
                 j_norm_loss = torch.zeros((), dtype=xb.dtype, device=device)
                 j_obj = torch.zeros((), dtype=xb.dtype, device=device)
                 j_parts = {"j_loss_abs_normed_mse": j_obj, "j_loss_rel_eps_mse": j_obj, "j_loss_action_mse": j_obj}
+                baseline_j_obj = torch.zeros((), dtype=xb.dtype, device=device)
+                baseline_j_norm_loss = torch.zeros((), dtype=xb.dtype, device=device)
+                baseline_j_parts = {
+                    "j_loss_abs_normed_mse": baseline_j_obj,
+                    "j_loss_rel_eps_mse": baseline_j_obj,
+                    "j_loss_action_mse": baseline_j_obj,
+                }
             lambda_j = float(args.initial_jacobian_weight)
-            loss = le_loss + lambda_j * j_obj
+            loss = le_loss + lambda_j * j_obj + float(args.baseline_jacobian_weight) * baseline_j_obj
             loss.backward()
             if float(args.grad_clip) > 0.0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), float(args.grad_clip))
@@ -428,6 +510,11 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             sums["j_abs"] += float(j_parts["j_loss_abs_normed_mse"].detach().cpu()) * batch_n
             sums["j_rel"] += float(j_parts["j_loss_rel_eps_mse"].detach().cpu()) * batch_n
             sums["j_action"] += float(j_parts["j_loss_action_mse"].detach().cpu()) * batch_n
+            sums["baseline_j"] += float(baseline_j_obj.detach().cpu()) * batch_n
+            sums["baseline_j_norm"] += float(baseline_j_norm_loss.detach().cpu()) * batch_n
+            sums["baseline_j_abs"] += float(baseline_j_parts["j_loss_abs_normed_mse"].detach().cpu()) * batch_n
+            sums["baseline_j_rel"] += float(baseline_j_parts["j_loss_rel_eps_mse"].detach().cpu()) * batch_n
+            sums["baseline_j_action"] += float(baseline_j_parts["j_loss_action_mse"].detach().cpu()) * batch_n
 
         scheduler.step()
         denom = max(count, 1)
@@ -440,6 +527,11 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             "j_loss_abs_normed_mse": ddp_mean(sums["j_abs"] / denom, device, ctx),
             "j_loss_rel_eps_mse": ddp_mean(sums["j_rel"] / denom, device, ctx),
             "j_loss_action_mse": ddp_mean(sums["j_action"] / denom, device, ctx),
+            "baseline_j_loss_objective": ddp_mean(sums["baseline_j"] / denom, device, ctx),
+            "baseline_j_loss_norm_mse": ddp_mean(sums["baseline_j_norm"] / denom, device, ctx),
+            "baseline_j_loss_abs_normed_mse": ddp_mean(sums["baseline_j_abs"] / denom, device, ctx),
+            "baseline_j_loss_rel_eps_mse": ddp_mean(sums["baseline_j_rel"] / denom, device, ctx),
+            "baseline_j_loss_action_mse": ddp_mean(sums["baseline_j_action"] / denom, device, ctx),
             "lambda_j": lambda_j,
             "lr": scheduler.get_last_lr()[0],
             "seconds": time.time() - t0,
@@ -507,16 +599,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--branch-depth", type=int, default=5)
     p.add_argument("--trunk-depth", type=int, default=5)
     p.add_argument("--activation", default="tanh")
-    p.add_argument("--model-style", default="concat-skip", choices=["noem-mionet", "concat-skip"])
+    p.add_argument("--model-style", default="fe-linear-residual", choices=["fe-linear-residual", "noem-mionet", "concat-skip"])
     p.add_argument("--mionet-product-scale", default="none", choices=["none", "sqrt", "basis"])
     p.add_argument("--use-q-skip", action="store_true")
+    p.add_argument("--residual-scale", type=float, default=1.0)
+    p.add_argument("--fe-baseline-scale", type=float, default=1.0)
+    p.add_argument("--freeze-fe-point-baseline", action="store_true")
+    p.add_argument("--no-zero-init-residual", action="store_true")
+    p.add_argument("--baseline-jacobian-weight", type=float, default=1.0)
+    p.add_argument("--baseline-j-loss-mode", default="norm-plus-physical", choices=["norm", "physical", "norm-plus-physical"])
     p.add_argument("--include-id-features", action="store_true")
     p.add_argument("--jacobian-columns", default="all")
     p.add_argument("--jacobian-columns-per-batch", type=int, default=8)
     p.add_argument("--jacobian-method", default="forward", choices=["forward", "reverse"])
     p.add_argument("--eval-columns", default="0,1,2,3,4,5,6,7,8,9,10,11")
     p.add_argument("--j-loss-mode", default="norm-plus-physical", choices=["norm", "physical", "norm-plus-physical"])
-    p.add_argument("--physical-j-aux-weight", type=float, default=0.05)
+    p.add_argument("--physical-j-aux-weight", type=float, default=0.5)
     p.add_argument("--physical-j-abs-weight", type=float, default=1.0)
     p.add_argument("--physical-j-rel-weight", type=float, default=0.02)
     p.add_argument("--physical-j-action-weight", type=float, default=0.05)

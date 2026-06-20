@@ -28,7 +28,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
-from .models import True176Shape4QrawDeepONet
+from .models import NOEMStyleMIONet, True176Shape4QrawDeepONet
 from .point_features import load_point_features_from_compacts, transform_point_features_for_scale
 from .train_true176_deeponet_sobolev import (
     ad_jacobian,
@@ -103,6 +103,83 @@ def validate_point_feature_source_for_scale(
         )
 
 
+def build_model(
+    args: argparse.Namespace,
+    *,
+    input_dim: int,
+    point_dim: int,
+    ip_count: int,
+    q_start: int,
+    q_dim: int,
+    skip_init: np.ndarray,
+) -> nn.Module:
+    style = str(args.model_style).strip().lower().replace("_", "-")
+    common = {
+        "input_dim": int(input_dim),
+        "point_dim": int(point_dim),
+        "ip_count": int(ip_count),
+        "basis_dim": int(args.basis_dim),
+        "hidden_dim": int(args.hidden_dim),
+        "branch_depth": int(args.branch_depth),
+        "trunk_depth": int(args.trunk_depth),
+        "activation": str(args.activation),
+        "skip_init": torch.as_tensor(skip_init, dtype=torch.float32),
+        "train_skip": not bool(args.freeze_skip),
+        "q_start": int(q_start),
+        "q_dim": int(q_dim),
+    }
+    if style in {"noem-mionet", "mionet", "noem"}:
+        return NOEMStyleMIONet(
+            **common,
+            use_q_skip=bool(args.use_q_skip),
+            product_scale=str(args.mionet_product_scale),
+        )
+    if style in {"concat-skip", "legacy", "concat"}:
+        return True176Shape4QrawDeepONet(**common)
+    raise ValueError("model_style must be one of: noem-mionet, concat-skip")
+
+
+def model_meta(model: nn.Module, branch_meta: dict[str, Any]) -> dict[str, Any]:
+    base = _unwrap(model)
+    style = "noem-mionet" if isinstance(base, NOEMStyleMIONet) else "concat-skip"
+    meta = {
+        "model_style": style,
+        "input_dim": int(getattr(base, "input_dim")),
+        "point_dim": int(getattr(base, "point_dim")),
+        "ip_count": int(getattr(base, "ip_count")),
+        "q_start": int(getattr(base, "q_start")),
+        "q_dim": int(getattr(base, "q_dim")),
+        "basis_dim": int(getattr(base, "basis_dim")),
+        "strain_dim": int(getattr(base, "strain_dim")),
+    }
+    if isinstance(base, NOEMStyleMIONet):
+        meta.update(
+            {
+                "architecture_principle": (
+                    "NOEM/MIONet: separate q and geometry branches are multiplied in latent space, "
+                    "then segmented-dot-producted with the trunk."
+                ),
+                "branch_q": f"q48 slice [{base.q_start}:{base.q_start + base.q_dim}]",
+                "branch_geometry": f"remaining branch coordinates, dim={base.geometry_dim}",
+                "geometry_input": branch_meta.get("geometry_input"),
+                "use_q_skip": bool(base.use_q_skip),
+                "product_scale": str(base.product_scale),
+            }
+        )
+    else:
+        meta.update(
+            {
+                "architecture_principle": (
+                    "Standard single-branch DeepONet with a learned q-linear baseline and "
+                    "branch/trunk residual."
+                ),
+                "branch": "single MLP over the full standardized branch vector [q48, geometry]",
+                "use_q_skip": True,
+            }
+        )
+    return meta
+
+
 def train(args: argparse.Namespace) -> dict[str, Any]:
     ctx = _distributed_context(args)
     rank = int(ctx["rank"])
@@ -124,6 +201,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         compact_paths,
         frame_stride=int(args.frame_stride),
         max_frames_per_compact=int(args.max_frames_per_compact),
+        target_ips=target_ips,
     )
     if scale_mode == "physical" and "implicit_H_1" in str(data.length_scale_source).split("+"):
         raise ValueError(
@@ -143,8 +221,13 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         length_scale=data.length_scale,
         scale_mode=scale_mode,
     )
-    le_raw = data.le[:, target_ips, :].astype(np.float32)
-    b_raw = data.b[:, target_ips, :, :].astype(np.float32)
+    le_raw = data.le.astype(np.float32, copy=False)
+    b_raw = data.b.astype(np.float32, copy=False)
+    if le_raw.shape[1] != len(target_ips) or b_raw.shape[1] != len(target_ips):
+        raise ValueError(
+            f"loaded LE/B point count ({le_raw.shape[1]}, {b_raw.shape[1]}) "
+            f"does not match target_ips count {len(target_ips)}"
+        )
     b_train, b_scale_meta = transform_b_target_for_q_coordinate(
         b_raw,
         data.length_scale,
@@ -232,19 +315,14 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         drop_last=False,
     )
 
-    model = True176Shape4QrawDeepONet(
+    model = build_model(
+        args,
         input_dim=int(x_norm.shape[-1]),
         point_dim=int(point_norm.shape[-1]),
         ip_count=len(target_ips),
-        basis_dim=int(args.basis_dim),
-        hidden_dim=int(args.hidden_dim),
-        branch_depth=int(args.branch_depth),
-        trunk_depth=int(args.trunk_depth),
-        activation=str(args.activation),
-        skip_init=torch.as_tensor(skip_init, dtype=torch.float32),
-        train_skip=not bool(args.freeze_skip),
         q_start=q_start,
         q_dim=q_dim,
+        skip_init=skip_init,
     ).to(device)
     init_report = load_checkpoint(model, str(args.init_checkpoint))
     if bool(ctx["distributed"]):
@@ -269,6 +347,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 "val_frames": int(val_idx.size),
                 "point_meta": point_meta,
                 "branch_meta": branch_meta,
+                "model_meta": model_meta(model, branch_meta),
                 "scale_meta": {
                     "scale_mode": scale_mode,
                     "length_scale_source": data.length_scale_source,
@@ -380,6 +459,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                         "args": vars(args),
                         "target_ips": target_ips,
                         "point_meta": point_meta,
+                        "branch_meta": branch_meta,
+                        "model_meta": model_meta(eval_model, branch_meta),
                         "scale_meta": {
                             "scale_mode": scale_mode,
                             "length_scale_source": data.length_scale_source,
@@ -426,6 +507,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--branch-depth", type=int, default=5)
     p.add_argument("--trunk-depth", type=int, default=5)
     p.add_argument("--activation", default="tanh")
+    p.add_argument("--model-style", default="concat-skip", choices=["noem-mionet", "concat-skip"])
+    p.add_argument("--mionet-product-scale", default="none", choices=["none", "sqrt", "basis"])
+    p.add_argument("--use-q-skip", action="store_true")
     p.add_argument("--include-id-features", action="store_true")
     p.add_argument("--jacobian-columns", default="all")
     p.add_argument("--jacobian-columns-per-batch", type=int, default=8)

@@ -80,6 +80,26 @@ Output       = standardized LE                      # [B,P,6]
 AD B         = d(LE_norm)/d(q48_norm)               # [B,P,6,48]
 ```
 
+The default architecture follows the standard DeepONet/source-code pattern used
+in Physics-informed DeepONets and DeepXDE:
+
+```text
+concat-skip default:
+  Branch:   one MLP over standardized [q48_raw, X_keep]
+  Trunk:    one MLP over integration-point features
+  Coupling: segmented branch/trunk dot product for 6 LE channels
+  Baseline: learned linear q48 -> LE term, plus DeepONet residual
+```
+
+The NOEM/MIONet-style split-branch model is kept as an ablation:
+
+```text
+--model-style noem-mionet
+```
+
+For a pure NOEM-style comparison, `--model-style noem-mionet` does not use
+`q-skip`.  It can be re-enabled explicitly with `--use-q-skip`.
+
 `X_keep` means the 16 reference coordinates attached to the 16 q48 control
 nodes.  These are the macro-level geometric coordinates visible together with
 `q48_raw`; the 34 non-control CSS8 grid nodes are not Branch inputs.
@@ -180,7 +200,8 @@ The key files are:
 ```text
 src/macro_deeponet/models.py
     MacroDeepONet                  # clean Hex8 prototype
-    True176Shape4QrawDeepONet      # TRUE176/CSS8 128-IP model
+    True176Shape4QrawDeepONet      # default TRUE176/CSS8 128-IP concat-skip model
+    NOEMStyleMIONet                # NOEM/MIONet-style split-branch ablation
 
 src/macro_deeponet/true176_data.py
     compact npz loader

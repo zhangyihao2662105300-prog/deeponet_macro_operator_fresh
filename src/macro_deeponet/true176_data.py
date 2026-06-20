@@ -193,7 +193,13 @@ def sample_meta(n: int, sample_paths: np.ndarray) -> tuple[np.ndarray, np.ndarra
     return sample_index, frame_number, case_id
 
 
-def load_one_compact(path: str | Path, *, frame_stride: int = 1, max_frames: int = 0) -> dict[str, Any]:
+def load_one_compact(
+    path: str | Path,
+    *,
+    frame_stride: int = 1,
+    max_frames: int = 0,
+    target_ips: Iterable[int] | None = None,
+) -> dict[str, Any]:
     compact = Path(path).resolve()
     if not compact.exists():
         raise FileNotFoundError(compact)
@@ -207,6 +213,16 @@ def load_one_compact(path: str | Path, *, frame_stride: int = 1, max_frames: int
                 "This TRUE176 DeepONet trainer requires full q48/B48 compact data."
             )
         return arr
+
+    def require_ip_shape(z: np.lib.npyio.NpzFile, key: str, tail: tuple[int, ...], n_total: int) -> np.ndarray:
+        arr = require_shape(z, key, tail, n_total)[idx]
+        if ip_idx is not None:
+            arr = arr[:, ip_idx, ...]
+        return arr.astype(np.float32, copy=False)
+
+    ip_idx = None if target_ips is None else np.asarray([int(v) for v in target_ips], dtype=np.int64)
+    if ip_idx is not None and (ip_idx.size == 0 or np.any((ip_idx < 0) | (ip_idx >= 128))):
+        raise ValueError(f"{compact}: target_ips must select one or more rows in [0,127]")
 
     with np.load(str(compact), allow_pickle=True) as z:
         n_total = int(z["shape4"].shape[0])
@@ -261,8 +277,8 @@ def load_one_compact(path: str | Path, *, frame_stride: int = 1, max_frames: int
             "compact_path": str(compact),
             "shape4": require_shape(z, "shape4", (4,), n_total)[idx],
             "q48_raw": require_shape(z, "q48_raw", (48,), n_total)[idx],
-            "le": require_shape(z, le_key, (128, 6), n_total)[idx],
-            "b": require_shape(z, b_key, (128, 6, 48), n_total)[idx],
+            "le": require_ip_shape(z, le_key, (128, 6), n_total),
+            "b": require_ip_shape(z, b_key, (128, 6, 48), n_total),
             "length_scale": length_scale,
             "length_scale_source": length_scale_source,
             "keep_node_coords": keep_node_coords,
@@ -275,10 +291,21 @@ def load_one_compact(path: str | Path, *, frame_stride: int = 1, max_frames: int
         }
 
 
-def load_compacts(paths: Iterable[str], *, frame_stride: int = 1, max_frames_per_compact: int = 0) -> True176Arrays:
+def load_compacts(
+    paths: Iterable[str],
+    *,
+    frame_stride: int = 1,
+    max_frames_per_compact: int = 0,
+    target_ips: Iterable[int] | None = None,
+) -> True176Arrays:
     chunks: list[dict[str, Any]] = []
     for source_id, text in enumerate(paths):
-        chunk = load_one_compact(text, frame_stride=frame_stride, max_frames=max_frames_per_compact)
+        chunk = load_one_compact(
+            text,
+            frame_stride=frame_stride,
+            max_frames=max_frames_per_compact,
+            target_ips=target_ips,
+        )
         chunk["source_index"][:] = int(source_id)
         chunks.append(chunk)
     if not chunks:

@@ -209,3 +209,118 @@ class True176Shape4QrawDeepONet(nn.Module):
         )
         residual = torch.einsum("bak,bpak->bpa", b, t) / (self.basis_dim**0.5)
         return skip + self.residual_scale * residual + self.bias.view(1, 1, self.strain_dim)
+
+
+class NOEMStyleMIONet(nn.Module):
+    """NOEM/MIONet-style TRUE176 operator model.
+
+    This follows the source-code principle used by NOEM's ``MIDeepONet``:
+    separate input groups are processed by separate branch networks, their
+    latent coefficients are multiplied, and the result is dot-producted with a
+    single trunk network.  Here the natural split is
+
+        branch_q(q48) * branch_geometry(X_keep or shape4) * trunk(point) -> LE.
+
+    The model still accepts the trainer's full standardized branch vector so
+    existing AD code can differentiate with respect to the q slice.
+    """
+
+    def __init__(
+        self,
+        *,
+        input_dim: int,
+        point_dim: int,
+        q_start: int,
+        q_dim: int = 48,
+        ip_count: int = 128,
+        strain_dim: int = 6,
+        basis_dim: int = 96,
+        hidden_dim: int = 384,
+        branch_depth: int = 5,
+        trunk_depth: int = 5,
+        activation: str = "tanh",
+        use_q_skip: bool = False,
+        skip_init: torch.Tensor | None = None,
+        train_skip: bool = True,
+        product_scale: str = "none",
+    ) -> None:
+        super().__init__()
+        if input_dim <= 0:
+            raise ValueError("input_dim must be positive")
+        if point_dim <= 0:
+            raise ValueError("point_dim must be positive")
+        if int(q_start) < 0 or int(q_dim) <= 0 or int(q_start) + int(q_dim) > int(input_dim):
+            raise ValueError("q_start/q_dim must select a valid q slice inside the branch input")
+        geom_dim = int(input_dim) - int(q_dim)
+        if geom_dim <= 0:
+            raise ValueError(
+                "NOEMStyleMIONet needs a non-q branch group. Use branch-feature-mode xkeep-qraw, "
+                "xnodes-qraw, or shape4-qraw so geometry/parameters are available separately from q48."
+            )
+        key = str(product_scale).strip().lower()
+        if key not in {"none", "sqrt", "basis"}:
+            raise ValueError("product_scale must be one of: none, sqrt, basis")
+
+        self.input_dim = int(input_dim)
+        self.point_dim = int(point_dim)
+        self.q_start = int(q_start)
+        self.q_dim = int(q_dim)
+        self.ip_count = int(ip_count)
+        self.strain_dim = int(strain_dim)
+        self.basis_dim = int(basis_dim)
+        self.geometry_dim = int(geom_dim)
+        self.use_q_skip = bool(use_q_skip)
+        self.product_scale = key
+
+        act = activation_module(activation)
+        coeff_dim = self.strain_dim * self.basis_dim
+        self.q_branch = MLP(self.q_dim, coeff_dim, hidden_dim=hidden_dim, depth=branch_depth, activation=act)
+        self.geometry_branch = MLP(self.geometry_dim, coeff_dim, hidden_dim=hidden_dim, depth=branch_depth, activation=act)
+        self.trunk = MLP(self.point_dim, coeff_dim, hidden_dim=hidden_dim, depth=trunk_depth, activation=act)
+        self.bias = nn.Parameter(torch.zeros(self.strain_dim))
+
+        if skip_init is None:
+            skip = torch.zeros(self.ip_count, self.strain_dim, self.q_dim, dtype=torch.float32)
+        else:
+            skip = torch.as_tensor(skip_init, dtype=torch.float32).reshape(self.ip_count, self.strain_dim, self.q_dim)
+        if self.use_q_skip:
+            self.skip_weight = nn.Parameter(skip, requires_grad=bool(train_skip))
+        else:
+            self.register_buffer("skip_weight", skip)
+
+    def _split_branch(self, x_norm: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        q = x_norm[:, self.q_start : self.q_start + self.q_dim]
+        left = x_norm[:, : self.q_start]
+        right = x_norm[:, self.q_start + self.q_dim :]
+        geometry = torch.cat([left, right], dim=-1) if left.shape[-1] or right.shape[-1] else left
+        return q, geometry
+
+    def _scale(self) -> float:
+        if self.product_scale == "sqrt":
+            return float(self.basis_dim) ** 0.5
+        if self.product_scale == "basis":
+            return float(self.basis_dim)
+        return 1.0
+
+    def forward(self, x_norm: torch.Tensor, point_norm: torch.Tensor) -> torch.Tensor:
+        if x_norm.ndim != 2:
+            raise ValueError(f"x_norm must have shape [B,{self.input_dim}]")
+        if point_norm.ndim != 3:
+            raise ValueError("point_norm must have shape [B,P,F]")
+        if x_norm.shape[-1] != self.input_dim:
+            raise ValueError(f"x_norm last dimension must be {self.input_dim}")
+        if point_norm.shape[-1] != self.point_dim:
+            raise ValueError(f"point_norm last dimension must be {self.point_dim}")
+        if point_norm.shape[1] != self.ip_count:
+            raise ValueError(f"point_norm point count must be {self.ip_count}")
+
+        qn, gn = self._split_branch(x_norm)
+        qb = self.q_branch(qn).view(-1, self.strain_dim, self.basis_dim)
+        gb = self.geometry_branch(gn).view(-1, self.strain_dim, self.basis_dim)
+        t = self.trunk(point_norm.reshape(-1, self.point_dim)).view(
+            x_norm.shape[0], self.ip_count, self.strain_dim, self.basis_dim
+        )
+        out = torch.einsum("bak,bak,bpak->bpa", qb, gb, t) / self._scale()
+        if self.use_q_skip:
+            out = out + torch.einsum("paj,bj->bpa", self.skip_weight, qn)
+        return out + self.bias.view(1, 1, self.strain_dim)

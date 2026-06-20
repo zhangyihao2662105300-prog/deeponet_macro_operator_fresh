@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import math
+import tempfile
+from pathlib import Path
 
+import numpy as np
 import torch
 
 from macro_deeponet.autograd import strain_jacobian_wrt_q
@@ -13,7 +16,7 @@ from macro_deeponet.geometry import (
     shape_functions_hex8,
 )
 from macro_deeponet.models import MacroDeepONet, True176Shape4QrawDeepONet
-from macro_deeponet.true176_data import build_point_features
+from macro_deeponet.true176_data import build_point_features, load_one_compact
 from macro_deeponet.train_true176_deeponet_sobolev import ad_jacobian
 
 
@@ -77,6 +80,25 @@ def test_true176_point_features_and_ad_shapes() -> None:
     assert torch.isfinite(j).all()
 
 
+def test_true176_loader_rejects_non_full48_b() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "bad_compact.npz"
+        np.savez(
+            path,
+            shape4=np.zeros((2, 4), dtype=np.float32),
+            q48_raw=np.zeros((2, 48), dtype=np.float32),
+            LE128_base=np.zeros((2, 128, 6), dtype=np.float32),
+            B_LE128_forward=np.zeros((2, 128, 6, 4), dtype=np.float32),
+            sample_paths=np.asarray(["case001"], dtype=str),
+        )
+        try:
+            load_one_compact(path)
+        except ValueError as exc:
+            assert "full q48/B48 compact data" in str(exc)
+        else:
+            raise AssertionError("loader accepted a compact file with B last dimension != 48")
+
+
 def test_tiny_overfit_loss_decreases() -> None:
     torch.manual_seed(19)
     dataset = SyntheticMacroDataset(SyntheticConfig(num_samples=256, seed=19))
@@ -106,5 +128,6 @@ if __name__ == "__main__":
     test_synthetic_rigid_targets()
     test_forward_and_autograd_shapes()
     test_true176_point_features_and_ad_shapes()
+    test_true176_loader_rejects_non_full48_b()
     test_tiny_overfit_loss_decreases()
     print("smoke_test.py: all checks passed")

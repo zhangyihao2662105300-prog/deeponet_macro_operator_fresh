@@ -5,6 +5,7 @@ BASE="${BASE:-/home/ydh/桌面/zhangyihao}"
 CODE="${CODE:-$BASE/deeponet_macro_operator_fresh}"
 DATA="${DATA:-$BASE/true176_shape4_qraw_128ip_training_data_20260620}"
 OUT_DIR="${OUT_DIR:-$BASE/run_logs_128ip_fullframe_20260620/deeponet_true176_128ip_sobolev_ddp_v1}"
+COMPACT_LIST="${COMPACT_LIST:-}"
 EPOCHS="${EPOCHS:-120}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-1}"
@@ -37,7 +38,42 @@ export PYTHONPATH="$CODE/src:${PYTHONPATH:-}"
 mkdir -p "$OUT_DIR"
 cd "$CODE"
 
-COMPACT_LIST="$DATA/compact_paths_linux.txt"
+write_generated_compact_list() {
+  COMPACT_LIST="$OUT_DIR/compact_paths_resolved.txt"
+  cat > "$COMPACT_LIST" <<EOF
+$DATA/compacts/cases001_020/true176_shape4_template_plus_smoke_compact.npz
+$DATA/compacts/batchA_cases022_060/true176_shape4_template_plus_smoke_compact.npz
+$DATA/compacts/batchB_cases062_100/true176_shape4_template_plus_smoke_compact.npz
+$DATA/compacts/batchC_cases102_139/true176_shape4_template_plus_smoke_compact.npz
+$DATA/compacts/batchD_cases141_176/true176_shape4_template_plus_smoke_compact.npz
+EOF
+}
+
+if [[ -z "$COMPACT_LIST" ]]; then
+  if [[ -f "$DATA/compact_paths_linux.txt" ]]; then
+    COMPACT_LIST="$DATA/compact_paths_linux.txt"
+  elif [[ -f "$DATA/compact_paths.txt" ]]; then
+    FIRST_PATH="$(grep -v '^[[:space:]]*#' "$DATA/compact_paths.txt" | head -n 1 || true)"
+    if [[ -n "$FIRST_PATH" && -f "$FIRST_PATH" ]]; then
+      COMPACT_LIST="$DATA/compact_paths.txt"
+    else
+      write_generated_compact_list
+    fi
+  else
+    write_generated_compact_list
+  fi
+fi
+
+while IFS= read -r compact_path; do
+  [[ -z "$compact_path" || "$compact_path" =~ ^[[:space:]]*# ]] && continue
+  if [[ ! -f "$compact_path" ]]; then
+    echo "Missing compact file: $compact_path" >&2
+    echo "DATA=$DATA" >&2
+    echo "COMPACT_LIST=$COMPACT_LIST" >&2
+    exit 2
+  fi
+done < "$COMPACT_LIST"
+
 TARGET_IPS="$(seq -s, 0 127)"
 
 CMD=(
@@ -97,6 +133,8 @@ printf "%q " "${CMD[@]}" > "$OUT_DIR/command.txt"
 printf "\n" >> "$OUT_DIR/command.txt"
 {
   echo "OUT_DIR=$OUT_DIR"
+  echo "DATA=$DATA"
+  echo "COMPACT_LIST=$COMPACT_LIST"
   echo "EPOCHS=$EPOCHS"
   echo "BATCH_SIZE=$BATCH_SIZE"
   echo "EVAL_BATCH_SIZE=$EVAL_BATCH_SIZE"

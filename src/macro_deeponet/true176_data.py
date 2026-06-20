@@ -110,6 +110,17 @@ def load_one_compact(path: str | Path, *, frame_stride: int = 1, max_frames: int
     compact = Path(path).resolve()
     if not compact.exists():
         raise FileNotFoundError(compact)
+
+    def require_shape(z: np.lib.npyio.NpzFile, key: str, tail: tuple[int, ...], n_total: int) -> np.ndarray:
+        arr = np.asarray(z[key], dtype=np.float32)
+        expected = (int(n_total),) + tuple(tail)
+        if tuple(arr.shape) != expected:
+            raise ValueError(
+                f"{compact}: expected {key} shape {expected}, got {tuple(arr.shape)}. "
+                "This TRUE176 DeepONet trainer requires full q48/B48 compact data."
+            )
+        return arr
+
     with np.load(str(compact), allow_pickle=True) as z:
         n_total = int(z["shape4"].shape[0])
         stride = max(1, int(frame_stride))
@@ -122,10 +133,10 @@ def load_one_compact(path: str | Path, *, frame_stride: int = 1, max_frames: int
         b_key = "B_LE128_forward" if "B_LE128_forward" in z.files else "b"
         return {
             "compact_path": str(compact),
-            "shape4": np.asarray(z["shape4"], dtype=np.float32)[idx].reshape(-1, 4),
-            "q48_raw": np.asarray(z["q48_raw"], dtype=np.float32)[idx].reshape(-1, 48),
-            "le": np.asarray(z[le_key], dtype=np.float32)[idx].reshape(-1, 128, 6),
-            "b": np.asarray(z[b_key], dtype=np.float32)[idx].reshape(-1, 128, 6, 48),
+            "shape4": require_shape(z, "shape4", (4,), n_total)[idx],
+            "q48_raw": require_shape(z, "q48_raw", (48,), n_total)[idx],
+            "le": require_shape(z, le_key, (128, 6), n_total)[idx],
+            "b": require_shape(z, b_key, (128, 6, 48), n_total)[idx],
             "sample_index": sample_index[idx],
             "frame_number": frame_number[idx],
             "case_id": case_id[idx],

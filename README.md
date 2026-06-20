@@ -137,8 +137,39 @@ The output checkpoint is written to `runs/fresh_deeponet/best.pt` by default.
 
 ## TRUE176 128-IP Sobolev/DDP training
 
-On Linux, with the same `compact_paths_linux.txt` layout as the current NNSE
-launcher:
+The main full-frame dataset used for third-machine training is:
+
+```text
+/home/ydh/桌面/zhangyihao/true176_shape4_qraw_128ip_training_data_20260620
+```
+
+On this Windows machine the corresponding copy is:
+
+```text
+E:\true176_shape4_qraw_128ip_training_data_20260620
+```
+
+It contains five compact files:
+
+```text
+cases001_020          7100 frames
+batchA_cases022_060  12000 frames
+batchB_cases062_100  12000 frames
+batchC_cases102_139  12000 frames
+batchD_cases141_176  12600 frames
+total                55700 frames
+```
+
+Each compact must provide full q48/B48 arrays:
+
+```text
+shape4:           [N, 4]
+q48_raw:          [N, 48]
+LE128_base:       [N, 128, 6]
+B_LE128_forward:  [N, 128, 6, 48]
+```
+
+On Linux:
 
 ```bash
 cd /home/ydh/桌面/zhangyihao/deeponet_macro_operator_fresh
@@ -152,11 +183,17 @@ BASE=/home/ydh/桌面/zhangyihao
 CODE=$BASE/deeponet_macro_operator_fresh
 DATA=$BASE/true176_shape4_qraw_128ip_training_data_20260620
 OUT_DIR=$BASE/run_logs_128ip_fullframe_20260620/deeponet_true176_128ip_sobolev_ddp_v1
+COMPACT_LIST=                  # optional override
 NPROC=3
 BATCH_SIZE=4
 JAC_COLS_PER_GPU=8
 JACOBIAN_METHOD=forward
 ```
+
+The launcher first tries `$DATA/compact_paths_linux.txt`. If it is missing, it
+checks `$DATA/compact_paths.txt`; if that file contains Windows paths, the
+launcher automatically writes a Linux-resolved five-compact list under
+`$OUT_DIR/compact_paths_resolved.txt`.
 
 Single-process/debug run:
 
@@ -171,6 +208,24 @@ PYTHONPATH=src python3 -m macro_deeponet.train_true176_deeponet_sobolev \
   --jacobian-columns 0,1,2,3 \
   --jacobian-columns-per-batch 2 \
   --eval-columns 0,1,2,3 \
+  --include-id-features
+```
+
+Windows debug run against the E-drive full dataset:
+
+```powershell
+cd D:\IS-FEM\deeponet_macro_operator_fresh
+$env:PYTHONPATH = "D:\IS-FEM\deeponet_macro_operator_fresh\src"
+py -m macro_deeponet.train_true176_deeponet_sobolev `
+  --compact-list E:\true176_shape4_qraw_128ip_training_data_20260620\compact_paths.txt `
+  --out-dir runs\true176_E_main5_debug `
+  --epochs 1 `
+  --batch-size 2 `
+  --max-frames-per-compact 4 `
+  --target-ips 0,1 `
+  --jacobian-columns 0,1 `
+  --jacobian-columns-per-batch 1 `
+  --eval-columns 0,1 `
   --include-id-features
 ```
 

@@ -44,6 +44,7 @@ from .train_true176_deeponet_sobolev import (
 )
 from .true176_data import (
     SobolevArrayDataset,
+    build_branch_features,
     load_compacts,
     parse_int_list,
     parse_target_ips,
@@ -102,13 +103,20 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     train_eval_idx = train_idx[: min(train_idx.size, int(args.max_eval_frames))] if int(args.max_eval_frames) > 0 else train_idx
     val_eval_idx = val_idx[: min(val_idx.size, int(args.max_eval_frames))] if int(args.max_eval_frames) > 0 else val_idx
 
-    x_raw = np.concatenate([data.shape4.astype(np.float32), data.q48_raw.astype(np.float32)], axis=1)
+    x_raw, branch_meta = build_branch_features(
+        shape4=data.shape4,
+        q48_raw=data.q48_raw,
+        mode=str(args.branch_feature_mode),
+        macro_nodes=data.macro_nodes,
+    )
     le_raw = data.le[:, target_ips, :].astype(np.float32)
     b_raw = data.b[:, target_ips, :, :].astype(np.float32)
 
     x_mean, x_std = stats(x_raw[train_idx], axis=0)
     le_mean, le_std = stats(le_raw[train_idx], axis=0)
-    q_std = x_std.reshape(-1)[4:52]
+    q_start = int(branch_meta["q_start"])
+    q_dim = int(branch_meta["q_dim"])
+    q_std = x_std.reshape(-1)[q_start : q_start + q_dim]
     j_norm_target = (b_raw * q_std.reshape(1, 1, 1, 48) / le_std.reshape(1, len(target_ips), 6, 1)).astype(np.float32)
     skip_init = np.mean(j_norm_target[train_idx], axis=0).astype(np.float32)
     b_global_rms = float(np.sqrt(np.mean(np.asarray(b_raw, dtype=np.float64)[train_idx] ** 2)))
@@ -137,6 +145,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "le_std": le_std.astype(np.float32),
         "point_mean": point_mean.astype(np.float32),
         "point_std": point_std.astype(np.float32),
+        "q_start": np.asarray(q_start, dtype=np.int64),
+        "q_dim": np.asarray(q_dim, dtype=np.int64),
     }
 
     if bool(args.cuda) and torch.cuda.is_available():
@@ -168,7 +178,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     )
 
     model = True176Shape4QrawDeepONet(
-        input_dim=52,
+        input_dim=int(x_norm.shape[-1]),
         point_dim=int(point_norm.shape[-1]),
         ip_count=len(target_ips),
         basis_dim=int(args.basis_dim),
@@ -178,6 +188,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         activation=str(args.activation),
         skip_init=torch.as_tensor(skip_init, dtype=torch.float32),
         train_skip=not bool(args.freeze_skip),
+        q_start=q_start,
+        q_dim=q_dim,
     ).to(device)
     init_report = load_checkpoint(model, str(args.init_checkpoint))
     if bool(ctx["distributed"]):
@@ -189,7 +201,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     action_rng = torch.Generator(device=device)
     action_rng.manual_seed(int(args.seed) + 911 + 1009 * rank)
     le_std_t = torch.as_tensor(le_std, dtype=torch.float32, device=device)
-    q_std_np = x_std.reshape(-1)[4:52].astype(np.float32)
+    q_std_np = x_std.reshape(-1)[q_start : q_start + q_dim].astype(np.float32)
 
     if is_main:
         write_json(
@@ -201,6 +213,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 "train_frames": int(train_idx.size),
                 "val_frames": int(val_idx.size),
                 "point_meta": point_meta,
+                "branch_meta": branch_meta,
                 "b_global_rms": b_global_rms,
                 "init_report": init_report,
                 "generic_point_contract": True,
@@ -322,6 +335,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--compact-list", default="")
     p.add_argument("--out-dir", type=Path, required=True)
     p.add_argument("--target-ips", default=",".join(str(i) for i in range(128)))
+    p.add_argument("--branch-feature-mode", default="xnodes-qraw", choices=["shape4-qraw", "xnodes-qraw"])
     p.add_argument("--point-feature-source", default="data", choices=["data", "auto", "shape4-audited", "shape4"])
     p.add_argument("--allow-shape4-point-feature-fallback", action="store_true")
     p.add_argument("--epochs", type=int, default=120)

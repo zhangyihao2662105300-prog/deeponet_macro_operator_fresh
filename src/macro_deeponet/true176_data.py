@@ -3,7 +3,8 @@
 This module mirrors the current NNSE training contract without depending on the
 large NNSE repository at runtime:
 
-    x_raw  = [shape4(4), q48_raw(48)]
+    legacy branch = [shape4(4), q48_raw(48)]
+    current generic branch = [q48_raw(48), X_macro(50,3)]
     LE     = LE128_base          -> [frames, 128, 6]
     B      = B_LE128_forward     -> [frames, 128, 6, 48]
 
@@ -49,6 +50,7 @@ class True176Arrays:
     q48_raw: np.ndarray
     le: np.ndarray
     b: np.ndarray
+    macro_nodes: np.ndarray | None
     sample_index: np.ndarray
     frame_number: np.ndarray
     case_id: np.ndarray
@@ -131,12 +133,24 @@ def load_one_compact(path: str | Path, *, frame_stride: int = 1, max_frames: int
         sample_index, frame_number, case_id = sample_meta(n_total, sample_paths)
         le_key = "LE128_base" if "LE128_base" in z.files else "le"
         b_key = "B_LE128_forward" if "B_LE128_forward" in z.files else "b"
+        macro_nodes = None
+        for node_key in ("X_macro", "macro_node_coords", "x_macro", "macro_nodes", "nodes50"):
+            if node_key in z.files:
+                raw_nodes = np.asarray(z[node_key], dtype=np.float32)
+                if raw_nodes.shape == (50, 3):
+                    macro_nodes = np.broadcast_to(raw_nodes.reshape(1, 50, 3), (n_total, 50, 3)).copy()[idx]
+                elif raw_nodes.shape == (n_total, 50, 3):
+                    macro_nodes = raw_nodes[idx]
+                else:
+                    raise ValueError(f"{compact}: expected {node_key} shape [50,3] or [{n_total},50,3], got {raw_nodes.shape}")
+                break
         return {
             "compact_path": str(compact),
             "shape4": require_shape(z, "shape4", (4,), n_total)[idx],
             "q48_raw": require_shape(z, "q48_raw", (48,), n_total)[idx],
             "le": require_shape(z, le_key, (128, 6), n_total)[idx],
             "b": require_shape(z, b_key, (128, 6, 48), n_total)[idx],
+            "macro_nodes": macro_nodes,
             "sample_index": sample_index[idx],
             "frame_number": frame_number[idx],
             "case_id": case_id[idx],
@@ -154,6 +168,12 @@ def load_compacts(paths: Iterable[str], *, frame_stride: int = 1, max_frames_per
     if not chunks:
         raise ValueError("at least one compact file is required")
     shape4 = np.concatenate([c["shape4"] for c in chunks], axis=0)
+    if all(c["macro_nodes"] is not None for c in chunks):
+        macro_nodes = np.concatenate([np.asarray(c["macro_nodes"], dtype=np.float32) for c in chunks], axis=0)
+    elif all(c["macro_nodes"] is None for c in chunks):
+        macro_nodes = None
+    else:
+        raise ValueError("Either every compact must provide X_macro/macro_node_coords/nodes50, or none of them should.")
     _, shape_index = np.unique(shape4, axis=0, return_inverse=True)
     return True176Arrays(
         compact_paths=[str(c["compact_path"]) for c in chunks],
@@ -161,6 +181,7 @@ def load_compacts(paths: Iterable[str], *, frame_stride: int = 1, max_frames_per
         q48_raw=np.concatenate([c["q48_raw"] for c in chunks], axis=0),
         le=np.concatenate([c["le"] for c in chunks], axis=0),
         b=np.concatenate([c["b"] for c in chunks], axis=0),
+        macro_nodes=macro_nodes,
         sample_index=np.concatenate([c["sample_index"] for c in chunks], axis=0),
         frame_number=np.concatenate([c["frame_number"] for c in chunks], axis=0),
         case_id=np.concatenate([c["case_id"] for c in chunks], axis=0),
@@ -305,6 +326,77 @@ def build_shape4_nodes(shape4: np.ndarray) -> np.ndarray:
                 v = -0.5 + float(i) / float(NX)
                 nodes[node_id(i, j, k) - 1] = point_at_params(shape4, u, v, w)
     return nodes
+
+
+def build_macro_node_coords_unique(shape4: np.ndarray) -> tuple[np.ndarray, dict[str, Any]]:
+    """Return X_macro node coordinates for each frame as [N,50,3]."""
+
+    shapes = np.asarray(shape4, dtype=np.float32).reshape(-1, 4)
+    if shapes.shape[0] == 0:
+        return np.empty((0, (NX + 1) * (NY + 1) * 2, 3), dtype=np.float32), {
+            "macro_node_count": int((NX + 1) * (NY + 1) * 2),
+            "unique_shape4_count": 0,
+            "macro_geometry_source": "empty",
+        }
+    unique_shape4, inverse = np.unique(shapes, axis=0, return_inverse=True)
+    nodes_unique = np.asarray([build_shape4_nodes(shape) for shape in unique_shape4], dtype=np.float32)
+    nodes = nodes_unique[np.asarray(inverse, dtype=np.int64)]
+    return nodes.astype(np.float32), {
+        "macro_node_count": int(nodes.shape[1]),
+        "unique_shape4_count": int(unique_shape4.shape[0]),
+        "macro_geometry_source": "shape4_reconstructed_nodes",
+        "node_order": "CSS8 node_id order over 5x5x2 grid",
+    }
+
+
+def build_branch_features(
+    *,
+    shape4: np.ndarray,
+    q48_raw: np.ndarray,
+    mode: str,
+    macro_nodes: np.ndarray | None = None,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Build branch features and record where the q48 slice lives."""
+
+    key = str(mode).strip().lower().replace("_", "-")
+    shape = np.asarray(shape4, dtype=np.float32).reshape(-1, 4)
+    q = np.asarray(q48_raw, dtype=np.float32).reshape(-1, 48)
+    if shape.shape[0] != q.shape[0]:
+        raise ValueError(f"shape4 frame count {shape.shape[0]} does not match q48 frame count {q.shape[0]}")
+    if key == "shape4-qraw":
+        x = np.concatenate([shape, q], axis=1).astype(np.float32)
+        return x, {
+            "branch_mode": "shape4-qraw",
+            "branch_dim": int(x.shape[1]),
+            "q_start": 4,
+            "q_dim": 48,
+            "geometry_input": "shape4[4]",
+        }
+    if key == "xnodes-qraw":
+        if macro_nodes is None:
+            nodes, meta = build_macro_node_coords_unique(shape)
+        else:
+            nodes = np.asarray(macro_nodes, dtype=np.float32).reshape(-1, 50, 3)
+            if nodes.shape[0] != q.shape[0]:
+                raise ValueError(f"X_macro frame count {nodes.shape[0]} does not match q48 frame count {q.shape[0]}")
+            meta = {
+                "macro_node_count": 50,
+                "unique_shape4_count": int(np.unique(shape, axis=0).shape[0]) if shape.shape[0] else 0,
+                "macro_geometry_source": "compact_X_macro",
+                "node_order": "provided by compact; must match the element connectivity contract",
+            }
+        x_nodes_flat = nodes.reshape(nodes.shape[0], -1).astype(np.float32)
+        x = np.concatenate([q, x_nodes_flat], axis=1).astype(np.float32)
+        return x, {
+            **meta,
+            "branch_mode": "xnodes-qraw",
+            "branch_dim": int(x.shape[1]),
+            "q_start": 0,
+            "q_dim": 48,
+            "geometry_input": "X_macro[50,3]",
+            "contract": "Branch=[q48_raw, X_macro_nodes]; Trunk=[xi, x(xi), J, invJ, detJ, ...]",
+        }
+    raise ValueError("branch feature mode must be one of: shape4-qraw, xnodes-qraw")
 
 
 def build_shape4_ip_geometry(shape4: np.ndarray) -> dict[str, np.ndarray]:

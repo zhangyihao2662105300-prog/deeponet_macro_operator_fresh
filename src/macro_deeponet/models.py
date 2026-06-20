@@ -125,7 +125,8 @@ class True176Shape4QrawDeepONet(nn.Module):
 
     Contract, matching the fc4117d launcher/trainer in NNSE-NeuralNetworkShellElement:
 
-        branch input  x_norm    = standardized [shape4(4), q48_raw(48)] -> [B, 52]
+        branch input  x_norm    = standardized branch state -> [B, input_dim]
+                                = [shape4,q48] legacy or [q48,X_macro] isoparametric
         trunk input   point_norm = standardized 128-IP geometry/features -> [B, P, F]
         output        LE_norm    = standardized LE -> [B, P, 6]
 
@@ -153,18 +154,24 @@ class True176Shape4QrawDeepONet(nn.Module):
         skip_init: torch.Tensor | None = None,
         train_skip: bool = True,
         residual_scale: float = 1.0,
+        q_start: int = 4,
+        q_dim: int = 48,
     ) -> None:
         super().__init__()
-        if input_dim < 52:
-            raise ValueError("TRUE176 input_dim must include shape4[4] + q48_raw[48]")
+        if input_dim <= 0:
+            raise ValueError("input_dim must be positive")
         if point_dim <= 0:
             raise ValueError("point_dim must be positive for the 128-IP DeepONet trunk")
+        if int(q_start) < 0 or int(q_dim) <= 0 or int(q_start) + int(q_dim) > int(input_dim):
+            raise ValueError("q_start/q_dim must select a valid q slice inside the branch input")
         self.input_dim = int(input_dim)
         self.point_dim = int(point_dim)
         self.ip_count = int(ip_count)
         self.strain_dim = int(strain_dim)
         self.basis_dim = int(basis_dim)
         self.residual_scale = float(residual_scale)
+        self.q_start = int(q_start)
+        self.q_dim = int(q_dim)
 
         act = activation_module(activation)
         coeff_dim = self.strain_dim * self.basis_dim
@@ -173,9 +180,9 @@ class True176Shape4QrawDeepONet(nn.Module):
         self.bias = nn.Parameter(torch.zeros(self.strain_dim))
 
         if skip_init is None:
-            skip = torch.zeros(self.ip_count, self.strain_dim, 48, dtype=torch.float32)
+            skip = torch.zeros(self.ip_count, self.strain_dim, self.q_dim, dtype=torch.float32)
         else:
-            skip = torch.as_tensor(skip_init, dtype=torch.float32).reshape(self.ip_count, self.strain_dim, 48)
+            skip = torch.as_tensor(skip_init, dtype=torch.float32).reshape(self.ip_count, self.strain_dim, self.q_dim)
         self.skip_weight = nn.Parameter(skip, requires_grad=bool(train_skip))
 
     def forward(self, x_norm: torch.Tensor, point_norm: torch.Tensor) -> torch.Tensor:
@@ -190,7 +197,7 @@ class True176Shape4QrawDeepONet(nn.Module):
         if point_norm.shape[1] != self.ip_count:
             raise ValueError(f"point_norm point count must be {self.ip_count}")
 
-        qn = x_norm[:, 4:52]
+        qn = x_norm[:, self.q_start : self.q_start + self.q_dim]
         skip = torch.einsum("paj,bj->bpa", self.skip_weight, qn)
         b = self.branch(x_norm).view(-1, self.strain_dim, self.basis_dim)
         t = self.trunk(point_norm.reshape(-1, self.point_dim)).view(

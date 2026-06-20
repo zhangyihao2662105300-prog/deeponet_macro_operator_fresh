@@ -66,7 +66,7 @@ launcher commit `fc4117d`.
 Current data contract:
 
 ```text
-input  = shape4[4] + q48_raw[48]
+input  = q48_raw[48] + X_macro[50,3]
 output = LE[target_ips, 6]
 B      = d LE / d q48_raw
 ```
@@ -74,7 +74,7 @@ B      = d LE / d q48_raw
 The DeepONet form is:
 
 ```text
-Branch input = standardized [shape4, q48_raw]       # [B,52]
+Branch input = standardized [q48_raw, X_macro]       # [B,198]
 Trunk input  = point/IP features                     # [B,P,F]
 Output       = standardized LE                      # [B,P,6]
 AD B         = d(LE_norm)/d(q48_norm)               # [B,P,6,48]
@@ -82,22 +82,29 @@ AD B         = d(LE_norm)/d(q48_norm)               # [B,P,6,48]
 
 For generic data, trunk features should be stored in the compact data as
 `point_features`, `ip_xyz`, `ip_J`, `ip_detJ`, etc.  For the current TRUE176
-20260620 compacts, those fields were omitted, but they can be reconstructed
-from the audited shape4/CSS8 generation contract:
+20260620 compacts, both `X_macro` and those trunk fields were omitted, but they
+can be reconstructed from the audited shape4/CSS8 generation contract:
 
 ```text
 shape4 -> 50 CSS8 nodes -> 16 CSS8 elements -> 128 standard Gauss rows
 ```
 
-The explicit training source for this dataset is therefore:
+The explicit training sources for this dataset are therefore:
 
 ```text
+--branch-feature-mode xnodes-qraw
 --point-feature-source shape4-audited
 ```
 
 That is different from a blind fallback: original sample NPZ files contain
 `ip_keys`, and the audit script checks that their row order is
 `element 1 IP1..IP8, ..., element 16 IP1..IP8`.
+
+This is the first step toward the general isoparametric form.  Geometry enters
+the branch as macro-node coordinates instead of the compressed `shape4[4]`.
+The displacement variable is still `q48_raw`, because the current label
+`B_LE128_forward` is `dLE/dq48_raw`.  A future `q_boundary[32,3]` branch requires
+matching derivative labels with respect to that variable.
 
 The key files are:
 
@@ -205,6 +212,7 @@ DATA=$BASE/true176_shape4_qraw_128ip_training_data_20260620
 OUT_DIR=$BASE/run_logs_128ip_fullframe_20260620/deeponet_true176_128ip_sobolev_ddp_v1
 COMPACT_LIST=                  # optional override
 POINT_FEATURE_SOURCE=shape4-audited
+BRANCH_FEATURE_MODE=xnodes-qraw
 NPROC=3
 BATCH_SIZE=4
 JAC_COLS_PER_GPU=8
@@ -226,6 +234,7 @@ PYTHONPATH=src python3 -m macro_deeponet.train_true176_generic_sobolev \
   --batch-size 2 \
   --max-frames-per-compact 16 \
   --target-ips 0,1,2,3 \
+  --branch-feature-mode xnodes-qraw \
   --point-feature-source shape4-audited \
   --jacobian-columns 0,1,2,3 \
   --jacobian-columns-per-batch 2 \
@@ -245,6 +254,7 @@ py -m macro_deeponet.train_true176_generic_sobolev `
   --batch-size 2 `
   --max-frames-per-compact 4 `
   --target-ips 0,1 `
+  --branch-feature-mode xnodes-qraw `
   --point-feature-source shape4-audited `
   --jacobian-columns 0,1 `
   --jacobian-columns-per-batch 1 `
@@ -283,8 +293,8 @@ For the current TRUE176/CSS8 dataset, this is specialized to fixed 128 CSS8
 integration points:
 
 ```text
-shape4:        [4]
 q48_raw:       [48]
+X_macro:       [50, 3]  # reconstructed from shape4 today, directly stored later
 LE128_base:    [128, 6]
 B_LE128_forward: [128, 6, 48]
 ```

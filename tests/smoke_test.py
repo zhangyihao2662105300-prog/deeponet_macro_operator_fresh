@@ -17,7 +17,7 @@ from macro_deeponet.geometry import (
 )
 from macro_deeponet.models import MacroDeepONet, True176Shape4QrawDeepONet
 from macro_deeponet.point_features import load_point_features_from_compacts
-from macro_deeponet.true176_data import build_point_features, load_one_compact
+from macro_deeponet.true176_data import build_branch_features, build_point_features, load_one_compact
 from macro_deeponet.train_true176_deeponet_sobolev import ad_jacobian
 
 
@@ -73,6 +73,35 @@ def test_true176_point_features_and_ad_shapes() -> None:
         trunk_depth=2,
     )
     x_norm = torch.randn(2, 52)
+    p_norm = torch.as_tensor(point, dtype=torch.float32)
+    le = model(x_norm, p_norm)
+    assert le.shape == (2, 128, 6)
+    j = ad_jacobian(model, x_norm, p_norm, [0, 3, 7], create_graph=False, method="forward")
+    assert j.shape == (2, 128, 6, 3)
+    assert torch.isfinite(j).all()
+
+
+def test_true176_xnodes_branch_and_ad_shapes() -> None:
+    shape4 = np.asarray([[1.2, 0.05, 0.10, 0.00], [1.4, 0.04, 0.08, 0.20]], dtype=np.float32)
+    q48 = np.zeros((2, 48), dtype=np.float32)
+    branch, branch_meta = build_branch_features(shape4=shape4, q48_raw=q48, mode="xnodes-qraw")
+    point, _meta = build_point_features(shape4, include_id_features=False)
+    assert branch.shape == (2, 198)
+    assert branch_meta["q_start"] == 0
+    assert branch_meta["geometry_input"] == "X_macro[50,3]"
+
+    model = True176Shape4QrawDeepONet(
+        input_dim=branch.shape[-1],
+        point_dim=point.shape[-1],
+        ip_count=128,
+        basis_dim=12,
+        hidden_dim=32,
+        branch_depth=2,
+        trunk_depth=2,
+        q_start=0,
+        q_dim=48,
+    )
+    x_norm = torch.randn(2, branch.shape[-1])
     p_norm = torch.as_tensor(point, dtype=torch.float32)
     le = model(x_norm, p_norm)
     assert le.shape == (2, 128, 6)
@@ -210,6 +239,7 @@ if __name__ == "__main__":
     test_synthetic_rigid_targets()
     test_forward_and_autograd_shapes()
     test_true176_point_features_and_ad_shapes()
+    test_true176_xnodes_branch_and_ad_shapes()
     test_true176_loader_rejects_non_full48_b()
     test_generic_point_feature_loader_reads_real_fields()
     test_generic_point_feature_loader_marks_shape4_fallback()

@@ -113,10 +113,16 @@ def unwrap_model(model: nn.Module) -> nn.Module:
     return model.module if isinstance(model, DDP) else model
 
 
+def model_q_slice(model: nn.Module) -> tuple[int, int]:
+    base = unwrap_model(model)
+    return int(getattr(base, "q_start", 4)), int(getattr(base, "q_dim", 48))
+
+
 def ad_jacobian_forward(model: nn.Module, xb: torch.Tensor, pb: torch.Tensor, columns: list[int], *, create_graph: bool) -> torch.Tensor:
     if not columns:
         return torch.zeros((xb.shape[0], pb.shape[1], 6, 0), dtype=xb.dtype, device=xb.device)
     x_req = xb.detach().clone().requires_grad_(True)
+    q_start, _q_dim = model_q_slice(model)
 
     def fn(x_in: torch.Tensor) -> torch.Tensor:
         return model(x_in, pb)
@@ -124,7 +130,7 @@ def ad_jacobian_forward(model: nn.Module, xb: torch.Tensor, pb: torch.Tensor, co
     cols: list[torch.Tensor] = []
     for col in columns:
         tangent = torch.zeros_like(x_req)
-        tangent[:, 4 + int(col)] = 1.0
+        tangent[:, q_start + int(col)] = 1.0
         _le, jvp = torch.autograd.functional.jvp(fn, x_req, tangent, create_graph=bool(create_graph), strict=False)
         cols.append(jvp)
     return torch.stack(cols, dim=-1)
@@ -135,7 +141,8 @@ def ad_jacobian_reverse(model: nn.Module, xb: torch.Tensor, pb: torch.Tensor, co
         return torch.zeros((xb.shape[0], pb.shape[1], 6, 0), dtype=xb.dtype, device=xb.device)
     x_req = xb.detach().clone().requires_grad_(True)
     le = model(x_req, pb)
-    q_cols = torch.as_tensor([4 + int(c) for c in columns], dtype=torch.long, device=xb.device)
+    q_start, _q_dim = model_q_slice(model)
+    q_cols = torch.as_tensor([q_start + int(c) for c in columns], dtype=torch.long, device=xb.device)
     out_ips: list[torch.Tensor] = []
     for ip in range(int(le.shape[1])):
         rows: list[torch.Tensor] = []
@@ -231,7 +238,9 @@ def evaluate(
     le_rows: list[np.ndarray] = []
     jn_rows: list[np.ndarray] = []
     bp_rows: list[np.ndarray] = []
-    q_std = norms["x_std"].reshape(-1)[4:52].astype(np.float32)
+    q_start = int(np.asarray(norms.get("q_start", 4)).reshape(-1)[0])
+    q_dim = int(np.asarray(norms.get("q_dim", 48)).reshape(-1)[0])
+    q_std = norms["x_std"].reshape(-1)[q_start : q_start + q_dim].astype(np.float32)
     le_std = norms["le_std"].astype(np.float32)
     q_std_cols = q_std[np.asarray(columns, dtype=np.int64)]
     model.eval()
@@ -342,7 +351,16 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     point_norm = ((point_raw - point_mean.reshape(1, 1, -1)) / point_std.reshape(1, 1, -1)).astype(np.float32)
     x_norm = ((x_raw - x_mean) / x_std).astype(np.float32)
     le_norm = ((le_raw - le_mean) / le_std).astype(np.float32)
-    norms = {"x_mean": x_mean.astype(np.float32), "x_std": x_std.astype(np.float32), "le_mean": le_mean.astype(np.float32), "le_std": le_std.astype(np.float32), "point_mean": point_mean.astype(np.float32), "point_std": point_std.astype(np.float32)}
+    norms = {
+        "x_mean": x_mean.astype(np.float32),
+        "x_std": x_std.astype(np.float32),
+        "le_mean": le_mean.astype(np.float32),
+        "le_std": le_std.astype(np.float32),
+        "point_mean": point_mean.astype(np.float32),
+        "point_std": point_std.astype(np.float32),
+        "q_start": np.asarray(4, dtype=np.int64),
+        "q_dim": np.asarray(48, dtype=np.int64),
+    }
 
     if bool(args.cuda) and torch.cuda.is_available():
         if bool(ctx["distributed"]):

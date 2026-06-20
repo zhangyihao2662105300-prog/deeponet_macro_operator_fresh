@@ -126,6 +126,54 @@ def _id_features(target_ips: list[int], batch: int) -> tuple[np.ndarray, list[st
     ]
 
 
+def _is_dimensionless_point_feature_name(name: str) -> bool:
+    """Return True for point features that do not carry a physical length unit."""
+
+    low = str(name).strip().lower()
+    if not low:
+        return False
+    if "_hat" in low or low.endswith("hat"):
+        return True
+    if low in {
+        "ip_xi",
+        "xi128",
+        "ip_natural_coords",
+        "natural_coords",
+        "local_r",
+        "local_s",
+        "local_t",
+        "elem_index_norm",
+        "ip_index_norm",
+        "elem_x_center_id",
+        "elem_y_center_id",
+    }:
+        return True
+    if low.startswith(
+        (
+            "ip_xi_",
+            "xi128_",
+            "ip_natural_coords_",
+            "natural_coords_",
+            "xi_fine",
+            "eta_fine",
+            "zeta_fine",
+            "local_",
+            "sin_",
+            "cos_",
+            "ip_frame_",
+            "ip_frames_",
+            "frames128_",
+            "frame_",
+            "elem_index",
+            "ip_index",
+            "elem_x_",
+            "elem_y_",
+        )
+    ):
+        return True
+    return False
+
+
 def transform_point_features_for_scale(
     point: np.ndarray,
     feature_names: list[str],
@@ -138,7 +186,10 @@ def transform_point_features_for_scale(
 
     This operates by feature name.  Raw-field names such as ``ip_xyz_*``,
     ``ip_J_*``, ``ip_invJ_*`` and ``ip_detJ`` are treated as physical fields.
-    Existing ``*_hat`` features are assumed already dimensionless.
+    Existing ``*_hat`` features and natural coordinates are assumed already
+    dimensionless.  In physical mode, anonymous prebuilt features are rejected
+    when no scale-aware name is present, because the code cannot know which
+    columns carry length units.
     """
 
     mode = canonical_scale_mode(scale_mode)
@@ -157,10 +208,13 @@ def transform_point_features_for_scale(
 
     h_point = h.reshape(arr.shape[0], 1)
     transformed: list[dict[str, Any]] = []
+    dimensionless: list[str] = []
+    unrecognized: list[str] = []
     det_dim = int(detj_scale_dim)
     for i, name in enumerate(names):
         low = name.lower()
-        if "_hat" in low or low.endswith("hat"):
+        if _is_dimensionless_point_feature_name(name):
+            dimensionless.append(name)
             continue
         if low.startswith(("ip_xyz_", "ip_coords_", "ip_coordinates_", "integration_point_xyz_", "gauss_xyz_")):
             arr[:, :, i] = arr[:, :, i] / h_point
@@ -177,6 +231,18 @@ def transform_point_features_for_scale(
         elif low in {"log_abs_detj", "log_abs_ip_detj", "ip_log_abs_detj"}:
             arr[:, :, i] = arr[:, :, i] - float(det_dim) * np.log(h_point)
             transformed.append({"feature": name, "rule": f"subtract_{det_dim}_logH"})
+        else:
+            unrecognized.append(name)
+
+    if unrecognized:
+        sample = ", ".join(unrecognized[:8])
+        raise ValueError(
+            "scale_mode=physical found point feature names whose length units are unknown: "
+            f"{sample}. "
+            "For physical-size data, provide raw fields such as ip_xyz/ip_J/ip_invJ/ip_detJ, "
+            "or provide point_feature_names with *_hat/dimensionless names if the prebuilt point_features "
+            "are already nondimensionalized."
+        )
 
     return arr.astype(np.float32), {
         "scale_mode": mode,
@@ -184,6 +250,9 @@ def transform_point_features_for_scale(
         "detJ_scale_dim": det_dim,
         "transformed_feature_count": int(len(transformed)),
         "transformed_features": transformed[:64],
+        "dimensionless_feature_count": int(len(dimensionless)),
+        "unrecognized_feature_count": int(len(unrecognized)),
+        "unrecognized_features": unrecognized[:64],
         "H_min": float(np.min(h)),
         "H_max": float(np.max(h)),
     }
@@ -202,7 +271,7 @@ def _shape4_audited_features(
         "This is valid only for compacts whose LE/B rows follow standard ip_keys "
         "[elem 1 IP1..IP8, ..., elem 16 IP1..IP8]. Run "
         "scripts/audit_true176_shape4_ip_contract.py on available sample NPZ files "
-        "or generation sidecars before using it as a physical data source."
+        "or generation sidecars before using it as a dimensionless TRUE176 point source."
     )
     return point_all[:, target_ips, :].astype(np.float32), {
         **meta,

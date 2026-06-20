@@ -94,7 +94,7 @@ q_coordinate = q48_raw in normalized length
 B_label = dLE/dq48_raw
 ```
 
-For future physical-size compacts, provide `H`/`length_scale` and use
+For future physical-size compacts, explicitly provide `H`/`length_scale` and use
 `--scale-mode physical`.  The trainer then uses:
 
 ```text
@@ -107,16 +107,27 @@ detJ_hat = detJ / H^3
 B_hat    = H * B_phys
 ```
 
+In `--scale-mode physical`, Branch geometry must come from explicit physical
+`X_keep` or `X_macro` fields.  The `shape4` reconstruction used by the current
+TRUE176 data already produces dimensionless hat geometry, so the trainer now
+refuses to treat shape4-only geometry as physical coordinates and divide it by
+`H`.
+
 The Sobolev loss is trained against `B_hat = dLE/dq_hat`, then the normal ML
 standardization uses `mean/std` on the already dimensionless branch/trunk
 features.  `H` may be added as a separate physical parameter later, but it is
 not needed to repair pure geometric similarity scaling.
 
 For generic data, trunk features should be stored in the compact data as
-`point_features`, `ip_xyz`, `ip_J`, `ip_detJ`, etc.  For the current TRUE176
-20260620 compacts, `X_keep`, `X_macro`, and those trunk fields were omitted, but
-the needed geometry can be reconstructed from the audited shape4/CSS8 generation
-contract:
+`point_features`, `ip_xyz`, `ip_J`, `ip_detJ`, etc.  In physical mode, prebuilt
+`point_features` must have scale-aware names: raw physical fields such as
+`ip_xyz_*`, `ip_J_*`, `ip_invJ_*`, `ip_detJ`, or explicit dimensionless names
+such as `*_hat`.  Anonymous columns like `point_features_0` are rejected because
+the trainer cannot know whether to divide them by `H`.
+
+For the current TRUE176 20260620 compacts, `X_keep`, `X_macro`, and those trunk
+fields were omitted, but the needed geometry can be reconstructed from the
+audited shape4/CSS8 generation contract:
 
 ```text
 shape4 -> X_keep[16,3] for Branch
@@ -300,7 +311,7 @@ py -m macro_deeponet.train_true176_generic_sobolev `
 ```
 
 Audit the available original sample files before treating shape4 reconstruction
-as the physical point source:
+as the dimensionless TRUE176 point source:
 
 ```powershell
 cd D:\IS-FEM\deeponet_macro_operator_fresh

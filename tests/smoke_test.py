@@ -27,6 +27,7 @@ from macro_deeponet.true176_data import (
     transform_b_target_for_q_coordinate,
 )
 from macro_deeponet.train_true176_deeponet_sobolev import ad_jacobian
+from macro_deeponet.train_true176_generic_sobolev import train as train_true176_generic
 
 
 def test_geometry_identities() -> None:
@@ -190,6 +191,26 @@ def test_true176_physical_scale_transforms_branch_and_b() -> None:
     assert np.allclose(b_hat[1], 12.0)
 
 
+def test_true176_physical_scale_rejects_shape4_branch_geometry() -> None:
+    shape4 = np.zeros((1, 4), dtype=np.float32)
+    q48 = np.zeros((1, 48), dtype=np.float32)
+    h = np.asarray([[2.0]], dtype=np.float32)
+
+    for mode in ("shape4-qraw", "xkeep-qraw", "xnodes-qraw"):
+        try:
+            build_branch_features(
+                shape4=shape4,
+                q48_raw=q48,
+                mode=mode,
+                length_scale=h,
+                scale_mode="physical",
+            )
+        except ValueError as exc:
+            assert "shape4" in str(exc) or "explicit physical" in str(exc)
+        else:
+            raise AssertionError(f"physical scale accepted shape4-only geometry for {mode}")
+
+
 def test_true176_physical_scale_transforms_raw_point_fields() -> None:
     point = np.asarray([[[2.0, 4.0, 0.25, 8.0]]], dtype=np.float32)
     names = ["ip_xyz_x", "ip_J_00", "ip_invJ_00", "ip_detJ"]
@@ -202,6 +223,32 @@ def test_true176_physical_scale_transforms_raw_point_fields() -> None:
     )
     assert meta["transformed_feature_count"] == 4
     assert np.allclose(scaled[0, 0], [1.0, 2.0, 0.5, 1.0])
+
+
+def test_true176_physical_scale_rejects_unnamed_point_features() -> None:
+    point = np.asarray([[[1.0, 2.0]]], dtype=np.float32)
+    names = ["point_features_0", "point_features_1"]
+    try:
+        transform_point_features_for_scale(
+            point,
+            names,
+            np.asarray([[2.0]], dtype=np.float32),
+            scale_mode="physical",
+        )
+    except ValueError as exc:
+        assert "length units are unknown" in str(exc)
+    else:
+        raise AssertionError("physical scale accepted anonymous point features")
+
+    hat, meta = transform_point_features_for_scale(
+        point,
+        ["X_hat_exact", "detJ_hat"],
+        np.asarray([[2.0]], dtype=np.float32),
+        scale_mode="physical",
+    )
+    assert meta["transformed_feature_count"] == 0
+    assert meta["dimensionless_feature_count"] == 2
+    assert np.allclose(hat, point)
 
 
 def test_true176_full_xnodes_branch_is_available_as_ablation() -> None:
@@ -229,6 +276,49 @@ def test_true176_loader_rejects_non_full48_b() -> None:
             assert "full q48/B48 compact data" in str(exc)
         else:
             raise AssertionError("loader accepted a compact file with B last dimension != 48")
+
+
+def test_true176_physical_train_requires_explicit_h() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        compact = tmp_path / "no_h_compact.npz"
+        compact_list = tmp_path / "compact_paths.txt"
+        n = 1
+        np.savez(
+            compact,
+            shape4=np.zeros((n, 4), dtype=np.float32),
+            q48_raw=np.zeros((n, 48), dtype=np.float32),
+            LE128_base=np.zeros((n, 128, 6), dtype=np.float32),
+            B_LE128_forward=np.zeros((n, 128, 6, 48), dtype=np.float32),
+            X_keep=np.zeros((n, 16, 3), dtype=np.float32),
+            ip_xi=np.zeros((n, 128, 3), dtype=np.float32),
+        )
+        compact_list.write_text(str(compact), encoding="utf-8")
+        args = type(
+            "Args",
+            (),
+            {
+                "ddp": False,
+                "cuda": False,
+                "ddp_backend": "gloo",
+                "seed": 1,
+                "out_dir": tmp_path / "out",
+                "compact": [],
+                "compact_list": str(compact_list),
+                "target_ips": "0",
+                "scale_mode": "physical",
+                "frame_stride": 1,
+                "max_frames_per_compact": 0,
+                "val_fraction": 0.0,
+                "val_cases": "",
+            },
+        )()
+        try:
+            train_true176_generic(args)
+        except ValueError as exc:
+            assert "requires an explicit H" in str(exc)
+        else:
+            raise AssertionError("physical training accepted implicit H=1 compact")
 
 
 def test_generic_point_feature_loader_reads_real_fields() -> None:
@@ -345,9 +435,12 @@ if __name__ == "__main__":
     test_true176_keep_node_order_matches_q48_contract()
     test_true176_loader_uses_explicit_xkeep_when_available()
     test_true176_physical_scale_transforms_branch_and_b()
+    test_true176_physical_scale_rejects_shape4_branch_geometry()
     test_true176_physical_scale_transforms_raw_point_fields()
+    test_true176_physical_scale_rejects_unnamed_point_features()
     test_true176_full_xnodes_branch_is_available_as_ablation()
     test_true176_loader_rejects_non_full48_b()
+    test_true176_physical_train_requires_explicit_h()
     test_generic_point_feature_loader_reads_real_fields()
     test_generic_point_feature_loader_marks_shape4_fallback()
     test_generic_point_feature_loader_shape4_audited()

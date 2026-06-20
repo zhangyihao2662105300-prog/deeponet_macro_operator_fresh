@@ -102,6 +102,11 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         frame_stride=int(args.frame_stride),
         max_frames_per_compact=int(args.max_frames_per_compact),
     )
+    if scale_mode == "physical" and "implicit_H_1" in str(data.length_scale_source).split("+"):
+        raise ValueError(
+            "scale_mode=physical requires an explicit H/length_scale field in every compact. "
+            "Use scale_mode=normalized for already dimensionless TRUE176 data."
+        )
     train_idx, val_idx = split_indices(data, float(args.val_fraction), int(args.seed), str(args.val_cases))
     train_eval_idx = train_idx[: min(train_idx.size, int(args.max_eval_frames))] if int(args.max_eval_frames) > 0 else train_idx
     val_eval_idx = val_idx[: min(val_idx.size, int(args.max_eval_frames))] if int(args.max_eval_frames) > 0 else val_idx

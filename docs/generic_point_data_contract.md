@@ -70,6 +70,33 @@ and should train with:
 --b-label-coordinate physical
 ```
 
+In `scale_mode=physical`, Branch geometry must be explicit physical geometry:
+
+```text
+X_keep:  [N,16,3] or [16,3]
+or
+X_macro: [N,50,3] or [50,3]
+```
+
+The current TRUE176 `shape4` reconstruction is already dimensionless hat
+geometry.  It must not be treated as physical `X` and divided by `H`; the
+trainer rejects that path.
+
+Physical-mode Trunk fields must also have scale-aware names.  Raw physical
+fields are scaled by name:
+
+```text
+ip_xyz_* / ip_J_*    -> divide by H
+ip_invJ_*            -> multiply by H
+ip_detJ              -> divide by H^detj_scale_dim
+log_abs_detJ         -> subtract detj_scale_dim * log(H)
+```
+
+Dimensionless features must be named explicitly, for example `*_hat`,
+`ip_xi_*`, `local_*`, or normalized id features.  Anonymous prebuilt columns
+such as `point_features_0` are rejected in physical mode because their length
+units cannot be inferred.
+
 If a shell formulation uses anisotropic in-plane/thickness scales or a 2D
 surface integration rule, the determinant exponent must be changed from the
 default `--detj-scale-dim 3` to the actual integration measure.
@@ -135,11 +162,11 @@ from `shape4`:
 X_keep   16 q48 control-node coordinates in q48 order
 X_macro  50 reference nodes in CSS8 node-id order, used to rebuild trunk fields
 ip_xi    fixed fine macro coordinates for each row
-ip_xyz   physical reference coordinate at the CSS8 Gauss point
+ip_xyz   dimensionless/hat reference coordinate at the CSS8 Gauss point
 ip_frame local width/axial/normal frame
-ip_J     dX/d(r,s,t) for the CSS8 element
-ip_invJ  inverse of ip_J
-ip_detJ  determinant of ip_J
+ip_J     dX_hat/d(r,s,t) for the CSS8 element
+ip_invJ  inverse of ip_J in hat coordinates
+ip_detJ  determinant of ip_J in hat coordinates
 ```
 
 This is not inferred from `LE128_base`; it is recomputed from the same geometry

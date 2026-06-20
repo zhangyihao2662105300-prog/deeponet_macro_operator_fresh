@@ -541,6 +541,11 @@ def build_branch_features(
         "q_coordinate": "q_hat=q48_raw/H" if scale_key == "physical" else "q48_raw_in_normalized_length",
         "geometry_units": "dimensionless_hat" if scale_key == "physical" else "already_dimensionless_or_dataset_units",
     }
+    if scale_key == "physical" and key == "shape4-qraw":
+        raise ValueError(
+            "scale_mode=physical is not valid with branch-feature-mode=shape4-qraw. "
+            "Use explicit physical X_keep or X_macro so the branch geometry can be converted to X_hat=X/H."
+        )
     if key == "shape4-qraw":
         x = np.concatenate([shape, q], axis=1).astype(np.float32)
         return x, {
@@ -582,9 +587,12 @@ def build_branch_features(
                 "node_order": "keep_nodes/q48 order",
             }
         else:
-            keep, meta = build_keep_node_coords_unique(shape)
             if scale_key == "physical":
-                keep = keep / h3
+                raise ValueError(
+                    "scale_mode=physical requires explicit physical X_keep or X_macro for xkeep-qraw. "
+                    "shape4 reconstruction is already dimensionless and must not be divided by H."
+                )
+            keep, meta = build_keep_node_coords_unique(shape)
         x_keep_flat = keep.reshape(keep.shape[0], -1).astype(np.float32)
         x = np.concatenate([q, x_keep_flat], axis=1).astype(np.float32)
         return x, {
@@ -600,6 +608,11 @@ def build_branch_features(
         }
     if key == "xnodes-qraw":
         if macro_nodes is None:
+            if scale_key == "physical":
+                raise ValueError(
+                    "scale_mode=physical requires explicit physical X_macro for xnodes-qraw. "
+                    "shape4 reconstruction is already dimensionless and must not be divided by H."
+                )
             nodes, meta = build_macro_node_coords_unique(shape)
         else:
             nodes = np.asarray(macro_nodes, dtype=np.float32).reshape(-1, 50, 3)

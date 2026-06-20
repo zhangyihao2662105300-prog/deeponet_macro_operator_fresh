@@ -12,7 +12,9 @@ from macro_deeponet.geometry import (
     shape_function_gradients_hex8,
     shape_functions_hex8,
 )
-from macro_deeponet.models import MacroDeepONet
+from macro_deeponet.models import MacroDeepONet, True176Shape4QrawDeepONet
+from macro_deeponet.true176_data import build_point_features
+from macro_deeponet.train_true176_deeponet_sobolev import ad_jacobian
 
 
 def test_geometry_identities() -> None:
@@ -50,6 +52,31 @@ def test_forward_and_autograd_shapes() -> None:
     assert torch.isfinite(b_macro).all()
 
 
+def test_true176_point_features_and_ad_shapes() -> None:
+    shape4 = torch.tensor([[1.2, 0.05, 0.10, 0.00], [1.4, 0.04, 0.08, 0.20]], dtype=torch.float32).numpy()
+    point, meta = build_point_features(shape4, include_id_features=True)
+    assert point.shape[0] == 2
+    assert point.shape[1] == 128
+    assert point.shape[2] == meta["feature_dim"]
+    assert point.shape[2] > 40
+
+    model = True176Shape4QrawDeepONet(
+        point_dim=point.shape[-1],
+        ip_count=128,
+        basis_dim=12,
+        hidden_dim=32,
+        branch_depth=2,
+        trunk_depth=2,
+    )
+    x_norm = torch.randn(2, 52)
+    p_norm = torch.as_tensor(point, dtype=torch.float32)
+    le = model(x_norm, p_norm)
+    assert le.shape == (2, 128, 6)
+    j = ad_jacobian(model, x_norm, p_norm, [0, 3, 7], create_graph=False, method="forward")
+    assert j.shape == (2, 128, 6, 3)
+    assert torch.isfinite(j).all()
+
+
 def test_tiny_overfit_loss_decreases() -> None:
     torch.manual_seed(19)
     dataset = SyntheticMacroDataset(SyntheticConfig(num_samples=256, seed=19))
@@ -78,6 +105,6 @@ if __name__ == "__main__":
     test_geometry_identities()
     test_synthetic_rigid_targets()
     test_forward_and_autograd_shapes()
+    test_true176_point_features_and_ad_shapes()
     test_tiny_overfit_loss_decreases()
     print("smoke_test.py: all checks passed")
-

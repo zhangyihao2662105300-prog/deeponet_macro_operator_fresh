@@ -123,12 +123,15 @@ The scaling law can be checked directly:
 ```powershell
 cd D:\IS-FEM\deeponet_macro_operator_fresh
 $env:PYTHONPATH = "D:\IS-FEM\deeponet_macro_operator_fresh\src"
+py scripts\validate_isoparametric_mapping.py
 py scripts\validate_isoparametric_scaling.py
 ```
 
-This samples random positive-orientation Hex8 elements and verifies
-`x/J/invJ/detJ`, linear engineering strain, and `B=dLE/dq` under
-`X_phys=H*X_hat` and `q_phys=H*q_hat`.
+The first script validates the isoparametric map itself: shape-function
+interpolation, `J=dx/dxi`, `dN/dx=dN/dxi*J^-1`, Newton inverse mapping,
+affine-field reproduction, and `B=dLE/dq` against finite differences.  The
+second script validates similarity scaling under `X_phys=H*X_hat` and
+`q_phys=H*q_hat`.
 
 For generic data, trunk features should be stored in the compact data as
 `point_features`, `ip_xyz`, `ip_J`, `ip_detJ`, etc.  In physical mode, prebuilt

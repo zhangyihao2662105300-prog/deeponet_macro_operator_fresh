@@ -97,15 +97,19 @@ Dimensionless features must be named explicitly, for example `*_hat`,
 such as `point_features_0` are rejected in physical mode because their length
 units cannot be inferred.
 
-The repository includes a numerical check for these similarity laws:
+The repository includes numerical checks for the isoparametric map and these
+similarity laws:
 
 ```bash
+PYTHONPATH=src python3 scripts/validate_isoparametric_mapping.py
 PYTHONPATH=src python3 scripts/validate_isoparametric_scaling.py
 ```
 
-It verifies random positive-orientation Hex8 elements under
-`X_phys=H*X_hat` and `q_phys=H*q_hat`, including
-`H * dLE/dq_phys = dLE/dq_hat`.
+The mapping check validates shape-function interpolation, `J=dx/dxi`,
+`dN/dx=dN/dxi*J^-1`, Newton inverse mapping, affine-field reproduction, and
+`B=dLE/dq` against finite differences.  The scaling check verifies random
+positive-orientation Hex8 elements under `X_phys=H*X_hat` and
+`q_phys=H*q_hat`, including `H * dLE/dq_phys = dLE/dq_hat`.
 
 If a shell formulation uses anisotropic in-plane/thickness scales or a 2D
 surface integration rule, the determinant exponent must be changed from the

@@ -35,6 +35,7 @@ sys_path_text = str(ROOT / "scripts")
 if sys_path_text not in sys.path:
     sys.path.insert(0, sys_path_text)
 from validate_isoparametric_scaling import run_validation as run_isoparametric_scaling_validation
+from validate_isoparametric_mapping import run_mapping_validation
 
 
 def test_geometry_identities() -> None:
@@ -200,6 +201,11 @@ def test_true176_physical_scale_transforms_branch_and_b() -> None:
 
 def test_isoparametric_similarity_scaling_laws() -> None:
     report = run_isoparametric_scaling_validation(seed=1234, trials=4, points_per_trial=3)
+    assert report["passed"], report
+
+
+def test_isoparametric_mapping_laws() -> None:
+    report = run_mapping_validation(seed=4321, trials=4, points_per_trial=3)
     assert report["passed"], report
 
 
@@ -448,6 +454,7 @@ if __name__ == "__main__":
     test_true176_loader_uses_explicit_xkeep_when_available()
     test_true176_physical_scale_transforms_branch_and_b()
     test_isoparametric_similarity_scaling_laws()
+    test_isoparametric_mapping_laws()
     test_true176_physical_scale_rejects_shape4_branch_geometry()
     test_true176_physical_scale_transforms_raw_point_fields()
     test_true176_physical_scale_rejects_unnamed_point_features()

@@ -103,13 +103,25 @@ similarity laws:
 ```bash
 PYTHONPATH=src python3 scripts/validate_isoparametric_mapping.py
 PYTHONPATH=src python3 scripts/validate_isoparametric_scaling.py
+PYTHONPATH=src python3 scripts/validate_true176_css8_macro_mapping.py
 ```
 
 The mapping check validates shape-function interpolation, `J=dx/dxi`,
 `dN/dx=dN/dxi*J^-1`, Newton inverse mapping, affine-field reproduction, and
 `B=dLE/dq` against finite differences.  The scaling check verifies random
 positive-orientation Hex8 elements under `X_phys=H*X_hat` and
-`q_phys=H*q_hat`, including `H * dLE/dq_phys = dLE/dq_hat`.
+`q_phys=H*q_hat`, including `H * dLE/dq_phys = dLE/dq_hat`.  The TRUE176 CSS8
+macro check validates the actual 4x4 contract:
+
+```text
+shape4 -> X_macro[50,3] -> 16 CSS8 elements -> 128 Gauss rows
+```
+
+For the TRUE176/CSS8 stored point fields, `ip_J` is represented as
+`[natural, physical] = dN_drst.T @ X`, so physical gradients follow
+`dN/dx = dN/drst @ inv(ip_J.T)`.  The scale rules for `J`, `invJ`, and `detJ`
+are unaffected by this transpose convention as long as the convention is used
+consistently.
 
 If a shell formulation uses anisotropic in-plane/thickness scales or a 2D
 surface integration rule, the determinant exponent must be changed from the

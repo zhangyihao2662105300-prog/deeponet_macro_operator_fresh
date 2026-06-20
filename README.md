@@ -125,13 +125,17 @@ cd D:\IS-FEM\deeponet_macro_operator_fresh
 $env:PYTHONPATH = "D:\IS-FEM\deeponet_macro_operator_fresh\src"
 py scripts\validate_isoparametric_mapping.py
 py scripts\validate_isoparametric_scaling.py
+py scripts\validate_true176_css8_macro_mapping.py
 ```
 
 The first script validates the isoparametric map itself: shape-function
 interpolation, `J=dx/dxi`, `dN/dx=dN/dxi*J^-1`, Newton inverse mapping,
 affine-field reproduction, and `B=dLE/dq` against finite differences.  The
 second script validates similarity scaling under `X_phys=H*X_hat` and
-`q_phys=H*q_hat`.
+`q_phys=H*q_hat`.  The third script validates the actual TRUE176 4x4 CSS8
+macro-element route: `shape4 -> X_macro[50,3] -> 16 CSS8 elements -> 128 Gauss
+rows`, including local B checks and H scaling of `X_keep`, `x`, `J`, `invJ`,
+`detJ`, and `B`.
 
 For generic data, trunk features should be stored in the compact data as
 `point_features`, `ip_xyz`, `ip_J`, `ip_detJ`, etc.  In physical mode, prebuilt

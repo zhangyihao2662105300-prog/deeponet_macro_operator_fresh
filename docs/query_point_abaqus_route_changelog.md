@@ -1019,3 +1019,110 @@ Validation boundary:
 - Old TRUE176 `LE/B` values were not used as v1.2 labels.
 - Large generated training artifacts and checkpoints remain outside git and
   must not be committed.
+
+## v1.2 follow-up - 2026-06-23 - Fixed-strategy split diagnostic
+
+Purpose:
+
+- Diagnose whether the poor first 10-case fixed-strategy result was specific
+  to the split_A validation cases (`case041`, `case049`) or reflects a broader
+  fixed-strategy LE generalization issue.
+- Keep the training strategy frozen: no model, loss, learning-rate, or epoch
+  changes.
+- Add a lightweight checkpoint attribution helper that evaluates selected
+  cases from an existing checkpoint without training.
+
+Included:
+
+- Added `scripts/evaluate_v1_2_checkpoint_by_case.py`.
+- The script reconstructs the generic query-point preprocessing from a saved
+  checkpoint and compact list, then calls the existing trainer evaluation
+  metrics for selected case ids.
+- Generated split diagnostic plans under:
+  `D:\IS-FEM\outputs\query_point_v1_2_training_audit\fixed_strategy_split_diagnostic_plan`.
+- Planned splits:
+  split_A `[41,49]` completed, split_B `[44,46]` run this round, split_C
+  `[43,50]` planned only, split_D `[25,45]` planned only.
+
+Split_A attribution:
+
+- Output:
+  `D:\IS-FEM\outputs\query_point_v1_2_training_audit\fixed_strategy_main_80_20_case_attribution`
+- Per-case metrics:
+  `case041`: `LE_rel=9.1422`, `AD_B_rel=0.5318`,
+  `phys_rand_dir_B_rel=0.5330`, `B_prior_rel=0.5306`,
+  `AD_B_cos=0.8754`.
+  `case049`: `LE_rel=4.0235`, `AD_B_rel=0.5317`,
+  `phys_rand_dir_B_rel=0.5330`, `B_prior_rel=0.5307`,
+  `AD_B_cos=0.8757`.
+- Interpretation: split_A's LE failure was worse on case041 than case049, while
+  B metrics were nearly identical across the two validation cases.
+
+Split_B:
+
+- Output:
+  `D:\IS-FEM\outputs\query_point_v1_2_training_audit\fixed_strategy_split_B_val44_46`
+- Split:
+  `train_cases=[19,25,31,41,43,45,49,50]`,
+  `val_cases=[44,46]`,
+  `validation_is_overlapping=false`.
+- Fixed strategy matched split_A exactly:
+  `model_style=query-fe-linear-residual`,
+  `point_feature_source=data`,
+  `branch_feature_mode=xkeep-qraw`,
+  `le_normalization=global-component`,
+  `train_point_sample_count=128`,
+  `split_mode=case`,
+  `allow_overlap_val=false`,
+  `epochs=50`,
+  `b_baseline_warmstart_source=train-only`,
+  `b_baseline_warmstart_steps=500`,
+  `j_loss_mode=physical`,
+  `global_b_lr_scale=0.05`,
+  `point_b_lr_scale=0.10`,
+  `le_loss_weight=1.0`.
+- Best and latest checkpoints are both epoch 50:
+  `train_LE_rel=0.3992`,
+  `val_LE_rel=8.5155`,
+  `train_AD_B_rel=0.5178`,
+  `val_AD_B_rel=0.5103`,
+  `val_AD_B_cos=0.8834`,
+  `val_phys_rand_dir_B_rel=0.5143`,
+  `b_prior_current_val_evalcols_B_rel=0.5094`,
+  `val_AD_B_ip_rel_max=3.3736`,
+  `val_AD_B_col_rel_max=1.0005`.
+
+Split_B attribution:
+
+- Output:
+  `D:\IS-FEM\outputs\query_point_v1_2_training_audit\fixed_strategy_split_B_val44_46_case_attribution`
+- Per-case metrics:
+  `case044`: `LE_rel=9.6526`, `AD_B_rel=0.5102`,
+  `phys_rand_dir_B_rel=0.5132`, `B_prior_rel=0.5094`,
+  `AD_B_cos=0.8835`.
+  `case046`: `LE_rel=7.7823`, `AD_B_rel=0.5104`,
+  `phys_rand_dir_B_rel=0.5189`, `B_prior_rel=0.5094`,
+  `AD_B_cos=0.8833`.
+
+Current interpretation:
+
+- split_B did not rescue LE generalization; `val_LE_rel=8.5155` is worse than
+  split_A's `val_LE_rel=5.1376`.
+- B remains stable and aligned with the B prior in both splits:
+  split_A `val_AD_B_rel=0.5318` vs `B_prior_val=0.5307`;
+  split_B `val_AD_B_rel=0.5103` vs `B_prior_val=0.5094`.
+- The conservative diagnosis is now stronger:
+  the v1.2 10-case LE failure is not just a case041/case049 split-specific
+  artifact.  Under the frozen strategy and current single-geometry 10-case
+  pool, LE case-level generalization appears systematically weak while B
+  remains controlled by the query B prior.
+- This still does not prove the model architecture is bad.  It means the next
+  useful diagnostic question is why the residual/LE prediction branch fails to
+  generalize when the B prior remains stable.
+
+Validation boundary:
+
+- No old TRUE176 `LE/B` labels were used as v1.2 labels.
+- No model, loss, learning-rate, or epoch settings were changed.
+- Large generated checkpoints, NPZ/ODB files, and loss histories remain outside
+  git and must not be committed.

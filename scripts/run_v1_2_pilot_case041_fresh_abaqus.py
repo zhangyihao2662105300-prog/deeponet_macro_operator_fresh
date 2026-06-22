@@ -272,6 +272,7 @@ def build_and_optionally_run(args: argparse.Namespace) -> dict[str, Any]:
     complete_dir = out_root / "complete"
     audit_dir = out_root / "audit"
     logs = run_root / "pipeline_logs"
+    plan_path = out_root / f"pilot_{case_id}_plan.json"
     for path in (input_dir, base_dir, perturb_root, b_dir, complete_dir, audit_dir, logs):
         path.mkdir(parents=True, exist_ok=True)
     (run_root / "boundary_contract").mkdir(parents=True, exist_ok=True)
@@ -403,10 +404,10 @@ def build_and_optionally_run(args: argparse.Namespace) -> dict[str, Any]:
         "run_complete_export": bool(args.run_complete_export),
         "run_strict_audit": bool(args.run_strict_audit),
     }
-    write_json(out_root / "pilot_case041_plan.json", manifest)
+    write_json(plan_path, manifest)
     if not bool(args.run_abaqus):
         manifest["stage"] = "dry_run_prepared"
-        write_json(out_root / "pilot_case041_plan.json", manifest)
+        write_json(plan_path, manifest)
         return manifest
 
     base_res = gen._run_export_job(
@@ -421,7 +422,7 @@ def build_and_optionally_run(args: argparse.Namespace) -> dict[str, Any]:
     if not export_status_ok(base_res):
         manifest["stage"] = "base_failed"
         manifest["base_result"] = base_res
-        write_json(out_root / "pilot_case041_plan.json", manifest)
+        write_json(plan_path, manifest)
         return manifest
 
     plus_results = run_jobs(jobs, gen=gen, args=old_run_args, logs=logs, workers=int(args.inner_workers))
@@ -431,7 +432,7 @@ def build_and_optionally_run(args: argparse.Namespace) -> dict[str, Any]:
     if failed:
         manifest["stage"] = "perturb_failed"
         manifest["failed_perturb_count"] = len(failed)
-        write_json(out_root / "pilot_case041_plan.json", manifest)
+        write_json(plan_path, manifest)
         return manifest
 
     native = smoke.build_shape4_sample(run_root, case_id, old_run_args, [{**job, "npz": str(job["npz"])} for job in jobs])
@@ -441,7 +442,7 @@ def build_and_optionally_run(args: argparse.Namespace) -> dict[str, Any]:
     manifest["native_sample"] = native
     manifest["b_compact_sidecar"] = b_sidecar
     manifest["stage"] = "b_compact_generated"
-    write_json(out_root / "pilot_case041_plan.json", manifest)
+    write_json(plan_path, manifest)
 
     if not bool(args.run_complete_export):
         return manifest
@@ -483,10 +484,10 @@ def build_and_optionally_run(args: argparse.Namespace) -> dict[str, Any]:
     manifest["complete_compact_exists"] = complete.exists()
     if complete_res["returncode"] != 0 or not complete.exists():
         manifest["stage"] = "complete_export_failed"
-        write_json(out_root / "pilot_case041_plan.json", manifest)
+        write_json(plan_path, manifest)
         return manifest
     manifest["stage"] = "complete_compact_generated"
-    write_json(out_root / "pilot_case041_plan.json", manifest)
+    write_json(plan_path, manifest)
 
     if bool(args.run_strict_audit):
         audit_cmd = [
@@ -504,7 +505,7 @@ def build_and_optionally_run(args: argparse.Namespace) -> dict[str, Any]:
         if summary.exists():
             manifest["strict_audit_summary"] = json.loads(summary.read_text(encoding="utf-8"))
         manifest["stage"] = "strict_audit_complete" if audit_res["returncode"] == 0 else "strict_audit_failed"
-        write_json(out_root / "pilot_case041_plan.json", manifest)
+        write_json(plan_path, manifest)
     return manifest
 
 

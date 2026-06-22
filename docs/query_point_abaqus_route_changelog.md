@@ -785,3 +785,57 @@ Known gaps:
 - Old TRUE176 `LE/B` values were not used as training labels; only the selected
   boundary-displacement direction and audited bridge were used to produce fresh
   Abaqus data.
+
+## v1.2 follow-up - 2026-06-22 - Extend fresh Abaqus pilots to case043 and case050
+
+Purpose:
+
+- Extend the validated case041 pilot path to two more selected fresh
+  boundary-control directions without running the full case040-case051 batch.
+- Keep this as a data-generation and coverage-audit step only; no training or
+  model/loss/learning-rate changes were made.
+
+Included:
+
+- Generalized `scripts/run_v1_2_pilot_case041_fresh_abaqus.py` so its manifest
+  file is `pilot_{case_id}_plan.json` instead of the case041-specific
+  `pilot_case041_plan.json`.
+- Reused the same audited bridge, fresh Abaqus base-plus-48-forward-perturbation
+  chain, B compact repack, current complete compact exporter, and strict v1.2
+  data coverage audit for case043 and case050.
+
+Pilot result:
+
+- case043 generated:
+  `D:\IS-FEM\outputs\query_point_v1_2_fresh_cases\case043\abaqus_run\base\fresh_case043.odb`,
+  `D:\IS-FEM\outputs\query_point_v1_2_fresh_cases\case043\b_compact\case043_sobolev_B_compact.npz`,
+  and
+  `D:\IS-FEM\outputs\query_point_v1_2_fresh_cases\case043\complete\complete_case043_training_ready.npz`.
+- case050 generated:
+  `D:\IS-FEM\outputs\query_point_v1_2_fresh_cases\case050\abaqus_run\base\fresh_case050.odb`,
+  `D:\IS-FEM\outputs\query_point_v1_2_fresh_cases\case050\b_compact\case050_sobolev_B_compact.npz`,
+  and
+  `D:\IS-FEM\outputs\query_point_v1_2_fresh_cases\case050\complete\complete_case050_training_ready.npz`.
+- Both single-case strict audits passed with `strict_v1_2_pass=true`.
+- Full-pool audit with case019/case025/case031/case041/case043/case050 passed:
+  `strict_v1_2_pass=true`, `compact_count=6`, `case_count=6`,
+  `frame_count=60`, `q_direction_cluster_count=5`,
+  `pairwise_abs_cos_min=0.1808575415`,
+  `pairwise_abs_cos_median=0.5679210886`,
+  `pairwise_abs_cos_max=0.9937922950`.
+- case043 adds q-direction cluster 3 with
+  `max_abs_cos_to_current=0.5679210886`, nearest existing case019,
+  `LE_rms_mean=0.0001830914007`, and `B_rms_mean=9.1729672619`.
+- case050 adds q-direction cluster 4 with
+  `max_abs_cos_to_current=0.8533500881`, nearest existing case019,
+  `LE_rms_mean=0.0002458211478`, and `B_rms_mean=9.1749346929`.
+
+Known gaps:
+
+- The pool is improved but still below the v1.2 target of 10-20 strict-pass
+  complete compacts and 6-10 q-direction clusters.
+- The original case019/case031 near-duplicate remains in the pool, so
+  `pairwise_abs_cos_max` is still `0.9937922950`.
+- Large generated Abaqus/NPZ outputs remain outside git and must not be
+  committed.
+- Old TRUE176 `LE/B` values were not used as training labels.

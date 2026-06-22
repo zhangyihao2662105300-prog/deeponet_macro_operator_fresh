@@ -51,6 +51,7 @@ if sys_path_text not in sys.path:
 from validate_isoparametric_scaling import run_validation as run_isoparametric_scaling_validation
 from validate_isoparametric_mapping import run_mapping_validation
 from validate_true176_css8_macro_mapping import run_css8_macro_validation
+from audit_query_point_data_coverage import run_coverage_audit
 from export_abaqus_true176_complete_compact import enforce_ip_audit, merge_existing_payload
 
 
@@ -1326,6 +1327,87 @@ def test_query_b_baseline_can_freeze_after_warmstart() -> None:
         assert summary["history"][0]["le_loss_weight"] == 0.0
 
 
+def _write_coverage_compact(path: Path, case_id: int, direction_index: int) -> None:
+    n = 3
+    q = np.zeros((n, 48), dtype=np.float32)
+    q[:, direction_index] = np.asarray([0.5, 1.0, 1.5], dtype=np.float32)
+    le = np.full((n, 128, 6), 0.01 * float(case_id), dtype=np.float32)
+    b = np.zeros((n, 128, 6, 48), dtype=np.float32)
+    b[:, :, 0, direction_index] = 0.1 * float(case_id)
+    np.savez(
+        path,
+        q48_raw=q,
+        LE128_base=le,
+        B_LE128_forward=b,
+        strain_field=np.asarray("LE", dtype=object),
+        B_label_strain_field=np.asarray("LE", dtype=object),
+        strain_label_key=np.asarray("LE128_base", dtype=object),
+        B_label_key=np.asarray("B_LE128_forward", dtype=object),
+        training_ready_sobolev=np.asarray(True),
+        merge_q48_max_abs_diff=np.asarray(0.0, dtype=np.float64),
+        merge_LE128_base_max_abs_diff=np.asarray(0.0, dtype=np.float64),
+        merge_ip_keys_match=np.asarray(True),
+        merge_strain_field_match=np.asarray(True),
+        audit_ref_ip_xyz_vs_abaqus_coord_max_abs=np.asarray(1.0e-7, dtype=np.float64),
+        audit_detJ_vs_IVOL_max_abs=np.asarray(1.0e-10, dtype=np.float64),
+    )
+
+
+def test_query_point_data_coverage_audit_writes_manifest_and_split_plans() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        compacts = []
+        for case_id, direction in [(1, 0), (2, 1), (3, 0)]:
+            path = root / f"complete_case{case_id:03d}_training_ready.npz"
+            _write_coverage_compact(path, case_id=case_id, direction_index=direction)
+            compacts.append(path)
+
+        out = root / "coverage"
+        result = run_coverage_audit(compacts, out, strict_v1_2=True, cluster_abs_cos_threshold=0.95)
+        summary = result["audit_summary"]
+        assert summary["strict_v1_2_pass"] is True
+        assert summary["compact_count"] == 3
+        assert summary["case_count"] == 3
+        assert summary["q_direction_cluster_count"] == 2
+
+        manifest = json.loads((out / "compact_manifest.json").read_text(encoding="utf-8"))
+        rows = manifest["compacts"]
+        assert rows[0]["case_id"] == 1
+        assert rows[1]["q_direction_cosine_to_existing_max_abs"] == 0.0
+        assert rows[2]["q_direction_cosine_to_existing_max_abs"] == 1.0
+
+        matrix_text = (out / "q_direction_abs_cosine_matrix.csv").read_text(encoding="utf-8")
+        assert "case001" in matrix_text
+        assert "case003" in matrix_text
+        train_plan = json.loads((out / "train_80_20_summary.json").read_text(encoding="utf-8"))
+        loo_plan = json.loads((out / "loo_summary.json").read_text(encoding="utf-8"))
+        assert train_plan["training_status"] == "not_run_by_coverage_audit"
+        assert loo_plan["case_count"] == 3
+
+
+def test_query_point_data_coverage_audit_strict_requires_guard_metadata() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        compact = root / "complete_case004_training_ready.npz"
+        n = 2
+        np.savez(
+            compact,
+            q48_raw=np.ones((n, 48), dtype=np.float32),
+            LE128_base=np.zeros((n, 128, 6), dtype=np.float32),
+            B_LE128_forward=np.zeros((n, 128, 6, 48), dtype=np.float32),
+            strain_field=np.asarray("LE", dtype=object),
+            B_label_strain_field=np.asarray("LE", dtype=object),
+            training_ready_sobolev=np.asarray(True),
+        )
+        try:
+            run_coverage_audit([compact], root / "coverage", strict_v1_2=True)
+        except RuntimeError as exc:
+            assert "merge_q48_max_abs_diff" in str(exc)
+            assert "reference COORD audit" in str(exc)
+        else:
+            raise AssertionError("strict coverage audit accepted missing hard-guard metadata")
+
+
 def test_generic_point_feature_loader_marks_shape4_fallback() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "missing_points_compact.npz"
@@ -1424,6 +1506,8 @@ if __name__ == "__main__":
     test_exporter_merge_guards_q_le_and_ip_keys()
     test_exporter_ip_audit_can_block_bad_geometry()
     test_generic_query_training_supports_global_le_norm_and_point_sampling()
+    test_query_point_data_coverage_audit_writes_manifest_and_split_plans()
+    test_query_point_data_coverage_audit_strict_requires_guard_metadata()
     test_generic_point_feature_loader_marks_shape4_fallback()
     test_generic_point_feature_loader_shape4_audited()
     test_tiny_overfit_loss_decreases()

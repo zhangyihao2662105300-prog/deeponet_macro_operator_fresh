@@ -7,7 +7,8 @@ as a substitute for data-contract checks.
 
 - `query-point-abaqus-v1`: route baseline.
 - `query-point-abaqus-v1.1`: hard guards for data trustworthiness.
-- `query-point-abaqus-v1.2`: ID feature rules and polished inference entry point.
+- `query-point-abaqus-v1.2`: data-coverage audit for independent load/case directions.
+- `query-point-abaqus-v1.3`: ID feature rules and polished inference entry point.
 - `query-point-abaqus-v2`: first long-training-ready route.
 
 ## Review Order
@@ -42,6 +43,56 @@ Before any long training, the route must have:
 - Safe behavior for nonstandard Abaqus element labels.
 - Query-point Abaqus launcher defaults.
 - Local smoke tests and GitHub Actions smoke workflow passing.
+
+## v1.2 Gate
+
+Do not prioritize model architecture changes in v1.2.  The goal is to test
+whether poor held-out `LE` prediction is primarily caused by insufficient
+independent case/load-direction coverage after v1.1 established the data
+contract, `B` link, query-B training strategy, and formal case split.
+
+The minimum data-coverage audit should produce:
+
+- `compact_manifest.csv`
+- `compact_manifest.json`
+- `q_direction_cosine_matrix.csv`
+- `q_direction_abs_cosine_matrix.csv`
+- `le_rms_distribution.csv`
+- `audit_summary.json`
+- `train_80_20_summary.json`
+- `loo_summary.json`
+
+Each case should record:
+
+- `case_id`, compact path, frame count.
+- `strain_field` and `B_label_strain_field`.
+- `q_norm` min/max/mean and representative `q_direction`.
+- Internal case q-direction cosine statistics.
+- `q_direction_cosine_to_existing_max_abs` and cluster id.
+- `LE_rms` min/max/mean and `B_rms_mean`.
+- Merge guards for `q48_raw`, `LE128_base`, `ip_keys`, and strain field.
+- Reference-frame IP audits for COORD and TRUE176/CSS8 `detJ` vs `IVOL`.
+
+Keep the first v1.2 training strategy fixed:
+
+```text
+model_style = query-fe-linear-residual
+point_feature_source = data
+branch_feature_mode = xkeep-qraw
+le_normalization = global-component
+b_baseline_warmstart_source = train-only
+j_loss_mode = physical
+global_b_lr_scale = 0.05
+point_b_lr_scale = 0.10
+train_point_sample_count = 128
+split_mode = case
+allow_overlap_val = false
+```
+
+Use both 80/20 case split and leave-one-case-out audits before interpreting
+LE generalization.  `train_80_20_summary.json` and `loo_summary.json` may start
+as coverage/split plans; fill their metric fields only after the corresponding
+training runs complete.
 
 ## Current Data Contract Wording
 

@@ -533,3 +533,59 @@ Validation:
 - `py -3 -m pytest tests/smoke_test.py -q` -> `42 passed`
 - `py -3 -m compileall src/macro_deeponet scripts`
 - `git diff --check`
+
+## v1.2 start - 2026-06-22 - Data-coverage audit tooling
+
+Purpose:
+
+- Start `v1.2 data-coverage audit`.
+- Keep model/training strategy fixed and first test whether poor held-out `LE`
+  prediction is caused by insufficient independent case/load-direction
+  coverage.
+- Provide a reproducible data ledger before generating or training on
+  `10-20` real training-ready complete compacts.
+
+Included:
+
+- Added `scripts/audit_query_point_data_coverage.py`.
+- The script reads complete compact NPZ files and writes:
+  `compact_manifest.csv`, `compact_manifest.json`,
+  `q_direction_cosine_matrix.csv`, `q_direction_abs_cosine_matrix.csv`,
+  `le_rms_distribution.csv`, `audit_summary.json`,
+  `train_80_20_summary.json`, and `loo_summary.json`.
+- Each compact row records case id, frame count, strain metadata, q norm
+  statistics, representative q direction, internal q-direction cosine
+  statistics, q-direction nearest-existing coverage, q-direction cluster id,
+  `LE_rms`, `B_rms`, merge guards, strain guard, and reference-frame IP audit
+  fields.
+- Strict mode requires the v1.1 hard-guard metadata:
+  `training_ready_sobolev`, explicit non-unknown matching strain fields,
+  merge q/LE tolerances, `merge_ip_keys_match`,
+  `merge_strain_field_match`, reference COORD audit, and TRUE176/CSS8
+  `detJ` vs `IVOL` audit.
+- The generated 80/20 and leave-one-case-out files are coverage/split plans
+  with metric fields set to `null`; they should be filled only after the
+  corresponding formal training runs complete.
+- Updated workflow version boundaries: `v1.2` is now data-coverage audit, and
+  ID/inference polish is shifted to `v1.3`.
+
+Current v1.2 boundary:
+
+- Do not prioritize model architecture changes in v1.2.
+- First expand the real complete compact pool and record q-direction coverage,
+  LE scale coverage, and clean case-level splits.
+- Keep the first v1.2 training configuration fixed:
+  train-only query-B warm-start, physical-J loss,
+  `global_b_lr_scale=0.05`, `point_b_lr_scale=0.10`,
+  `train_point_sample_count=128`, `split_mode=case`,
+  `allow_overlap_val=false`.
+
+Validation:
+
+- Added smoke coverage for manifest/matrix/split-plan generation and strict
+  hard-guard failure on missing audit metadata.
+- Real 3-case probe using the existing case019/case025/case031 complete
+  compacts passed strict v1.2 audit and produced two q-direction clusters at
+  `abs(cos) >= 0.95`; pairwise abs-cosine ranged from `0.8967` to `0.9938`.
+  This supports the current interpretation that the 3-case pool is still too
+  thin in independent load directions.

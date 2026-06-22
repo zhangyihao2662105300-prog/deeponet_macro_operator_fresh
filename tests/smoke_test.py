@@ -1058,8 +1058,12 @@ def test_generic_query_training_supports_global_le_norm_and_point_sampling() -> 
             mionet_product_scale="none",
             use_q_skip=False,
             residual_scale=1.0,
+            le_loss_weight=1.0,
             fe_baseline_scale=1.0,
             freeze_fe_point_baseline=False,
+            freeze_b_baseline_after_warmstart=False,
+            global_b_lr_scale=1.0,
+            point_b_lr_scale=1.0,
             no_zero_init_residual=False,
             baseline_jacobian_weight=0.0,
             baseline_j_loss_mode="norm-plus-physical",
@@ -1161,8 +1165,12 @@ def test_query_b_baseline_warmstart_is_train_only_and_reduces_prior_loss() -> No
             mionet_product_scale="none",
             use_q_skip=False,
             residual_scale=0.0,
+            le_loss_weight=1.0,
             fe_baseline_scale=1.0,
             freeze_fe_point_baseline=False,
+            freeze_b_baseline_after_warmstart=False,
+            global_b_lr_scale=1.0,
+            point_b_lr_scale=1.0,
             no_zero_init_residual=False,
             baseline_jacobian_weight=0.0,
             baseline_j_loss_mode="norm",
@@ -1206,6 +1214,116 @@ def test_query_b_baseline_warmstart_is_train_only_and_reduces_prior_loss() -> No
         assert "b_prior_after_train_evalcols_B_rel" in meta
         assert "b_prior_current_train_evalcols_B_rel" in summary["history"][0]
         assert summary["history"][0]["point_b_correction_norm_ratio"] > 0.0
+
+
+def test_query_b_baseline_can_freeze_after_warmstart() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        compact = tmp_path / "query_freeze_compact.npz"
+        out_dir = tmp_path / "out"
+        n = 4
+        rng = np.random.default_rng(654)
+        q48 = rng.normal(scale=0.2, size=(n, 48)).astype(np.float32)
+        ip_xi = np.zeros((128, 3), dtype=np.float32)
+        ip_xi[:, 0] = np.linspace(-1.0, 1.0, 128, dtype=np.float32)
+        b = np.zeros((n, 128, 6, 48), dtype=np.float32)
+        for ip in range(128):
+            b[:, ip, 0, 0] = 0.1 + 0.002 * float(ip)
+        le = np.einsum("npaj,nj->npa", b, q48).astype(np.float32)
+        np.savez(
+            compact,
+            q48_raw=q48,
+            LE128_base=le,
+            B_LE128_forward=b,
+            X_keep=np.zeros((n, 16, 3), dtype=np.float32),
+            ip_xi=ip_xi,
+            sample_paths=np.asarray(["case001_train", "case002_val"], dtype=str),
+        )
+        args = SimpleNamespace(
+            ddp=False,
+            cuda=False,
+            ddp_backend="gloo",
+            seed=10,
+            out_dir=out_dir,
+            compact=[str(compact)],
+            compact_list="",
+            target_ips="0,1,2,3",
+            scale_mode="normalized",
+            frame_stride=1,
+            max_frames_per_compact=0,
+            val_fraction=0.0,
+            val_cases="2",
+            split_mode="case",
+            allow_overlap_val=False,
+            max_eval_frames=4,
+            branch_feature_mode="xkeep-qraw",
+            b_label_coordinate="auto",
+            point_feature_source="data",
+            include_id_features=False,
+            allow_shape4_point_feature_fallback=False,
+            allow_physical_shape4_trunk=False,
+            detj_scale_dim=3,
+            le_normalization="global-component",
+            epochs=1,
+            batch_size=2,
+            eval_batch_size=1,
+            basis_dim=8,
+            hidden_dim=16,
+            branch_depth=2,
+            trunk_depth=2,
+            activation="tanh",
+            model_style="query-fe-linear-residual",
+            mionet_product_scale="none",
+            use_q_skip=False,
+            residual_scale=1.0,
+            le_loss_weight=0.0,
+            fe_baseline_scale=1.0,
+            freeze_fe_point_baseline=False,
+            freeze_b_baseline_after_warmstart=True,
+            global_b_lr_scale=0.05,
+            point_b_lr_scale=0.10,
+            no_zero_init_residual=False,
+            baseline_jacobian_weight=0.0,
+            baseline_j_loss_mode="norm",
+            b_baseline_warmstart_steps=10,
+            b_baseline_warmstart_lr=5.0e-3,
+            b_baseline_warmstart_weight_decay=0.0,
+            b_baseline_warmstart_source="train-only",
+            jacobian_columns="0,1",
+            jacobian_columns_per_batch=2,
+            jacobian_method="forward",
+            eval_columns="0,1",
+            j_loss_mode="norm",
+            physical_j_aux_weight=0.0,
+            physical_j_abs_weight=1.0,
+            physical_j_rel_weight=0.0,
+            physical_j_action_weight=0.0,
+            physical_j_rel_eps_scale=0.02,
+            physical_j_action_directions=0,
+            initial_jacobian_weight=0.0,
+            initial_tangent_weight=0.0,
+            tangent_directions=0,
+            lr=1.0e-4,
+            lr_decay=1.0,
+            grad_clip=10.0,
+            weight_decay=0.0,
+            eval_every=1,
+            log_every=1,
+            init_checkpoint="",
+            freeze_skip=False,
+            train_point_sample_count=0,
+        )
+        train_true176_generic(args)
+        summary = json.loads((out_dir / "training_summary.json").read_text(encoding="utf-8"))
+        control = summary["main_train_control"]
+        assert control["freeze_b_baseline_after_warmstart"] is True
+        assert "global_b_norm" in control["frozen_b_baseline_parts"]
+        assert "point_b_net" in control["frozen_b_baseline_parts"]
+        counts = control["optimizer_meta"]["param_counts"]
+        assert counts["global_b"] == 0
+        assert counts["point_b"] == 0
+        assert counts["frozen"] > 0
+        assert summary["history"][0]["le_loss_weight"] == 0.0
 
 
 def test_generic_point_feature_loader_marks_shape4_fallback() -> None:

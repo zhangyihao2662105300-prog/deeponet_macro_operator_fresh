@@ -378,3 +378,67 @@ Known gaps:
   wider load-direction coverage.
 - It is currently restricted to `train-only`; other sources are intentionally
   rejected to avoid validation leakage.
+
+## v1.1 follow-up - 2026-06-22 - Query warm-start main-training controls
+
+Purpose:
+
+- Diagnose why full Sobolev main training can degrade a useful query B prior
+  after warm-start.
+
+Included:
+
+- Added `--le-loss-weight` so B-only main-training diagnostics can set LE loss
+  weight to zero without changing the training loop by hand.
+- Added `--freeze-b-baseline-after-warmstart` to freeze `global_b_norm` and
+  `point_b_net` after train-only warm-start, isolating whether the main
+  optimizer is directly corrupting the B baseline.
+- Added `--global-b-lr-scale` and `--point-b-lr-scale` optimizer parameter
+  groups to test smaller baseline learning rates during full training.
+- Config and summaries now record `main_train_control`, including optimizer
+  parameter counts and group learning rates.
+
+Intended diagnostics:
+
+- Warm-start + frozen B baseline: if the baseline metric stays good but full
+  model `AD_B_rel` worsens, the residual AD path is the likely source.
+- Warm-start + B-only main train (`--le-loss-weight 0`): if B degrades despite
+  no LE loss, inspect AD-B loss/optimizer settings before increasing epochs.
+- Warm-start + reduced baseline learning rates: tests whether preserving the
+  prior while training residual improves stability.
+
+Real 3-case overlap-debug diagnostics:
+
+- All runs below are diagnostic only: they use overlapping train/validation
+  frames and must not be interpreted as case-level generalization.
+- Warm-start baseline before main training:
+  `b_prior_after_train_evalcols_B_rel = 0.3579`.
+- Experiment A, frozen B baseline with full LE + AD loss:
+  the baseline stayed fixed at `b_prior_current_train_evalcols_B_rel = 0.3579`,
+  but full-model `train_AD_B_rel` worsened from `0.3586` at epoch 1 to
+  `15.2793` at epoch 20. This rules out direct corruption of
+  `global_b_norm/point_b_net` as the only problem and points to the residual
+  AD path as a major failure mode.
+- Experiment B, B-only main train with normalized-J loss:
+  normalized `train_AD_B_norm_rel` improved from about `0.5913` to `0.4356`,
+  while physical/raw `train_AD_B_rel` worsened from `0.9217` to `1.8168`.
+  Optimizing normalized-J alone can move the model in a direction that looks
+  better in normalized space but worse in physical B space.
+- Experiment B2, B-only main train with physical-J loss:
+  raw `train_AD_B_rel` stabilized near `0.49-0.50`, better than normalized-J
+  B-only but still worse than the warm-start prior. The loss scale is safer,
+  but the main optimizer can still erode the prior.
+- Experiment C, full LE + physical-J loss with small baseline learning rates
+  (`global_b_lr_scale = 0.05`, `point_b_lr_scale = 0.10`):
+  the B prior was preserved (`b_prior_current_train_evalcols_B_rel = 0.3571`
+  at epoch 20), full-model `train_AD_B_rel = 0.3574`,
+  `val_AD_B_rel = 0.3657`, and LE improved to `train_LE_rel = 0.3028`,
+  `val_LE_rel = 0.2514`.
+
+Current interpretation:
+
+- The useful query B prior can be preserved during main training, but it needs
+  physical/raw-B-aware J loss and conservative baseline parameter updates.
+- The remaining route question is not whether B labels or AD-B are wired, but
+  how to schedule residual and baseline updates so LE improves without
+  injecting destructive q-derivatives.

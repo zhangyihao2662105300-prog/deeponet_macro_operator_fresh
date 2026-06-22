@@ -487,6 +487,76 @@ def _warmstart_query_b_baseline(
     return meta
 
 
+def _freeze_b_baseline_for_main_train(model: nn.Module) -> dict[str, Any]:
+    base = _unwrap(model)
+    frozen: list[str] = []
+    if isinstance(base, QueryFELinearResidualDeepONet):
+        base.global_b_norm.requires_grad_(False)
+        frozen.append("global_b_norm")
+    elif isinstance(base, FELinearResidualDeepONet):
+        base.static_b_norm.requires_grad_(False)
+        frozen.append("static_b_norm")
+    if isinstance(base, (FELinearResidualDeepONet, QueryFELinearResidualDeepONet)):
+        for p in base.point_b_net.parameters():
+            p.requires_grad_(False)
+        frozen.append("point_b_net")
+    return {
+        "freeze_b_baseline_after_warmstart": True,
+        "frozen_b_baseline_parts": frozen,
+        "frozen_b_baseline_param_count": int(
+            sum(p.numel() for name, p in base.named_parameters() if (not p.requires_grad) and ("point_b_net" in name or name in {"global_b_norm", "static_b_norm"}))
+        ),
+    }
+
+
+def _build_main_optimizer(model: nn.Module, args: argparse.Namespace) -> tuple[torch.optim.Optimizer, dict[str, Any]]:
+    lr = float(args.lr)
+    weight_decay = float(args.weight_decay)
+    global_scale = float(args.global_b_lr_scale)
+    point_scale = float(args.point_b_lr_scale)
+    if global_scale < 0.0 or point_scale < 0.0:
+        raise ValueError("--global-b-lr-scale and --point-b-lr-scale must be >= 0")
+
+    groups: dict[str, dict[str, Any]] = {
+        "other": {"params": [], "lr": lr, "weight_decay": weight_decay},
+        "global_b": {"params": [], "lr": lr * global_scale, "weight_decay": weight_decay},
+        "point_b": {"params": [], "lr": lr * point_scale, "weight_decay": weight_decay},
+    }
+    counts = {"other": 0, "global_b": 0, "point_b": 0, "frozen": 0}
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            counts["frozen"] += int(param.numel())
+            continue
+        clean_name = str(name).removeprefix("module.")
+        if clean_name in {"global_b_norm", "static_b_norm"}:
+            key = "global_b"
+        elif clean_name.startswith("point_b_net."):
+            key = "point_b"
+        else:
+            key = "other"
+        groups[key]["params"].append(param)
+        counts[key] += int(param.numel())
+
+    param_groups = [group for group in groups.values() if group["params"]]
+    if not param_groups:
+        raise ValueError("no trainable parameters remain for the main optimizer")
+    optimizer = torch.optim.AdamW(param_groups, lr=lr, weight_decay=weight_decay)
+    meta = {
+        "optimizer": "AdamW",
+        "base_lr": lr,
+        "weight_decay": weight_decay,
+        "global_b_lr_scale": global_scale,
+        "point_b_lr_scale": point_scale,
+        "param_counts": counts,
+        "param_group_lrs": {
+            key: float(group["lr"])
+            for key, group in groups.items()
+            if group["params"]
+        },
+    }
+    return optimizer, meta
+
+
 def train(args: argparse.Namespace) -> dict[str, Any]:
     ctx = _distributed_context(args)
     rank = int(ctx["rank"])
@@ -664,10 +734,21 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         weight_decay=float(args.b_baseline_warmstart_weight_decay),
         source=str(args.b_baseline_warmstart_source),
     )
+    main_train_control: dict[str, Any] = {
+        "le_loss_weight": float(args.le_loss_weight),
+        "freeze_b_baseline_after_warmstart": bool(args.freeze_b_baseline_after_warmstart),
+        "global_b_lr_scale": float(args.global_b_lr_scale),
+        "point_b_lr_scale": float(args.point_b_lr_scale),
+    }
+    if float(args.le_loss_weight) < 0.0:
+        raise ValueError("--le-loss-weight must be >= 0")
+    if bool(args.freeze_b_baseline_after_warmstart):
+        main_train_control.update(_freeze_b_baseline_for_main_train(model))
     if bool(ctx["distributed"]):
         model = DDP(model, device_ids=[int(ctx["local_rank"])] if device.type == "cuda" else None)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=float(args.lr), weight_decay=float(args.weight_decay))
+    optimizer, optimizer_meta = _build_main_optimizer(model, args)
+    main_train_control["optimizer_meta"] = optimizer_meta
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=float(args.lr_decay))
     col_rng = np.random.default_rng(int(args.seed) + 311 + 1009 * rank)
     action_rng = torch.Generator(device=device)
@@ -708,6 +789,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 "jacobian_target_relation": "J_norm = B_train * q_std / LE_std; B_train = J_norm * LE_std / q_std",
                 "le_normalization_meta": le_norm_meta,
                 "warmstart_meta": warmstart_meta,
+                "main_train_control": main_train_control,
                 "point_sampling": {
                     "train_point_sample_count": train_point_sample_count,
                     "train_point_sampling": "all_points" if train_point_sample_count <= 0 else "random_subset_per_batch",
@@ -824,7 +906,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                     "j_loss_action_mse": baseline_j_obj,
                 }
             lambda_j = float(args.initial_jacobian_weight)
-            loss = le_loss + lambda_j * j_obj + float(args.baseline_jacobian_weight) * baseline_j_obj
+            loss = float(args.le_loss_weight) * le_loss + lambda_j * j_obj + float(args.baseline_jacobian_weight) * baseline_j_obj
             loss.backward()
             if float(args.grad_clip) > 0.0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), float(args.grad_clip))
@@ -860,6 +942,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             "baseline_j_loss_abs_normed_mse": ddp_mean(sums["baseline_j_abs"] / denom, device, ctx),
             "baseline_j_loss_rel_eps_mse": ddp_mean(sums["baseline_j_rel"] / denom, device, ctx),
             "baseline_j_loss_action_mse": ddp_mean(sums["baseline_j_action"] / denom, device, ctx),
+            "le_loss_weight": float(args.le_loss_weight),
             "lambda_j": lambda_j,
             "lr": scheduler.get_last_lr()[0],
             "seconds": time.time() - t0,
@@ -945,6 +1028,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                         "model_meta": model_meta(eval_model, branch_meta),
                         "le_normalization_meta": le_norm_meta,
                         "warmstart_meta": warmstart_meta,
+                        "main_train_control": main_train_control,
                         "point_sampling": {
                             "train_point_sample_count": train_point_sample_count,
                             "eval_point_sampling": "all_points",
@@ -976,6 +1060,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                     "model_meta": model_meta(latest_model, branch_meta),
                     "le_normalization_meta": le_norm_meta,
                     "warmstart_meta": warmstart_meta,
+                    "main_train_control": main_train_control,
                     "point_sampling": {
                         "train_point_sample_count": train_point_sample_count,
                         "eval_point_sampling": "all_points",
@@ -999,6 +1084,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                     "validation_split": split_meta,
                     "strain_meta": data.strain_meta,
                     "warmstart_meta": warmstart_meta,
+                    "main_train_control": main_train_control,
                     "history": history,
                     "best_score": best_score,
                     "best_report": best_report,
@@ -1022,6 +1108,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 "validation_split": split_meta,
                 "strain_meta": data.strain_meta,
                 "warmstart_meta": warmstart_meta,
+                "main_train_control": main_train_control,
                 "history": history,
                 "best_score": best_score,
                 "best_report": best_report,
@@ -1070,8 +1157,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mionet-product-scale", default="none", choices=["none", "sqrt", "basis"])
     p.add_argument("--use-q-skip", action="store_true")
     p.add_argument("--residual-scale", type=float, default=1.0)
+    p.add_argument("--le-loss-weight", type=float, default=1.0)
     p.add_argument("--fe-baseline-scale", type=float, default=1.0)
     p.add_argument("--freeze-fe-point-baseline", action="store_true")
+    p.add_argument("--freeze-b-baseline-after-warmstart", action="store_true")
+    p.add_argument("--global-b-lr-scale", type=float, default=1.0)
+    p.add_argument("--point-b-lr-scale", type=float, default=1.0)
     p.add_argument("--no-zero-init-residual", action="store_true")
     p.add_argument("--baseline-jacobian-weight", type=float, default=1.0)
     p.add_argument("--baseline-j-loss-mode", default="norm-plus-physical", choices=["norm", "physical", "norm-plus-physical"])

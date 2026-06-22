@@ -424,7 +424,7 @@ def write_loss_history(out_dir: Path, history: list[dict[str, Any]]) -> None:
         return
     keys = [
         "epoch", "loss", "le_loss_norm_mse", "j_loss_objective", "j_loss_norm_mse",
-        "j_loss_abs_normed_mse", "j_loss_rel_eps_mse", "j_loss_action_mse", "lambda_j",
+        "j_loss_abs_normed_mse", "j_loss_rel_eps_mse", "j_loss_action_mse", "le_loss_weight", "lambda_j",
         "baseline_j_loss_objective", "baseline_j_loss_norm_mse",
         "baseline_j_loss_abs_normed_mse", "baseline_j_loss_rel_eps_mse",
         "baseline_j_loss_action_mse",

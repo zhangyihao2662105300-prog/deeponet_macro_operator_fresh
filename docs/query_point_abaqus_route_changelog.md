@@ -589,3 +589,65 @@ Validation:
   `abs(cos) >= 0.95`; pairwise abs-cosine ranged from `0.8967` to `0.9938`.
   This supports the current interpretation that the 3-case pool is still too
   thin in independent load directions.
+
+## v1.2 follow-up - 2026-06-22 - Legacy TRUE176 boundary-control candidate audit
+
+Purpose:
+
+- Use old TRUE176 compact data as a candidate boundary-displacement direction
+  library without treating it as formal v1.2 query-point/Abaqus training data.
+- Select independent `q48_raw` directions that should be reapplied as fresh
+  boundary-displacement controls, then regenerated through Abaqus and the
+  current exporter as strict v1.2 complete compacts.
+
+Included:
+
+- Added `scripts/select_legacy176_reexport_candidates.py`.
+- The script reads legacy `q48_raw`, `LE128_base`/`le`, optional B metadata,
+  and `sample_paths`; it does not train a model and does not require old
+  compacts to pass strict v1.2.
+- The script compares legacy representative q directions against the current
+  strict-pass pool, clusters old candidates by absolute cosine, and writes:
+  `legacy176_candidate_manifest.csv`,
+  `legacy176_candidate_manifest.json`,
+  `legacy176_to_current_abs_cosine.csv`,
+  `legacy176_candidate_cluster_summary.json`, and
+  `legacy176_reexport_plan.md`.
+- The script also writes `legacy176_boundary_control_plan.json`, which contains
+  the selected unit `q_direction_48` vectors for future
+  `q_new = alpha * q_direction_48` displacement-control runs.
+- Added `docs/query_point_v1_2_legacy176_reexport_plan.md` to document that
+  old TRUE176 compacts are boundary-control direction sources only and must not
+  be added directly to the formal v1.2 pool.
+
+Audit result:
+
+- Current strict-pass pool remains case019/case025/case031:
+  `strict_v1_2_pass=true`, `compact_count=3`, `case_count=3`,
+  `frame_count=30`, `q_direction_cluster_count=2`,
+  `pairwise_abs_cos_min=0.8966673549`,
+  `pairwise_abs_cos_median=0.9078195202`,
+  `pairwise_abs_cos_max=0.9937922950`.
+- Legacy candidate audit scanned 6 old compact sources and found 733 candidate
+  samples in 17 q-direction clusters.
+- 150 candidates met `max_abs_cos_to_current < 0.95`; 100 of those met the
+  stronger `< 0.90` threshold.
+- The top 12 recommended re-export candidates are assigned tentative new case
+  ids case040-case051.  Their `max_abs_cos_to_current` range is
+  `0.226673` to `0.862846`, so they are all less redundant than the current
+  case019/case031 near-duplicate direction.
+- The audit was rerun with `--compute-b-rms`; recommended candidate `B_rms_mean`
+  values were recorded in the manifest and re-export plan.
+
+Known gaps:
+
+- The old TRUE176 compacts still lack the current strict v1.2 metadata
+  (`point_features`, IP geometry/Jacobian tables, `ip_keys`, explicit strain
+  fields, merge-audit fields, and reference-frame IP audit fields).  They remain
+  candidate-direction data only.
+- The selected candidates' local `sample_path` entries do not currently resolve
+  to ready-to-use current v1.2 samples: top-12 `base_odb_exists=false` and
+  `perturb_dir_exists=false`.
+- Formal pool entry still requires regenerating a fresh base ODB from
+  `q_new = alpha * q_direction_48`, generating a matching Sobolev B compact,
+  running the current complete-compact exporter, and passing strict v1.2.

@@ -53,3 +53,28 @@ Change-note rule for future route work:
 - Add one dated section here for every meaningful route change.
 - Mention the commit hash, user-facing behavior change, validation command, and
   any remaining risk.
+
+## workflow-baseline - 2026-06-22 - Route tracking toolchain
+
+Purpose:
+
+- Add a fixed workflow for continuing the query-point Abaqus route without
+  losing track of data-contract risks.
+
+Included:
+
+- GitHub Actions smoke workflow for `compileall` and `pytest`.
+- GitHub issue template for `v1.1 hard guards`.
+- Pull request review template focused on data trustworthiness.
+- ChatGPT Project instructions for long-running route review.
+- Route workflow document with version plan and review gates.
+
+Validation:
+
+- `py -3 -m pytest tests/smoke_test.py -q`
+- `py -3 -m compileall src/macro_deeponet scripts`
+
+Known gaps:
+
+- The `v1.1 hard guards` issue checklist is now documented, but the guards still
+  need to be implemented in code.

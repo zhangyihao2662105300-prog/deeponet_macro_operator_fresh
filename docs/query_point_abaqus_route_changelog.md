@@ -442,3 +442,94 @@ Current interpretation:
 - The remaining route question is not whether B labels or AD-B are wired, but
   how to schedule residual and baseline updates so LE improves without
   injecting destructive q-derivatives.
+
+## v1.1 follow-up - 2026-06-22 - Formal case split warm-start audit
+
+Purpose:
+
+- Move the best overlap-debug training strategy back to a real non-overlapping
+  case-level validation split.
+- Add current train/validation B-prior metrics to the generic trainer summary
+  and CSV history so future runs can distinguish whether the query B prior
+  itself generalizes to the held-out case, or whether residual AD terms dominate
+  the total model derivative.
+
+Code changes:
+
+- `query-fe-linear-residual` training now logs both
+  `b_prior_current_train_*` and `b_prior_current_val_*`.
+- The legacy DeepONet CSV writer includes the validation B-prior fields so
+  `loss_history.csv` retains the same diagnostics as the JSON summaries.
+
+Formal 3-case audit:
+
+- Output directory:
+  `outputs/query_point_v1_1_formal_small_audit/trainer_case_split_3compact_warmstart_physical_smallBLR_ep50`
+- Inputs:
+  `complete_case019_training_ready.npz`,
+  `complete_case025_training_ready.npz`,
+  `complete_case031_training_ready.npz`
+- Split:
+  `split_mode=case`, `allow_overlap_val=false`,
+  `train_cases=[25,31]`, `val_cases=[19]`,
+  `train_frames=20`, `val_frames=10`
+- Model/training:
+  `model_style=query-fe-linear-residual`,
+  `point_feature_source=data`,
+  `branch_feature_mode=xkeep-qraw`,
+  `le_normalization=global-component`,
+  `train_point_sample_count=128`,
+  train-only B warm-start for 500 steps,
+  `j_loss_mode=physical`,
+  `global_b_lr_scale=0.05`,
+  `point_b_lr_scale=0.10`,
+  `le_loss_weight=1.0`,
+  `epochs=50`
+
+Warm-start and latest metrics:
+
+- Train-only warm-start, before main training:
+  `b_prior_before_train_evalcols_B_rel = 0.9781`,
+  `b_prior_after_train_evalcols_B_rel = 0.4313`,
+  `b_prior_after_train_evalcols_B_cos = 0.9022`
+- Latest and best checkpoint are both epoch 50, `score = 2.7052`
+- Current B prior:
+  `b_prior_current_train_evalcols_B_rel = 0.3756`,
+  `b_prior_current_val_evalcols_B_rel = 0.3694`
+- Full model B:
+  `train_AD_B_rel = 0.3768`, `train_AD_B_cos = 0.9317`,
+  `val_AD_B_rel = 0.3716`, `val_AD_B_cos = 0.9339`
+- Physical random-direction B:
+  `train_phys_rand_dir_B_rel = 0.3773`,
+  `val_phys_rand_dir_B_rel = 0.3708`
+- LE:
+  `train_LE_rel = 0.2253`, `val_LE_rel = 2.3336`
+- Worst aggregate errors:
+  `train_AD_B_ip_rel_max = 2.4735`,
+  `val_AD_B_ip_rel_max = 2.5196`,
+  `val_AD_B_col_rel_max = 1.8485`
+
+Epoch trend:
+
+- Epoch 1: `val_AD_B_rel=0.4385`, `val_LE_rel=7.0280`
+- Epoch 10: `val_AD_B_rel=0.3726`, `val_LE_rel=5.9601`
+- Epoch 25: `val_AD_B_rel=0.3735`, `val_LE_rel=4.0671`
+- Epoch 50: `val_AD_B_rel=0.3716`, `val_LE_rel=2.3336`
+
+Current interpretation:
+
+- The formal case split is clean and non-overlapping.
+- The query B strategy is now credible under a held-out case: train-only
+  warm-start plus physical-J and conservative B-baseline learning rates keeps
+  validation physical/raw `AD_B_rel` near `0.37`.
+- LE held-out case generalization is still not established. It improves from a
+  very poor initial value, but `val_LE_rel = 2.3336` remains too high.
+- With only three load cases and one held-out case, the next scientific step is
+  adding independent cases/load directions, not extending this 3-case run to a
+  long training schedule.
+
+Validation:
+
+- `py -3 -m pytest tests/smoke_test.py -q` -> `42 passed`
+- `py -3 -m compileall src/macro_deeponet scripts`
+- `git diff --check`

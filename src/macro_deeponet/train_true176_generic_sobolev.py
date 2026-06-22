@@ -339,6 +339,7 @@ def _query_b_baseline_meta(
     device: torch.device,
     batch_size: int,
     prefix: str,
+    subset_label: str = "train",
 ) -> dict[str, Any]:
     pred, global_rms, correction_rms, ratio = _query_b_baseline_arrays(
         model,
@@ -349,30 +350,31 @@ def _query_b_baseline_meta(
     train = np.asarray(train_idx, dtype=np.int64)
     pred_train = pred[train].astype(np.float64, copy=False)
     target_train = np.asarray(target_norm, dtype=np.float64)[train]
+    subset = str(subset_label).strip().lower().replace("_", "-") or "train"
     meta: dict[str, Any] = {
-        f"{prefix}_train_rel": rel_np(pred_train, target_train),
-        f"{prefix}_train_cos": cos_np(pred_train, target_train),
-        f"{prefix}_train_norm_rel": rel_np(pred_train, target_train),
-        f"{prefix}_train_norm_cos": cos_np(pred_train, target_train),
+        f"{prefix}_{subset}_rel": rel_np(pred_train, target_train),
+        f"{prefix}_{subset}_cos": cos_np(pred_train, target_train),
+        f"{prefix}_{subset}_norm_rel": rel_np(pred_train, target_train),
+        f"{prefix}_{subset}_norm_cos": cos_np(pred_train, target_train),
         "global_b_prior_rms": global_rms,
         "point_b_correction_rms": correction_rms,
         "point_b_correction_norm_ratio": ratio,
     }
     if eval_columns is not None:
         cols = np.asarray(eval_columns, dtype=np.int64)
-        meta[f"{prefix}_train_evalcols_norm_rel"] = rel_np(pred_train[:, :, :, cols], target_train[:, :, :, cols])
-        meta[f"{prefix}_train_evalcols_norm_cos"] = cos_np(pred_train[:, :, :, cols], target_train[:, :, :, cols])
+        meta[f"{prefix}_{subset}_evalcols_norm_rel"] = rel_np(pred_train[:, :, :, cols], target_train[:, :, :, cols])
+        meta[f"{prefix}_{subset}_evalcols_norm_cos"] = cos_np(pred_train[:, :, :, cols], target_train[:, :, :, cols])
     if b_target is not None and le_std is not None and q_std is not None:
         q_vals = np.asarray(q_std, dtype=np.float64).reshape(-1)
         le_scale = _le_scale_np(np.asarray(le_std, dtype=np.float32), int(pred.shape[1])).astype(np.float64)
         pred_b = pred_train * le_scale / np.maximum(q_vals.reshape(1, 1, 1, -1), 1.0e-12)
         true_b = np.asarray(b_target, dtype=np.float64)[train]
-        meta[f"{prefix}_train_B_rel"] = rel_np(pred_b, true_b)
-        meta[f"{prefix}_train_B_cos"] = cos_np(pred_b, true_b)
+        meta[f"{prefix}_{subset}_B_rel"] = rel_np(pred_b, true_b)
+        meta[f"{prefix}_{subset}_B_cos"] = cos_np(pred_b, true_b)
         if eval_columns is not None:
             cols = np.asarray(eval_columns, dtype=np.int64)
-            meta[f"{prefix}_train_evalcols_B_rel"] = rel_np(pred_b[:, :, :, cols], true_b[:, :, :, cols])
-            meta[f"{prefix}_train_evalcols_B_cos"] = cos_np(pred_b[:, :, :, cols], true_b[:, :, :, cols])
+            meta[f"{prefix}_{subset}_evalcols_B_rel"] = rel_np(pred_b[:, :, :, cols], true_b[:, :, :, cols])
+            meta[f"{prefix}_{subset}_evalcols_B_cos"] = cos_np(pred_b[:, :, :, cols], true_b[:, :, :, cols])
     return meta
 
 
@@ -965,6 +967,21 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 prefix="b_prior_current",
             )
             row.update(current_b_meta)
+            current_b_val_meta = _query_b_baseline_meta(
+                _unwrap(model),
+                point_norm,
+                j_norm_target,
+                val_idx,
+                b_target=b_train,
+                le_std=le_std,
+                q_std=q_std_np,
+                eval_columns=eval_columns,
+                device=device,
+                batch_size=max(1, int(args.eval_batch_size)),
+                prefix="b_prior_current",
+                subset_label="val",
+            )
+            row.update(current_b_val_meta)
             row["point_b_correction_norm_ratio"] = float(current_b_meta["point_b_correction_norm_ratio"])
             row["global_b_prior_rms"] = float(current_b_meta["global_b_prior_rms"])
             row["point_b_correction_rms"] = float(current_b_meta["point_b_correction_rms"])

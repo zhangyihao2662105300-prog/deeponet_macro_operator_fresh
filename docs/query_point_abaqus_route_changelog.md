@@ -1126,3 +1126,101 @@ Validation boundary:
 - No model, loss, learning-rate, or epoch settings were changed.
 - Large generated checkpoints, NPZ/ODB files, and loss histories remain outside
   git and must not be committed.
+
+## v1.2 follow-up - 2026-06-23 - LE failure decomposition
+
+Purpose:
+
+- Decompose why fixed-strategy split_A and split_B have high held-out `LE_rel`
+  while `AD_B` remains stable and aligned with the query B prior.
+- Keep this as an evaluation-only diagnostic: no training, no model/loss/lr
+  changes, and no epoch changes.
+
+Included:
+
+- Added `scripts/diagnose_v1_2_le_failure.py`.
+- The script reconstructs the generic query-point preprocessing from a saved
+  checkpoint, runs forward LE prediction for selected cases, and writes:
+  `le_case_summary.csv`, `le_component_summary.csv`,
+  `le_worst_ip_summary.csv`, per-case frame trend CSVs,
+  `le_offset_summary.csv`, `le_offset_by_case.csv`, and
+  `le_failure_diagnostic_summary.json`.
+- It also computes zero-prediction and train-mean baselines, scale/bias
+  corrections, train-only affine LE oracle diagnostics, and B-prior offset
+  diagnostics.
+
+Outputs:
+
+- Split_A diagnostic:
+  `D:\IS-FEM\outputs\query_point_v1_2_training_audit\le_failure_diagnostic\split_A_val41_49`
+- Split_B diagnostic:
+  `D:\IS-FEM\outputs\query_point_v1_2_training_audit\le_failure_diagnostic\split_B_val44_46`
+
+Key LE scale result:
+
+- The model predicts held-out LE values that are much larger than the true
+  target RMS:
+  `case041 target_rms=9.33e-05, pred_rms=8.60e-04, LE_rel=9.14`;
+  `case049 target_rms=2.21e-04, pred_rms=9.04e-04, LE_rel=4.02`;
+  `case044 target_rms=9.36e-05, pred_rms=9.18e-04, LE_rel=9.65`;
+  `case046 target_rms=1.23e-04, pred_rms=9.64e-04, LE_rel=7.78`.
+- `zero_pred_LE_rel=1.0` for all checked validation cases, so the model is
+  worse than predicting zero on these held-out cases.
+- Scale-only correction improves each case only to about zero-baseline quality:
+  `scaled_LE_rel` is about `0.98-0.99`.
+- Bias-only correction barely helps, so the failure is not a simple constant
+  offset.
+
+Component/IP localization:
+
+- Worst average components are dominated by `LE11`, `LE23`, and `LE22`.
+- Worst local IP errors are severe:
+  split_A `case041` reaches `IP_LE_rel=43.56`;
+  split_B `case044` reaches `IP_LE_rel=40.99`.
+- Low component targets amplify some local relative errors, but the aggregate
+  predicted LE RMS is also too large, so this is not only a reporting artifact.
+
+Frame/alpha trend:
+
+- Low-alpha frames are worst, but high-alpha frames remain poor:
+  `case041 alpha=0.1 -> LE_rel=52.05`, `alpha=1.0 -> LE_rel=6.37`;
+  `case044 alpha=0.1 -> LE_rel=59.65`, `alpha=1.0 -> LE_rel=6.06`.
+- Thus low target RMS amplifies the metric, but does not fully explain the
+  failure.
+
+Affine oracle:
+
+- The train-only affine LE oracle is numerically ill-conditioned:
+  split_A rank `41/49`, condition about `1.51e20`;
+  split_B rank `41/49`, condition about `1.37e20`.
+- Its held-out errors are enormous, so the current 8-train-case q design does
+  not provide a stable unconstrained affine value-field extrapolation basis.
+
+Offset / anchor result:
+
+- True offset `LE_true - B_true @ q48` is tiny for the validation cases:
+  `offset_true_rms` ranges from about `2.87e-06` to `1.14e-05`.
+- Predicted offset `LE_pred - B_prior @ q48` is much larger:
+  about `7.9e-04` to `9.0e-04`.
+- Offset relative errors are large:
+  `case041=213.1`, `case049=68.9`, `case044=252.0`, `case046=313.2`.
+- This is the clearest signal: B is stable, but the LE value anchor/integration
+  constant learned by the network is wrong on held-out cases.
+
+Current interpretation:
+
+- The high `LE_rel` is partly amplified by low validation target RMS, but the
+  model is genuinely predicting an overlarge held-out LE field and is worse
+  than the zero baseline.
+- The issue is not bad B labels, residual AD destroying B, legacy TRUE176 label
+  contamination, or split_A bad luck only.
+- The most likely current bottleneck is LE value-anchor / residual value-field
+  generalization under the frozen strategy and current single-geometry,
+  low-LE-heavy fresh validation cases.
+
+Validation boundary:
+
+- No new model was trained for this decomposition.
+- No old TRUE176 `LE/B` labels were used as v1.2 labels.
+- No model, loss, learning-rate, or epoch settings were changed.
+- Large generated artifacts remain outside git and must not be committed.

@@ -116,3 +116,27 @@ Known gaps:
 
 - This route still trains on the Abaqus 128-IP table and selected subsets of
   that table; full arbitrary query-point label generation remains future work.
+
+## v1.1 follow-up - 2026-06-22 - Mark legacy split helper
+
+Purpose:
+
+- Make the remaining old split helper visibly legacy/debug-only so future
+  scripts do not mistake its overlapping validation fallback for formal route
+  validation.
+
+Included:
+
+- `split_indices()` now documents its historical overlapping fallback and emits
+  a runtime warning when called.
+- Smoke coverage checks that the legacy warning remains present.
+
+Validation:
+
+- `py -3 -m pytest tests/smoke_test.py -q`
+- `py -3 -m compileall src/macro_deeponet scripts`
+
+Known gaps:
+
+- The old fixed-128-IP trainer still calls `split_indices()` for compatibility;
+  formal query-point/Abaqus training should keep using `split_indices_with_meta()`.

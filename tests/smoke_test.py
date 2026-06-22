@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import sys
 import tempfile
+import warnings
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -32,6 +33,7 @@ from macro_deeponet.true176_data import (
     keep_node_ids,
     load_compacts,
     load_one_compact,
+    split_indices,
     split_indices_with_meta,
     transform_b_target_for_q_coordinate,
 )
@@ -541,6 +543,21 @@ def test_strict_split_uses_case_or_geometry_without_overlap() -> None:
             assert "--allow-overlap-val" in str(exc)
         else:
             raise AssertionError("overlap split did not require explicit debug flag")
+
+
+def test_legacy_split_indices_warns_about_overlap_behavior() -> None:
+    data = SimpleNamespace(
+        shape4=np.zeros((5, 4), dtype=np.float32),
+        case_id=np.arange(5, dtype=np.int64),
+        shape_index=np.arange(5, dtype=np.int64),
+    )
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        train, val = split_indices(data, 0.0, 11, "")
+    assert train.size == 5
+    assert val.size == 1
+    assert np.intersect1d(train, val).size == 1
+    assert any("split_indices() is legacy/debug behavior" in str(w.message) for w in seen)
 
 
 def test_generic_point_feature_loader_reads_real_fields() -> None:

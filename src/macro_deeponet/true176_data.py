@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 import re
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -842,6 +843,21 @@ class SobolevArrayDataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor
 
 
 def split_indices(data: True176Arrays, val_fraction: float, seed: int, val_cases: str = "") -> tuple[np.ndarray, np.ndarray]:
+    """Legacy split helper retained for the older fixed-128-IP trainer.
+
+    This function preserves the historical fallback where ``val_fraction=0``
+    creates an overlapping debug validation subset.  Formal query-point/Abaqus
+    route training must call ``split_indices_with_meta()`` so the split mode and
+    overlap status are recorded explicitly.
+    """
+
+    warnings.warn(
+        "split_indices() is legacy/debug behavior and may create overlapping "
+        "validation when val_fraction=0; use split_indices_with_meta() for "
+        "formal query-point/Abaqus route training.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
     n = int(data.shape4.shape[0])
     all_idx = np.arange(n, dtype=np.int64)
     text = str(val_cases).strip()

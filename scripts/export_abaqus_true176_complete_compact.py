@@ -25,8 +25,12 @@ from typing import Any, Iterable
 
 import numpy as np
 
-from abaqusConstants import INTEGRATION_POINT  # type: ignore
-from odbAccess import openOdb  # type: ignore
+try:
+    from abaqusConstants import INTEGRATION_POINT  # type: ignore
+    from odbAccess import openOdb  # type: ignore
+except Exception:  # pragma: no cover - available only inside Abaqus Python
+    INTEGRATION_POINT = None  # type: ignore
+    openOdb = None  # type: ignore
 
 
 SCHEMA_VERSION = "abaqus_true176_complete_operator_compact_v1"
@@ -77,6 +81,8 @@ def css8_shape(r: float, s: float, t: float) -> tuple[np.ndarray, np.ndarray]:
 
 def field_values(field: Any, *, integration_point_only: bool = False) -> list[Any]:
     if integration_point_only:
+        if INTEGRATION_POINT is None:
+            raise RuntimeError("Abaqus INTEGRATION_POINT constant is unavailable outside Abaqus Python")
         try:
             return list(field.getSubset(position=INTEGRATION_POINT).values)
         except Exception:
@@ -280,7 +286,38 @@ def broadcast_or_match(arr: np.ndarray, n: int, tail: tuple[int, ...], name: str
     raise ValueError("%s must have shape %s or %s, got %s" % (name, tail, (int(n),) + tail, vals.shape))
 
 
-def merge_existing_payload(payload: dict[str, Any], merge_path: str, *, require_b: bool) -> dict[str, Any]:
+def _max_abs_diff(a: np.ndarray, b: np.ndarray) -> float:
+    return float(np.max(np.abs(np.asarray(a, dtype=np.float64) - np.asarray(b, dtype=np.float64))))
+
+
+def _enforce_tolerance(name: str, diff: float, tol: float, *, allow_mismatch: bool) -> None:
+    if float(diff) > float(tol) and not bool(allow_mismatch):
+        raise ValueError(f"{name} mismatch exceeds tolerance: diff={diff:.9g}, tol={float(tol):.9g}")
+
+
+def _check_ip_keys_match(current: np.ndarray, merged: np.ndarray, *, source: Path) -> None:
+    cur = np.asarray(current, dtype=np.int64).reshape(-1, np.asarray(current).shape[-1])
+    old = np.asarray(merged, dtype=np.int64)
+    if old.ndim == 3:
+        old = old[0]
+    old = old.reshape(-1, old.shape[-1])
+    if cur.shape != old.shape or not np.array_equal(cur, old):
+        raise ValueError(
+            f"merged ip_keys in {source} do not match current Abaqus ip_keys: "
+            f"current_shape={cur.shape}, merged_shape={old.shape}"
+        )
+
+
+def merge_existing_payload(
+    payload: dict[str, Any],
+    merge_path: str,
+    *,
+    require_b: bool,
+    merge_q_tol: float = 1.0e-8,
+    merge_le_tol: float = 1.0e-8,
+    require_merge_ip_keys: bool = False,
+    allow_merge_mismatch: bool = False,
+) -> dict[str, Any]:
     if not str(merge_path).strip():
         if require_b:
             raise ValueError("--require-b was set but --merge-compact was not provided")
@@ -308,12 +345,64 @@ def merge_existing_payload(payload: dict[str, Any], merge_path: str, *, require_
             payload["shape4"] = broadcast_or_match(np.asarray(z["shape4"], dtype=np.float32), n, (4,), "shape4")
         if "q48_raw" in z.files:
             q_old = broadcast_or_match(np.asarray(z["q48_raw"], dtype=np.float32), n, (48,), "q48_raw")
-            payload["merge_q48_max_abs_diff"] = np.asarray(float(np.max(np.abs(q_old - payload["q48_raw"]))), dtype=np.float64)
+            q_diff = _max_abs_diff(q_old, payload["q48_raw"])
+            payload["merge_q48_max_abs_diff"] = np.asarray(q_diff, dtype=np.float64)
+            _enforce_tolerance("merge q48_raw", q_diff, float(merge_q_tol), allow_mismatch=bool(allow_merge_mismatch))
         if "LE128_base" in z.files:
             le_old = broadcast_or_match(np.asarray(z["LE128_base"], dtype=np.float32), n, (p, 6), "LE128_base")
-            payload["merge_LE128_base_max_abs_diff"] = np.asarray(float(np.max(np.abs(le_old - payload["LE128_base"]))), dtype=np.float64)
+            le_diff = _max_abs_diff(le_old, payload["LE128_base"])
+            payload["merge_LE128_base_max_abs_diff"] = np.asarray(le_diff, dtype=np.float64)
+            _enforce_tolerance("merge LE128_base", le_diff, float(merge_le_tol), allow_mismatch=bool(allow_merge_mismatch))
+        if "ip_keys" in z.files:
+            _check_ip_keys_match(payload["ip_keys"], z["ip_keys"], source=path)
+            payload["merge_ip_keys_match"] = np.asarray(True)
+        elif bool(require_merge_ip_keys):
+            raise ValueError(f"{path} is missing ip_keys; use --require-merge-ip-keys only with keyed B compacts")
     payload["merged_compact"] = np.asarray(str(path), dtype=object)
     payload["merged_keys"] = np.asarray(copied, dtype=object)
+    payload["merge_q_tol"] = np.asarray(float(merge_q_tol), dtype=np.float64)
+    payload["merge_le_tol"] = np.asarray(float(merge_le_tol), dtype=np.float64)
+    payload["allow_merge_mismatch"] = np.asarray(bool(allow_merge_mismatch))
+    return payload
+
+
+def enforce_ip_audit(
+    payload: dict[str, Any],
+    *,
+    require_ip_audit: bool,
+    ip_xyz_tol: float,
+    detj_ivol_tol: float,
+    skip_ivol_audit: bool,
+) -> dict[str, Any]:
+    if "ip_xyz_abaqus_coord" in payload:
+        coords = np.asarray(payload["ip_xyz_abaqus_coord"], dtype=np.float64)
+        xyz = np.asarray(payload["ip_xyz"], dtype=np.float64).reshape(1, 128, 3)
+        diff = float(np.nanmax(np.abs(coords - xyz)))
+        payload["audit_ref_ip_xyz_vs_abaqus_coord_max_abs"] = np.asarray(diff, dtype=np.float64)
+        if float(diff) > float(ip_xyz_tol):
+            raise ValueError(f"IP COORD audit failed: diff={diff:.9g}, tol={float(ip_xyz_tol):.9g}")
+    elif bool(require_ip_audit):
+        raise ValueError("--require-ip-audit requires Abaqus COORD field output")
+
+    if bool(skip_ivol_audit):
+        payload["audit_detJ_vs_IVOL_skipped"] = np.asarray(True)
+    elif "ip_IVOL_abaqus" in payload:
+        ivol = np.asarray(payload["ip_IVOL_abaqus"], dtype=np.float64)
+        detj = np.asarray(payload["ip_detJ"], dtype=np.float64).reshape(1, 128)
+        diff = float(np.nanmax(np.abs(ivol - detj)))
+        payload["audit_detJ_vs_IVOL_max_abs"] = np.asarray(diff, dtype=np.float64)
+        if float(diff) > float(detj_ivol_tol):
+            raise ValueError(
+                f"TRUE176/CSS8 detJ-vs-IVOL audit failed: diff={diff:.9g}, tol={float(detj_ivol_tol):.9g}"
+            )
+    elif bool(require_ip_audit):
+        raise ValueError("--require-ip-audit requires Abaqus IVOL field output unless --skip-ivol-audit is set")
+
+    payload["require_ip_audit"] = np.asarray(bool(require_ip_audit))
+    payload["ip_xyz_tol"] = np.asarray(float(ip_xyz_tol), dtype=np.float64)
+    payload["detj_ivol_tol"] = np.asarray(float(detj_ivol_tol), dtype=np.float64)
+    payload["skip_ivol_audit"] = np.asarray(bool(skip_ivol_audit))
+    payload["ip_audit_scope"] = np.asarray("TRUE176/CSS8 128-IP solid contract; IVOL compared directly to detJ", dtype=object)
     return payload
 
 
@@ -328,6 +417,14 @@ def main() -> None:
     parser.add_argument("--keep-node-labels", default=",".join(str(v) for v in DEFAULT_KEEP_NODE_LABELS))
     parser.add_argument("--merge-compact", default="")
     parser.add_argument("--require-b", action="store_true")
+    parser.add_argument("--merge-q-tol", type=float, default=1.0e-8)
+    parser.add_argument("--merge-le-tol", type=float, default=1.0e-8)
+    parser.add_argument("--require-merge-ip-keys", action="store_true")
+    parser.add_argument("--allow-merge-mismatch", action="store_true")
+    parser.add_argument("--require-ip-audit", action="store_true")
+    parser.add_argument("--ip-xyz-tol", type=float, default=1.0e-6)
+    parser.add_argument("--detj-ivol-tol", type=float, default=1.0e-8)
+    parser.add_argument("--skip-ivol-audit", action="store_true")
     parser.add_argument("--shape4", default="")
     parser.add_argument("--shape4-json", default="")
     parser.add_argument("--length-scale", type=float, default=0.0)
@@ -338,6 +435,8 @@ def main() -> None:
     keep_labels = parse_ints(str(args.keep_node_labels))
     if len(keep_labels) != 16:
         raise ValueError("--keep-node-labels must contain 16 node labels")
+    if openOdb is None:
+        raise RuntimeError("This exporter must be run with Abaqus Python; odbAccess.openOdb is unavailable")
 
     odb = openOdb(path=str(odb_path), readOnly=True)
     try:
@@ -436,12 +535,25 @@ def main() -> None:
         if coord_rows:
             coords = np.asarray(coord_rows, dtype=np.float32)
             payload["ip_xyz_abaqus_coord"] = coords
-            payload["audit_ref_ip_xyz_vs_abaqus_coord_max_abs"] = np.asarray(float(np.nanmax(np.abs(coords - payload["ip_xyz"].reshape(1, 128, 3)))), dtype=np.float64)
         if ivol_rows:
             payload["ip_IVOL_abaqus"] = np.asarray(ivol_rows, dtype=np.float32)
-            payload["audit_detJ_vs_IVOL_max_abs"] = np.asarray(float(np.nanmax(np.abs(payload["ip_IVOL_abaqus"] - payload["ip_detJ"].reshape(1, 128)))), dtype=np.float64)
 
-        payload = merge_existing_payload(payload, str(args.merge_compact), require_b=bool(args.require_b))
+        payload = enforce_ip_audit(
+            payload,
+            require_ip_audit=bool(args.require_ip_audit),
+            ip_xyz_tol=float(args.ip_xyz_tol),
+            detj_ivol_tol=float(args.detj_ivol_tol),
+            skip_ivol_audit=bool(args.skip_ivol_audit),
+        )
+        payload = merge_existing_payload(
+            payload,
+            str(args.merge_compact),
+            require_b=bool(args.require_b),
+            merge_q_tol=float(args.merge_q_tol),
+            merge_le_tol=float(args.merge_le_tol),
+            require_merge_ip_keys=bool(args.require_merge_ip_keys),
+            allow_merge_mismatch=bool(args.allow_merge_mismatch),
+        )
         payload["complete_b_labels"] = np.asarray("B_LE128_forward" in payload)
         payload["training_ready_sobolev"] = np.asarray("B_LE128_forward" in payload)
 
@@ -457,6 +569,13 @@ def main() -> None:
             "training_ready_sobolev": bool("B_LE128_forward" in payload),
             "audit_ref_ip_xyz_vs_abaqus_coord_max_abs": float(payload.get("audit_ref_ip_xyz_vs_abaqus_coord_max_abs", np.nan)),
             "audit_detJ_vs_IVOL_max_abs": float(payload.get("audit_detJ_vs_IVOL_max_abs", np.nan)),
+            "require_ip_audit": bool(payload.get("require_ip_audit", False)),
+            "skip_ivol_audit": bool(payload.get("skip_ivol_audit", False)),
+            "ip_audit_scope": str(payload.get("ip_audit_scope", "")),
+            "merge_q48_max_abs_diff": float(payload.get("merge_q48_max_abs_diff", np.nan)),
+            "merge_LE128_base_max_abs_diff": float(payload.get("merge_LE128_base_max_abs_diff", np.nan)),
+            "merge_ip_keys_match": bool(payload.get("merge_ip_keys_match", False)),
+            "allow_merge_mismatch": bool(payload.get("allow_merge_mismatch", False)),
             "point_feature_dim": int(point_features.shape[-1]),
             "point_feature_names": point_feature_names.tolist(),
         }

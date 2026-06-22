@@ -134,6 +134,18 @@ def _slice_ip_keys(arr: np.ndarray, *, rows: np.ndarray, target_ips: list[int], 
     return np.asarray(picked[:, ips])
 
 
+def _ip_keys_have_standard_elem_labels(arr: np.ndarray) -> bool:
+    vals = np.asarray(arr)
+    if vals.ndim == 2 and vals.shape[0] == 128 and vals.shape[-1] >= 2:
+        labels = vals[:, 0]
+    elif vals.ndim == 3 and vals.shape[1] == 128 and vals.shape[-1] >= 2:
+        labels = vals[:, :, 0].reshape(-1)
+    else:
+        return False
+    unique_elem = np.unique(np.asarray(labels, dtype=np.int64))
+    return bool(np.array_equal(unique_elem, np.arange(1, 17, dtype=np.int64)))
+
+
 def _infer_frame_count(z: np.lib.npyio.NpzFile, fallback: int, source_key: str) -> int:
     if int(fallback) > 0:
         return int(fallback)
@@ -164,23 +176,58 @@ def _id_features(target_ips: list[int], batch: int) -> tuple[np.ndarray, list[st
     ]
 
 
-def _id_features_from_ip_keys(ip_keys: np.ndarray) -> tuple[np.ndarray, list[str]]:
+def _id_features_from_ip_keys(ip_keys: np.ndarray, *, standard_elem_labels: bool | None = None) -> tuple[np.ndarray, list[str], dict[str, Any]]:
     keys = np.asarray(ip_keys, dtype=np.float32)
     if keys.ndim != 3 or keys.shape[-1] < 2:
         raise ValueError(f"ip_keys must have shape [N,P,>=2], got {keys.shape}")
     elem = keys[:, :, 0]
     ip = keys[:, :, 1]
-    ex = np.mod(elem - 1.0, 4.0)
-    ey = np.floor((elem - 1.0) / 4.0)
-    elem_x = -1.0 + 2.0 * (ex + 0.5) / 4.0
-    elem_y = -1.0 + 2.0 * (ey + 0.5) / 4.0
-    feats = np.stack([(elem - 8.5) / 7.5, (ip - 4.5) / 3.5, elem_x, elem_y], axis=-1)
+    unique_elem = np.unique(elem.astype(np.int64))
+    standard = bool(standard_elem_labels) if standard_elem_labels is not None else bool(
+        np.array_equal(unique_elem, np.arange(1, 17, dtype=np.int64))
+    )
+    ip_norm = (ip - 4.5) / 3.5
+    if standard:
+        ex = np.mod(elem - 1.0, 4.0)
+        ey = np.floor((elem - 1.0) / 4.0)
+        elem_x = -1.0 + 2.0 * (ex + 0.5) / 4.0
+        elem_y = -1.0 + 2.0 * (ey + 0.5) / 4.0
+        feats = np.stack([(elem - 8.5) / 7.5, ip_norm, elem_x, elem_y], axis=-1)
+        return feats.astype(np.float32), [
+            "elem_index_norm",
+            "ip_index_norm",
+            "elem_x_center_id",
+            "elem_y_center_id",
+        ], {
+            "id_feature_rule": "standard_true176_elem_label_4x4_spatial",
+            "id_feature_guard_passed": True,
+            "id_feature_element_labels": unique_elem.astype(np.int64).tolist(),
+        }
+
+    order = {int(label): i for i, label in enumerate(unique_elem.tolist())}
+    rank = np.vectorize(lambda v: order[int(v)], otypes=[np.float32])(elem)
+    denom = max(float(unique_elem.size - 1), 1.0)
+    elem_rank_norm = -1.0 + 2.0 * rank / denom if unique_elem.size > 1 else np.zeros_like(rank, dtype=np.float32)
+    feats = np.stack([elem_rank_norm, ip_norm], axis=-1)
     return feats.astype(np.float32), [
-        "elem_index_norm",
+        "elem_rank_norm",
         "ip_index_norm",
-        "elem_x_center_id",
-        "elem_y_center_id",
-    ]
+    ], {
+        "id_feature_rule": "nonstandard_elem_label_rank_only_no_4x4_spatial",
+        "id_feature_guard_passed": False,
+        "id_feature_element_labels": unique_elem.astype(np.int64).tolist(),
+        "id_feature_warning": "element labels are not exactly 1..16; omitted 4x4 spatial ID features",
+    }
+
+
+def _feature_name_mismatch_message(path: Path, expected: list[str], got: list[str]) -> str:
+    mismatch = next((i for i, (a, b) in enumerate(zip(expected, got)) if a != b), None)
+    if mismatch is None and len(expected) != len(got):
+        mismatch = min(len(expected), len(got))
+    return (
+        f"point feature names/order mismatch in {path}: expected {len(expected)} names, got {len(got)}. "
+        f"first_mismatch_index={mismatch}; expected_first10={expected[:10]}; got_first10={got[:10]}"
+    )
 
 
 def _is_dimensionless_point_feature_name(name: str) -> bool:
@@ -402,7 +449,7 @@ def load_point_features_from_compacts(
         rows = source_row[mask]
         path = Path(compact_text).resolve()
         with np.load(str(path), allow_pickle=True) as z:
-            n_total = _infer_frame_count(z, int(shape4.shape[0]), str(path))
+            n_total = _infer_frame_count(z, 0, str(path))
             feature_key = _find_key(z, FEATURE_KEYS)
             if feature_key is not None:
                 arr = _slice_point_array(z[feature_key], rows=rows, target_ips=target_ips, n_total=n_total, source_key=feature_key)
@@ -441,17 +488,21 @@ def load_point_features_from_compacts(
             ip_key_arr = None
             ip_key = _find_key(z, IP_KEY_CANDIDATES)
             if ip_key is not None:
+                standard_ip_key_labels = _ip_keys_have_standard_elem_labels(z[ip_key])
                 ip_key_arr = _slice_ip_keys(z[ip_key], rows=rows, target_ips=target_ips, n_total=n_total, source_key=ip_key)
                 ip_key_chunks.append(ip_key_arr)
                 used["ip_key"] = ip_key
 
             if include_id_features and not (feature_key is None and used.get("mode") == "shape4_generated_fallback"):
                 if ip_key_arr is not None:
-                    ids, id_names = _id_features_from_ip_keys(ip_key_arr)
+                    ids, id_names, id_meta = _id_features_from_ip_keys(ip_key_arr, standard_elem_labels=standard_ip_key_labels)
                     used["id_feature_source"] = "ip_keys"
+                    used.update(id_meta)
                 else:
                     ids, id_names = _id_features(target_ips, arr.shape[0])
                     used["id_feature_source"] = "standard_target_ips"
+                    used["id_feature_rule"] = "standard_target_ips_4x4_spatial"
+                    used["id_feature_guard_passed"] = True
                 arr = np.concatenate([arr, ids], axis=-1).astype(np.float32)
                 cur_names = list(cur_names) + id_names
                 used["appended_id_features"] = True
@@ -464,8 +515,8 @@ def load_point_features_from_compacts(
 
             if names is None:
                 names = list(cur_names)
-            elif len(names) != len(cur_names):
-                raise ValueError(f"feature dimension/name mismatch in {path}: expected {len(names)}, got {len(cur_names)}")
+            elif names != list(cur_names):
+                raise ValueError(_feature_name_mismatch_message(path, names, list(cur_names)))
             chunks.append(arr)
             sources_used.append(used)
 

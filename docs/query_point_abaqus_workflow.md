@@ -43,6 +43,17 @@ Before any long training, the route must have:
 - Query-point Abaqus launcher defaults.
 - Local smoke tests and GitHub Actions smoke workflow passing.
 
+## Current Data Contract Wording
+
+Use this wording until a broader query-point label generator exists:
+
+```text
+The model architecture supports dynamic query point count P.
+The current training data contract is still the Abaqus 128 integration-point
+table, or subsets of that table selected by target_ips.  It is not yet a full
+arbitrary-query-point labeled data contract.
+```
+
 ## Change Log Rule
 
 For every meaningful route change, update

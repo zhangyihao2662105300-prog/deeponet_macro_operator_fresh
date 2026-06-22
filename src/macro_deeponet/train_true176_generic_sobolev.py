@@ -54,7 +54,7 @@ from .true176_data import (
     load_compacts,
     parse_int_list,
     parse_target_ips,
-    split_indices,
+    split_indices_with_meta,
     stats,
     transform_b_target_for_q_coordinate,
 )
@@ -321,7 +321,14 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             "scale_mode=physical requires an explicit H/length_scale field in every compact. "
             "Use scale_mode=normalized for already dimensionless TRUE176 data."
         )
-    train_idx, val_idx = split_indices(data, float(args.val_fraction), int(args.seed), str(args.val_cases))
+    train_idx, val_idx, split_meta = split_indices_with_meta(
+        data,
+        float(args.val_fraction),
+        int(args.seed),
+        str(args.val_cases),
+        split_mode=str(args.split_mode),
+        allow_overlap=bool(args.allow_overlap_val),
+    )
     train_eval_idx = train_idx[: min(train_idx.size, int(args.max_eval_frames))] if int(args.max_eval_frames) > 0 else train_idx
     val_eval_idx = val_idx[: min(val_idx.size, int(args.max_eval_frames))] if int(args.max_eval_frames) > 0 else val_idx
 
@@ -467,6 +474,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 "compact_paths": data.compact_paths,
                 "train_frames": int(train_idx.size),
                 "val_frames": int(val_idx.size),
+                "validation_split": split_meta,
                 "point_meta": point_meta,
                 "branch_meta": branch_meta,
                 "model_meta": model_meta(model, branch_meta),
@@ -695,6 +703,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                         "norms": norms,
                         "args": vars(args),
                         "target_ips": target_ips,
+                        "validation_split": split_meta,
                         "point_meta": point_meta,
                         "branch_meta": branch_meta,
                         "model_meta": model_meta(eval_model, branch_meta),
@@ -723,6 +732,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                     "norms": norms,
                     "args": vars(args),
                     "target_ips": target_ips,
+                    "validation_split": split_meta,
                     "point_meta": point_meta,
                     "branch_meta": branch_meta,
                     "model_meta": model_meta(latest_model, branch_meta),
@@ -747,6 +757,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 out_dir / "training_summary_partial.json",
                 {
                     "args": vars(args),
+                    "validation_split": split_meta,
                     "history": history,
                     "best_score": best_score,
                     "best_report": best_report,
@@ -767,6 +778,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             out_dir / "training_summary.json",
             {
                 "args": vars(args),
+                "validation_split": split_meta,
                 "history": history,
                 "best_score": best_score,
                 "best_report": best_report,
@@ -841,6 +853,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--weight-decay", type=float, default=1.0e-5)
     p.add_argument("--val-fraction", type=float, default=0.0)
     p.add_argument("--val-cases", default="")
+    p.add_argument("--split-mode", default="case", choices=["case", "geometry", "frame", "overlap-debug"])
+    p.add_argument("--allow-overlap-val", action="store_true")
     p.add_argument("--eval-every", type=int, default=5)
     p.add_argument("--log-every", type=int, default=1)
     p.add_argument("--seed", type=int, default=20260620)

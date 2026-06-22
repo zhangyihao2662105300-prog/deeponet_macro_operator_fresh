@@ -857,3 +857,200 @@ def split_indices(data: True176Arrays, val_fraction: float, seed: int, val_cases
     if n_val <= 0:
         return perm, perm[: min(n, max(1, n // 5))]
     return perm[n_val:], perm[:n_val]
+
+
+def _parse_int_set(text: str) -> set[int]:
+    return {int(x) for x in re.split(r"[,;\s]+", str(text).strip()) if x.strip()}
+
+
+def _split_group_values(
+    groups: np.ndarray,
+    *,
+    val_fraction: float,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    vals = np.asarray(groups, dtype=np.int64).reshape(-1)
+    unique = np.unique(vals)
+    if unique.size < 2:
+        raise ValueError("group-level validation split requires at least two groups")
+    rng = np.random.default_rng(int(seed))
+    shuffled = rng.permutation(unique)
+    frac = float(val_fraction)
+    if frac <= 0.0:
+        frac = 0.2
+    n_val = int(round(max(0.0, min(frac, 0.9)) * unique.size))
+    n_val = min(max(n_val, 1), unique.size - 1)
+    val_groups = np.sort(shuffled[:n_val])
+    train_groups = np.sort(shuffled[n_val:])
+    val = np.flatnonzero(np.isin(vals, val_groups)).astype(np.int64)
+    train = np.flatnonzero(np.isin(vals, train_groups)).astype(np.int64)
+    return train, val, val_groups.astype(np.int64)
+
+
+def _split_meta(
+    *,
+    requested_mode: str,
+    actual_mode: str,
+    group_key: str,
+    train_idx: np.ndarray,
+    val_idx: np.ndarray,
+    data: True176Arrays,
+    val_groups: np.ndarray | None = None,
+    allow_overlap: bool = False,
+) -> dict[str, Any]:
+    train_set = set(np.asarray(train_idx, dtype=np.int64).tolist())
+    val_set = set(np.asarray(val_idx, dtype=np.int64).tolist())
+    overlap = sorted(train_set.intersection(val_set))
+    train_cases = sorted(np.unique(data.case_id[np.asarray(train_idx, dtype=np.int64)]).astype(np.int64).tolist()) if train_idx.size else []
+    val_cases = sorted(np.unique(data.case_id[np.asarray(val_idx, dtype=np.int64)]).astype(np.int64).tolist()) if val_idx.size else []
+    train_shapes = sorted(np.unique(data.shape_index[np.asarray(train_idx, dtype=np.int64)]).astype(np.int64).tolist()) if train_idx.size else []
+    val_shapes = sorted(np.unique(data.shape_index[np.asarray(val_idx, dtype=np.int64)]).astype(np.int64).tolist()) if val_idx.size else []
+    meta = {
+        "validation_split_mode": actual_mode,
+        "validation_requested_split_mode": requested_mode,
+        "validation_group_key": group_key,
+        "validation_is_overlapping": bool(overlap),
+        "validation_overlap_count": int(len(overlap)),
+        "validation_overlap_sample": overlap[:16],
+        "validation_allow_overlap": bool(allow_overlap),
+        "train_frames": int(np.asarray(train_idx).size),
+        "val_frames": int(np.asarray(val_idx).size),
+        "train_cases": train_cases,
+        "val_cases": val_cases,
+        "train_shape_indices": train_shapes,
+        "val_shape_indices": val_shapes,
+    }
+    if val_groups is not None:
+        meta["val_groups"] = np.asarray(val_groups, dtype=np.int64).tolist()
+    return meta
+
+
+def split_indices_with_meta(
+    data: True176Arrays,
+    val_fraction: float,
+    seed: int,
+    val_cases: str = "",
+    *,
+    split_mode: str = "case",
+    allow_overlap: bool = False,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Split training and validation frames with explicit leakage metadata.
+
+    Formal route training should use case-level or geometry-level validation.
+    Frame-level and overlapping validation are available only when explicitly
+    requested and marked in the returned metadata.
+    """
+
+    n = int(data.shape4.shape[0])
+    all_idx = np.arange(n, dtype=np.int64)
+    requested = str(split_mode).strip().lower().replace("_", "-")
+    if requested in {"case-level"}:
+        requested = "case"
+    if requested in {"geometry-level", "shape", "shape-index"}:
+        requested = "geometry"
+    if requested in {"overlap", "debug-overlap"}:
+        requested = "overlap-debug"
+    if requested not in {"case", "geometry", "frame", "overlap-debug"}:
+        raise ValueError("split_mode must be one of: case, geometry, frame, overlap-debug")
+
+    text = str(val_cases).strip()
+    if text:
+        wanted = _parse_int_set(text)
+        if not wanted:
+            raise ValueError("val_cases was provided but no case ids could be parsed")
+        if np.any(data.case_id >= 0):
+            if np.any(np.asarray(data.case_id, dtype=np.int64) < 0):
+                raise ValueError("val_cases requires every frame to have a nonnegative case_id")
+            val_mask = np.isin(data.case_id, np.asarray(sorted(wanted), dtype=np.int64))
+            val = all_idx[val_mask]
+            train = all_idx[~val_mask]
+            if not val.size:
+                raise ValueError(f"val_cases {sorted(wanted)} selected no validation frames")
+            if not train.size:
+                raise ValueError(f"val_cases {sorted(wanted)} selected all frames; training set is empty")
+            meta = _split_meta(
+                requested_mode=requested,
+                actual_mode="case",
+                group_key="case_id",
+                train_idx=train,
+                val_idx=val,
+                data=data,
+                val_groups=np.asarray(sorted(wanted), dtype=np.int64),
+                allow_overlap=False,
+            )
+            return train.astype(np.int64), val.astype(np.int64), meta
+        if requested == "case":
+            raise ValueError("val_cases requires nonnegative case_id metadata; none was found")
+
+    if requested == "case":
+        valid_case = np.asarray(data.case_id, dtype=np.int64)
+        valid = valid_case >= 0
+        if np.any(valid) and not np.all(valid):
+            raise ValueError("split_mode=case requires every frame to have a nonnegative case_id; use geometry or frame explicitly")
+        if np.unique(valid_case[valid]).size >= 2:
+            train, val, val_groups = _split_group_values(valid_case, val_fraction=val_fraction, seed=seed)
+            meta = _split_meta(
+                requested_mode=requested,
+                actual_mode="case",
+                group_key="case_id",
+                train_idx=train,
+                val_idx=val,
+                data=data,
+                val_groups=val_groups,
+                allow_overlap=False,
+            )
+            return train, val, meta
+        requested = "geometry"
+
+    if requested == "geometry":
+        shape_groups = np.asarray(data.shape_index, dtype=np.int64)
+        train, val, val_groups = _split_group_values(shape_groups, val_fraction=val_fraction, seed=seed)
+        meta = _split_meta(
+            requested_mode=split_mode,
+            actual_mode="geometry",
+            group_key="shape_index",
+            train_idx=train,
+            val_idx=val,
+            data=data,
+            val_groups=val_groups,
+            allow_overlap=False,
+        )
+        return train, val, meta
+
+    rng = np.random.default_rng(int(seed))
+    perm = rng.permutation(n)
+    n_val = int(round(max(0.0, min(float(val_fraction), 0.9)) * n))
+    if requested == "frame":
+        if n_val <= 0:
+            raise ValueError("split_mode=frame requires --val-fraction > 0")
+        val = perm[:n_val]
+        train = perm[n_val:]
+        if not train.size or not val.size:
+            raise ValueError("frame split produced an empty train or validation set")
+        meta = _split_meta(
+            requested_mode=requested,
+            actual_mode="frame",
+            group_key="frame_index",
+            train_idx=train,
+            val_idx=val,
+            data=data,
+            allow_overlap=False,
+        )
+        meta["validation_warning"] = "frame split may leak case/geometry information and is for debug/ablation only"
+        return train.astype(np.int64), val.astype(np.int64), meta
+
+    if not bool(allow_overlap):
+        raise ValueError("split_mode=overlap-debug requires --allow-overlap-val")
+    val = perm[: min(n, max(1, n // 5))]
+    train = perm
+    meta = _split_meta(
+        requested_mode=requested,
+        actual_mode="overlap-debug",
+        group_key="frame_index",
+        train_idx=train,
+        val_idx=val,
+        data=data,
+        allow_overlap=True,
+    )
+    meta["validation_warning"] = "validation frames overlap training frames; use only for debugging"
+    return train.astype(np.int64), val.astype(np.int64), meta

@@ -32,6 +32,7 @@ from macro_deeponet.true176_data import (
     keep_node_ids,
     load_compacts,
     load_one_compact,
+    split_indices_with_meta,
     transform_b_target_for_q_coordinate,
 )
 from macro_deeponet.train_true176_deeponet_sobolev import ad_jacobian
@@ -47,6 +48,7 @@ if sys_path_text not in sys.path:
 from validate_isoparametric_scaling import run_validation as run_isoparametric_scaling_validation
 from validate_isoparametric_mapping import run_mapping_validation
 from validate_true176_css8_macro_mapping import run_css8_macro_validation
+from export_abaqus_true176_complete_compact import enforce_ip_audit, merge_existing_payload
 
 
 def test_geometry_identities() -> None:
@@ -496,6 +498,51 @@ def test_true176_physical_train_requires_explicit_h() -> None:
             raise AssertionError("physical training accepted implicit H=1 compact")
 
 
+def test_strict_split_uses_case_or_geometry_without_overlap() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "split_compact.npz"
+        n = 6
+        sample_paths = np.asarray(["case001_frame", "case002_frame", "case003_frame"], dtype=str)
+        shape4 = np.asarray(
+            [[1.0, 0.01, 0.0, 0.0], [1.0, 0.01, 0.0, 0.0],
+             [1.1, 0.01, 0.0, 0.0], [1.1, 0.01, 0.0, 0.0],
+             [1.2, 0.01, 0.0, 0.0], [1.2, 0.01, 0.0, 0.0]],
+            dtype=np.float32,
+        )
+        np.savez(
+            path,
+            shape4=shape4,
+            q48_raw=np.zeros((n, 48), dtype=np.float32),
+            LE128_base=np.zeros((n, 128, 6), dtype=np.float32),
+            B_LE128_forward=np.zeros((n, 128, 6, 48), dtype=np.float32),
+            sample_paths=sample_paths,
+        )
+        data = load_compacts([str(path)])
+        train, val, meta = split_indices_with_meta(data, 0.34, 3, "", split_mode="case")
+        assert not set(train.tolist()).intersection(set(val.tolist()))
+        assert meta["validation_split_mode"] == "case"
+        assert not set(meta["train_cases"]).intersection(set(meta["val_cases"]))
+
+        train_g, val_g, meta_g = split_indices_with_meta(data, 0.34, 3, "", split_mode="geometry")
+        assert not set(train_g.tolist()).intersection(set(val_g.tolist()))
+        assert meta_g["validation_split_mode"] == "geometry"
+        assert not set(meta_g["train_shape_indices"]).intersection(set(meta_g["val_shape_indices"]))
+
+        try:
+            split_indices_with_meta(data, 0.0, 3, "", split_mode="frame")
+        except ValueError as exc:
+            assert "requires --val-fraction > 0" in str(exc)
+        else:
+            raise AssertionError("frame split accepted val_fraction=0")
+
+        try:
+            split_indices_with_meta(data, 0.0, 3, "", split_mode="overlap-debug")
+        except ValueError as exc:
+            assert "--allow-overlap-val" in str(exc)
+        else:
+            raise AssertionError("overlap split did not require explicit debug flag")
+
+
 def test_generic_point_feature_loader_reads_real_fields() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "real_points_compact.npz"
@@ -533,6 +580,37 @@ def test_generic_point_feature_loader_reads_real_fields() -> None:
         assert meta["feature_names"] == ["ip_xyz_x", "ip_xyz_y", "ip_xyz_z", "ip_detJ"]
         assert np.allclose(points[:, 0, :3], ip_xyz[0])
         assert np.allclose(points[:, -1, 3], ip_detj[127])
+
+
+def test_generic_point_feature_loader_rejects_name_order_mismatch() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path_a = Path(tmp) / "points_a.npz"
+        path_b = Path(tmp) / "points_b.npz"
+        n = 1
+        common = dict(
+            shape4=np.zeros((n, 4), dtype=np.float32),
+            q48_raw=np.zeros((n, 48), dtype=np.float32),
+            LE128_base=np.zeros((n, 128, 6), dtype=np.float32),
+            B_LE128_forward=np.zeros((n, 128, 6, 48), dtype=np.float32),
+            point_features=np.zeros((n, 128, 2), dtype=np.float32),
+        )
+        np.savez(path_a, **common, point_feature_names=np.asarray(["a", "b"], dtype=object))
+        np.savez(path_b, **common, point_feature_names=np.asarray(["b", "a"], dtype=object))
+        try:
+            load_point_features_from_compacts(
+                compact_paths=[str(path_a), str(path_b)],
+                source_index=np.asarray([0, 1], dtype=np.int64),
+                source_row=np.asarray([0, 0], dtype=np.int64),
+                shape4=np.zeros((2, 4), dtype=np.float32),
+                target_ips=[0],
+                source="data",
+                include_id_features=False,
+                allow_shape4_fallback=False,
+            )
+        except ValueError as exc:
+            assert "names/order mismatch" in str(exc)
+        else:
+            raise AssertionError("loader accepted mismatched point feature name order")
 
 
 def test_generic_point_feature_loader_carries_ip_keys() -> None:
@@ -577,16 +655,12 @@ def test_generic_point_feature_loader_carries_ip_keys() -> None:
         assert np.array_equal(got[1], ip_keys[target_ips])
 
 
-def test_generic_point_feature_loader_uses_ip_keys_for_id_features() -> None:
+def test_generic_point_feature_loader_uses_standard_ip_keys_for_spatial_id_features() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "nonstandard_keys_compact.npz"
+        path = Path(tmp) / "standard_keys_compact.npz"
         n = 1
         ip_xi = np.zeros((n, 128, 3), dtype=np.float32)
-        ip_keys = np.zeros((128, 3), dtype=np.int64)
-        ip_keys[:, 0] = 16
-        ip_keys[:, 1] = 8
-        ip_keys[:, 2] = np.arange(1, 129, dtype=np.int64)
-        ip_keys[7] = np.asarray([3, 2, 99], dtype=np.int64)
+        ip_keys = np.asarray([[elem, ip, 0] for elem in range(1, 17) for ip in range(1, 9)], dtype=np.int64)
         np.savez(
             path,
             shape4=np.zeros((n, 4), dtype=np.float32),
@@ -601,7 +675,7 @@ def test_generic_point_feature_loader_uses_ip_keys_for_id_features() -> None:
             source_index=np.zeros(n, dtype=np.int64),
             source_row=np.arange(n, dtype=np.int64),
             shape4=np.zeros((n, 4), dtype=np.float32),
-            target_ips=[7],
+            target_ips=[17],
             source="data",
             include_id_features=True,
             allow_shape4_fallback=False,
@@ -610,6 +684,38 @@ def test_generic_point_feature_loader_uses_ip_keys_for_id_features() -> None:
         assert points.shape == (n, 1, 7)
         assert np.allclose(points[0, 0, -4:], expected)
         assert meta["sources_used"][0]["id_feature_source"] == "ip_keys"
+        assert meta["sources_used"][0]["id_feature_rule"] == "standard_true176_elem_label_4x4_spatial"
+
+
+def test_generic_point_feature_loader_nonstandard_ip_keys_use_rank_id_guard() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "nonstandard_keys_compact.npz"
+        n = 1
+        ip_xi = np.zeros((n, 128, 3), dtype=np.float32)
+        labels = np.repeat(np.asarray([101, 205, 309, 412], dtype=np.int64), 32)
+        ip_keys = np.stack([labels, np.tile(np.arange(1, 9, dtype=np.int64), 16), np.zeros(128, dtype=np.int64)], axis=1)
+        np.savez(
+            path,
+            shape4=np.zeros((n, 4), dtype=np.float32),
+            q48_raw=np.zeros((n, 48), dtype=np.float32),
+            LE128_base=np.zeros((n, 128, 6), dtype=np.float32),
+            B_LE128_forward=np.zeros((n, 128, 6, 48), dtype=np.float32),
+            ip_xi=ip_xi,
+            ip_keys=ip_keys,
+        )
+        points, meta = load_point_features_from_compacts(
+            compact_paths=[str(path)],
+            source_index=np.zeros(n, dtype=np.int64),
+            source_row=np.arange(n, dtype=np.int64),
+            shape4=np.zeros((n, 4), dtype=np.float32),
+            target_ips=[0],
+            source="data",
+            include_id_features=True,
+            allow_shape4_fallback=False,
+        )
+        assert points.shape == (n, 1, 5)
+        assert meta["sources_used"][0]["id_feature_rule"] == "nonstandard_elem_label_rank_only_no_4x4_spatial"
+        assert meta["sources_used"][0]["id_feature_guard_passed"] is False
 
 
 def test_generic_complete_compact_can_omit_shape4_when_geometry_is_explicit() -> None:
@@ -656,6 +762,112 @@ def test_generic_complete_compact_can_omit_shape4_when_geometry_is_explicit() ->
         assert np.asarray(meta["point_feature_ip_keys"]).shape == (n, 2, 3)
 
 
+def test_exporter_merge_guards_q_le_and_ip_keys() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "merge_source.npz"
+        n = 2
+        p = 128
+        ip_keys = np.asarray([[elem, ip, 0] for elem in range(1, 17) for ip in range(1, 9)], dtype=np.int64)
+        payload = {
+            "q48_raw": np.zeros((n, 48), dtype=np.float32),
+            "LE128_base": np.zeros((n, p, 6), dtype=np.float32),
+            "ip_keys": ip_keys,
+        }
+        np.savez(
+            path,
+            q48_raw=np.ones((n, 48), dtype=np.float32),
+            LE128_base=np.zeros((n, p, 6), dtype=np.float32),
+            B_LE128_forward=np.zeros((n, p, 6, 48), dtype=np.float32),
+            ip_keys=ip_keys,
+        )
+        try:
+            merge_existing_payload(dict(payload), str(path), require_b=True, merge_q_tol=1.0e-8)
+        except ValueError as exc:
+            assert "q48_raw" in str(exc)
+        else:
+            raise AssertionError("merge accepted mismatched q48")
+
+        np.savez(
+            path,
+            q48_raw=np.zeros((n, 48), dtype=np.float32),
+            LE128_base=np.ones((n, p, 6), dtype=np.float32),
+            B_LE128_forward=np.zeros((n, p, 6, 48), dtype=np.float32),
+            ip_keys=ip_keys,
+        )
+        try:
+            merge_existing_payload(dict(payload), str(path), require_b=True, merge_le_tol=1.0e-8)
+        except ValueError as exc:
+            assert "LE128_base" in str(exc)
+        else:
+            raise AssertionError("merge accepted mismatched LE")
+
+        bad_keys = ip_keys.copy()
+        bad_keys[[0, 1]] = bad_keys[[1, 0]]
+        np.savez(
+            path,
+            q48_raw=np.zeros((n, 48), dtype=np.float32),
+            LE128_base=np.zeros((n, p, 6), dtype=np.float32),
+            B_LE128_forward=np.zeros((n, p, 6, 48), dtype=np.float32),
+            ip_keys=bad_keys,
+        )
+        try:
+            merge_existing_payload(dict(payload), str(path), require_b=True, require_merge_ip_keys=True)
+        except ValueError as exc:
+            assert "ip_keys" in str(exc)
+        else:
+            raise AssertionError("merge accepted mismatched ip_keys")
+
+        np.savez(
+            path,
+            q48_raw=np.zeros((n, 48), dtype=np.float32),
+            LE128_base=np.zeros((n, p, 6), dtype=np.float32),
+            B_LE128_forward=np.zeros((n, p, 6, 48), dtype=np.float32),
+        )
+        try:
+            merge_existing_payload(dict(payload), str(path), require_b=True, require_merge_ip_keys=True)
+        except ValueError as exc:
+            assert "missing ip_keys" in str(exc)
+        else:
+            raise AssertionError("merge accepted missing ip_keys in strict mode")
+
+
+def test_exporter_ip_audit_can_block_bad_geometry() -> None:
+    p = 128
+    payload = {
+        "ip_xyz": np.zeros((p, 3), dtype=np.float32),
+        "ip_detJ": np.ones((p,), dtype=np.float32),
+        "ip_xyz_abaqus_coord": np.full((1, p, 3), 1.0e-3, dtype=np.float32),
+        "ip_IVOL_abaqus": np.ones((1, p), dtype=np.float32),
+    }
+    try:
+        enforce_ip_audit(payload, require_ip_audit=True, ip_xyz_tol=1.0e-6, detj_ivol_tol=1.0e-8, skip_ivol_audit=False)
+    except ValueError as exc:
+        assert "COORD audit failed" in str(exc)
+    else:
+        raise AssertionError("IP audit accepted bad COORD")
+
+    payload2 = {
+        "ip_xyz": np.zeros((p, 3), dtype=np.float32),
+        "ip_detJ": np.ones((p,), dtype=np.float32),
+        "ip_xyz_abaqus_coord": np.zeros((1, p, 3), dtype=np.float32),
+        "ip_IVOL_abaqus": np.full((1, p), 2.0, dtype=np.float32),
+    }
+    try:
+        enforce_ip_audit(payload2, require_ip_audit=True, ip_xyz_tol=1.0e-6, detj_ivol_tol=1.0e-8, skip_ivol_audit=False)
+    except ValueError as exc:
+        assert "detJ-vs-IVOL" in str(exc)
+    else:
+        raise AssertionError("IP audit accepted bad IVOL")
+
+    payload3 = {"ip_xyz": np.zeros((p, 3), dtype=np.float32), "ip_detJ": np.ones((p,), dtype=np.float32)}
+    try:
+        enforce_ip_audit(payload3, require_ip_audit=True, ip_xyz_tol=1.0e-6, detj_ivol_tol=1.0e-8, skip_ivol_audit=True)
+    except ValueError as exc:
+        assert "COORD" in str(exc)
+    else:
+        raise AssertionError("IP audit accepted missing COORD in strict mode")
+
+
 def test_generic_query_training_supports_global_le_norm_and_point_sampling() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
@@ -689,6 +901,8 @@ def test_generic_query_training_supports_global_le_norm_and_point_sampling() -> 
             max_frames_per_compact=0,
             val_fraction=0.25,
             val_cases="",
+            split_mode="frame",
+            allow_overlap_val=False,
             max_eval_frames=2,
             branch_feature_mode="xkeep-qraw",
             b_label_coordinate="auto",
@@ -835,10 +1049,15 @@ if __name__ == "__main__":
     test_true176_full_xnodes_branch_is_available_as_ablation()
     test_true176_loader_rejects_non_full48_b()
     test_true176_physical_train_requires_explicit_h()
+    test_strict_split_uses_case_or_geometry_without_overlap()
     test_generic_point_feature_loader_reads_real_fields()
+    test_generic_point_feature_loader_rejects_name_order_mismatch()
     test_generic_point_feature_loader_carries_ip_keys()
-    test_generic_point_feature_loader_uses_ip_keys_for_id_features()
+    test_generic_point_feature_loader_uses_standard_ip_keys_for_spatial_id_features()
+    test_generic_point_feature_loader_nonstandard_ip_keys_use_rank_id_guard()
     test_generic_complete_compact_can_omit_shape4_when_geometry_is_explicit()
+    test_exporter_merge_guards_q_le_and_ip_keys()
+    test_exporter_ip_audit_can_block_bad_geometry()
     test_generic_query_training_supports_global_le_norm_and_point_sampling()
     test_generic_point_feature_loader_marks_shape4_fallback()
     test_generic_point_feature_loader_shape4_audited()

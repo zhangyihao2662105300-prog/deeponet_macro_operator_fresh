@@ -14,6 +14,9 @@ DETJ_SCALE_DIM="${DETJ_SCALE_DIM:-3}"
 ALLOW_SHAPE4_POINT_FEATURE_FALLBACK="${ALLOW_SHAPE4_POINT_FEATURE_FALLBACK:-0}"
 LE_NORMALIZATION="${LE_NORMALIZATION:-per-point}"
 TRAIN_POINT_SAMPLE_COUNT="${TRAIN_POINT_SAMPLE_COUNT:-0}"
+SPLIT_MODE="${SPLIT_MODE:-case}"
+VAL_FRACTION="${VAL_FRACTION:-0.2}"
+VAL_CASES="${VAL_CASES:-}"
 EPOCHS="${EPOCHS:-120}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-1}"
@@ -136,7 +139,8 @@ CMD=(
   --lr "$LR"
   --lr-decay "$LR_DECAY"
   --grad-clip "$GRAD_CLIP"
-  --val-fraction 0.0
+  --val-fraction "$VAL_FRACTION"
+  --split-mode "$SPLIT_MODE"
   --eval-every "$EVAL_EVERY"
   --log-every "$LOG_EVERY"
   --seed "$SEED"
@@ -146,6 +150,10 @@ CMD=(
 
 if [[ "$ALLOW_SHAPE4_POINT_FEATURE_FALLBACK" != "0" ]]; then
   CMD+=(--allow-shape4-point-feature-fallback)
+fi
+
+if [[ -n "$VAL_CASES" ]]; then
+  CMD+=(--val-cases "$VAL_CASES")
 fi
 
 if [[ "$MAX_FRAMES_PER_COMPACT" != "0" ]]; then
@@ -172,6 +180,9 @@ printf "\n" >> "$OUT_DIR/command.txt"
   echo "ALLOW_SHAPE4_POINT_FEATURE_FALLBACK=$ALLOW_SHAPE4_POINT_FEATURE_FALLBACK"
   echo "LE_NORMALIZATION=$LE_NORMALIZATION"
   echo "TRAIN_POINT_SAMPLE_COUNT=$TRAIN_POINT_SAMPLE_COUNT"
+  echo "SPLIT_MODE=$SPLIT_MODE"
+  echo "VAL_FRACTION=$VAL_FRACTION"
+  echo "VAL_CASES=$VAL_CASES"
   echo "EPOCHS=$EPOCHS"
   echo "BATCH_SIZE=$BATCH_SIZE"
   echo "EVAL_BATCH_SIZE=$EVAL_BATCH_SIZE"

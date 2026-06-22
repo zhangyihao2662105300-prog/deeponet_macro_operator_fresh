@@ -78,3 +78,41 @@ Known gaps:
 
 - The `v1.1 hard guards` issue checklist is now documented, but the guards still
   need to be implemented in code.
+
+## v1.1 - 2026-06-22 - Hard guards for data trustworthiness
+
+Planned marker:
+
+- Branch: `query-point-abaqus-route`
+- Tag: `query-point-abaqus-v1.1`
+
+Purpose:
+
+- Stop bad real-data compacts from training silently when labels, point rows, or
+  validation splits are inconsistent.
+
+Included:
+
+- Strict validation split helper with explicit `case`, `geometry`, `frame`, and
+  `overlap-debug` modes.
+- Generic trainer records validation split metadata in config, checkpoints, and
+  training summaries.
+- Point feature loader requires feature names and order to match across all
+  compacts.
+- `ip_keys` ID feature guard: standard TRUE176 `1..16` labels can use 4x4
+  spatial IDs; nonstandard labels fall back to rank-only IDs.
+- Abaqus complete compact exporter can fail on merge `q48_raw`, `LE128_base`,
+  and `ip_keys` mismatch.
+- Abaqus complete compact exporter can fail on IP geometry audit mismatch.
+- Query-point Abaqus launcher defaults to the new route and does not enable ID
+  features by default.
+
+Validation:
+
+- `py -3 -m pytest tests/smoke_test.py -q`
+- `py -3 -m compileall src/macro_deeponet scripts`
+
+Known gaps:
+
+- This route still trains on the Abaqus 128-IP table and selected subsets of
+  that table; full arbitrary query-point label generation remains future work.

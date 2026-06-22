@@ -729,3 +729,59 @@ Known gaps:
   output requests, and matching Sobolev B compact generation are still required.
 - Old TRUE176 `LE/B` values remain scale/provenance hints only and are not used
   as v1.2 labels.
+
+## v1.2 follow-up - 2026-06-22 - Pilot fresh Abaqus case041 chain
+
+Purpose:
+
+- Run one representative fresh Abaqus pilot case before attempting any batch
+  case040-case051 generation.
+- Verify the end-to-end chain:
+  `case041 q48/boundary96 plan -> fresh Abaqus ODB -> matching Sobolev B compact
+  -> current complete compact exporter -> strict v1.2 coverage audit`.
+
+Included:
+
+- Added `scripts/run_v1_2_pilot_case041_fresh_abaqus.py`.
+- The script is intentionally narrow and defaults to case041 only.
+- It validates that the generated q48 frames are linear 0.1-1.0 scale factors
+  of the final q48 vector and that
+  `T_boundary_96x48 @ q48 == boundary96` before running Abaqus.
+- It uses the audited shape4/T-boundary bridge and existing fresh Abaqus
+  base-plus-48-forward-perturbation generator to build a matching Sobolev B
+  compact.
+- It repacks the fresh B compact with explicit
+  `strain_field=LE` and `B_label_strain_field=LE`, then calls the current
+  `export_abaqus_true176_complete_compact.py` with `--merge-compact`,
+  `--require-b`, `--require-merge-ip-keys`, and `--require-ip-audit`.
+
+Pilot result:
+
+- Fresh base job and 48 forward perturbation jobs completed successfully for
+  case041.
+- Generated:
+  `D:\IS-FEM\outputs\query_point_v1_2_fresh_cases\case041\abaqus_run\base\fresh_case041.odb`.
+- Generated:
+  `D:\IS-FEM\outputs\query_point_v1_2_fresh_cases\case041\b_compact\case041_sobolev_B_compact.npz`.
+- Generated:
+  `D:\IS-FEM\outputs\query_point_v1_2_fresh_cases\case041\complete\complete_case041_training_ready.npz`.
+- Single-case strict audit passed:
+  `strict_v1_2_pass=true`, `compact_count=1`, `case_count=1`,
+  `frame_count=10`, `q_direction_cluster_count=1`.
+- Full-pool audit with case019/case025/case031 plus fresh case041 passed:
+  `strict_v1_2_pass=true`, `compact_count=4`, `case_count=4`,
+  `frame_count=40`, `q_direction_cluster_count=3`,
+  `pairwise_abs_cos_min=0.3343678087`,
+  `pairwise_abs_cos_median=0.6789307736`,
+  `pairwise_abs_cos_max=0.9937922950`.
+- case041 adds a new q-direction cluster.  Its nearest existing direction is
+  case031 with `max_abs_cos_to_current=0.4611941923`.
+
+Known gaps:
+
+- This is still a data-generation/contract pilot, not a training result.
+- Large generated Abaqus/NPZ outputs remain outside git and must not be
+  committed.
+- Old TRUE176 `LE/B` values were not used as training labels; only the selected
+  boundary-displacement direction and audited bridge were used to produce fresh
+  Abaqus data.

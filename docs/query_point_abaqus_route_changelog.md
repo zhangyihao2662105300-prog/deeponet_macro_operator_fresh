@@ -331,3 +331,50 @@ Known gaps:
   generalization.
 - More real training-ready compacts are needed before judging convergence or
   comparing architecture quality.
+
+## v1.1 follow-up - 2026-06-22 - Query B baseline warm-start diagnostics
+
+Purpose:
+
+- Address the diagnostic gap where fixed-128 per-IP B baselines fit Sobolev B
+  labels well, but the query-point model's point-conditioned B baseline learns
+  too slowly from a zero-last `point_b_net`.
+
+Included:
+
+- Added optional `query-fe-linear-residual` warm-start arguments:
+  `--b-baseline-warmstart-steps`, `--b-baseline-warmstart-lr`,
+  `--b-baseline-warmstart-weight-decay`, and
+  `--b-baseline-warmstart-source=train-only`.
+- Warm-start uses only `train_idx` frames:
+  `B_mean_train[ip,6,48] = mean_train B_norm[frame,ip,6,48]`,
+  initializes `global_b_norm` from the IP mean, and trains `point_b_net` on the
+  train-only residual `B_mean_train - B_global`.
+- Validation cases are recorded as excluded in `warmstart_meta`; they are not
+  used to form the B prior.
+- Config, checkpoints, partial/final summaries, and per-epoch rows record
+  warm-start and point-B diagnostics, including
+  `b_prior_before_train_rel`, `b_prior_after_train_rel`,
+  `b_prior_after_train_cos`, `global_b_prior_rms`,
+  `point_b_correction_rms`, and `point_b_correction_norm_ratio`.
+- Baseline diagnostics now include both normalized-J metrics and physical/raw-B
+  metrics, including eval-column subsets, so warm-start can be compared against
+  `AD_B_rel` without mixing metric scales.
+- CSV loss history now includes the point-B correction diagnostics.
+
+Validation:
+
+- `py -3 -m pytest tests/smoke_test.py -q` -> `41 passed`
+- `py -3 -m compileall src/macro_deeponet scripts`
+- Real 3-case overlap-debug, 1-epoch diagnostic:
+  `b_prior_after_train_rel = 0.5929` in normalized-J space, while
+  `b_prior_after_train_evalcols_B_rel = 0.3579` matches
+  `train_AD_B_rel = 0.3579` in physical/raw-B space. This confirms the new
+  raw-B baseline metrics are directly comparable with `AD_B_rel`.
+
+Known gaps:
+
+- Warm-start is a model-diagnostic and training aid, not a replacement for
+  wider load-direction coverage.
+- It is currently restricted to `train-only`; other sources are intentionally
+  rejected to avoid validation leakage.

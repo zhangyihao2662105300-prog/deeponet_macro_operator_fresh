@@ -38,11 +38,13 @@ from .point_features import load_point_features_from_compacts, transform_point_f
 from .train_true176_deeponet_sobolev import (
     ad_jacobian,
     compact_paths_from_args,
+    cos_np,
     ddp_barrier,
     ddp_mean,
     evaluate,
     load_checkpoint,
     physical_j_loss,
+    rel_np,
     sample_columns,
     write_json,
     write_loss_history,
@@ -293,6 +295,198 @@ def _slice_le_std_for_points(le_std: torch.Tensor, point_indices: torch.Tensor |
     return le_std
 
 
+def _query_b_baseline_arrays(
+    model: nn.Module,
+    point_norm: np.ndarray,
+    *,
+    device: torch.device,
+    batch_size: int,
+) -> tuple[np.ndarray, float, float, float]:
+    base = _unwrap(model)
+    if not isinstance(base, QueryFELinearResidualDeepONet):
+        raise TypeError("query B baseline metrics require QueryFELinearResidualDeepONet")
+    rows: list[np.ndarray] = []
+    corr_sq = 0.0
+    corr_count = 0
+    base.eval()
+    for start in range(0, int(point_norm.shape[0]), int(batch_size)):
+        sub = point_norm[start : start + int(batch_size)]
+        pb = torch.as_tensor(sub, dtype=torch.float32, device=device)
+        with torch.no_grad():
+            out = base._linear_b_norm(pb).detach().cpu().numpy().astype(np.float64)
+            global_b = base.global_b_norm.detach().cpu().numpy().astype(np.float64)
+            corr = out - global_b.reshape(1, 1, *global_b.shape)
+        rows.append(out)
+        corr_sq += float(np.sum(corr * corr))
+        corr_count += int(corr.size)
+    pred = np.concatenate(rows, axis=0) if rows else np.zeros((0, 0, 6, 48), dtype=np.float64)
+    global_rms = float(np.sqrt(np.mean(global_b * global_b))) if global_b.size else 0.0
+    correction_rms = float(np.sqrt(corr_sq / max(corr_count, 1)))
+    ratio = float(correction_rms / max(global_rms, 1.0e-12))
+    return pred, global_rms, correction_rms, ratio
+
+
+def _query_b_baseline_meta(
+    model: nn.Module,
+    point_norm: np.ndarray,
+    target_norm: np.ndarray,
+    train_idx: np.ndarray,
+    *,
+    b_target: np.ndarray | None = None,
+    le_std: np.ndarray | None = None,
+    q_std: np.ndarray | None = None,
+    eval_columns: list[int] | None = None,
+    device: torch.device,
+    batch_size: int,
+    prefix: str,
+) -> dict[str, Any]:
+    pred, global_rms, correction_rms, ratio = _query_b_baseline_arrays(
+        model,
+        point_norm,
+        device=device,
+        batch_size=batch_size,
+    )
+    train = np.asarray(train_idx, dtype=np.int64)
+    pred_train = pred[train].astype(np.float64, copy=False)
+    target_train = np.asarray(target_norm, dtype=np.float64)[train]
+    meta: dict[str, Any] = {
+        f"{prefix}_train_rel": rel_np(pred_train, target_train),
+        f"{prefix}_train_cos": cos_np(pred_train, target_train),
+        f"{prefix}_train_norm_rel": rel_np(pred_train, target_train),
+        f"{prefix}_train_norm_cos": cos_np(pred_train, target_train),
+        "global_b_prior_rms": global_rms,
+        "point_b_correction_rms": correction_rms,
+        "point_b_correction_norm_ratio": ratio,
+    }
+    if eval_columns is not None:
+        cols = np.asarray(eval_columns, dtype=np.int64)
+        meta[f"{prefix}_train_evalcols_norm_rel"] = rel_np(pred_train[:, :, :, cols], target_train[:, :, :, cols])
+        meta[f"{prefix}_train_evalcols_norm_cos"] = cos_np(pred_train[:, :, :, cols], target_train[:, :, :, cols])
+    if b_target is not None and le_std is not None and q_std is not None:
+        q_vals = np.asarray(q_std, dtype=np.float64).reshape(-1)
+        le_scale = _le_scale_np(np.asarray(le_std, dtype=np.float32), int(pred.shape[1])).astype(np.float64)
+        pred_b = pred_train * le_scale / np.maximum(q_vals.reshape(1, 1, 1, -1), 1.0e-12)
+        true_b = np.asarray(b_target, dtype=np.float64)[train]
+        meta[f"{prefix}_train_B_rel"] = rel_np(pred_b, true_b)
+        meta[f"{prefix}_train_B_cos"] = cos_np(pred_b, true_b)
+        if eval_columns is not None:
+            cols = np.asarray(eval_columns, dtype=np.int64)
+            meta[f"{prefix}_train_evalcols_B_rel"] = rel_np(pred_b[:, :, :, cols], true_b[:, :, :, cols])
+            meta[f"{prefix}_train_evalcols_B_cos"] = cos_np(pred_b[:, :, :, cols], true_b[:, :, :, cols])
+    return meta
+
+
+def _warmstart_query_b_baseline(
+    model: nn.Module,
+    point_norm: np.ndarray,
+    target_norm: np.ndarray,
+    train_idx: np.ndarray,
+    val_idx: np.ndarray,
+    *,
+    b_target: np.ndarray,
+    le_std: np.ndarray,
+    q_std: np.ndarray,
+    eval_columns: list[int],
+    data: Any,
+    split_meta: dict[str, Any],
+    device: torch.device,
+    steps: int,
+    lr: float,
+    weight_decay: float,
+    source: str,
+) -> dict[str, Any]:
+    source_key = str(source).strip().lower().replace("_", "-")
+    if source_key != "train-only":
+        raise ValueError("--b-baseline-warmstart-source currently only allows train-only")
+    base = _unwrap(model)
+    enabled = int(steps) > 0 and isinstance(base, QueryFELinearResidualDeepONet)
+    train_cases = sorted(np.unique(data.case_id[np.asarray(train_idx, dtype=np.int64)]).astype(np.int64).tolist())
+    val_cases = sorted(np.unique(data.case_id[np.asarray(val_idx, dtype=np.int64)]).astype(np.int64).tolist())
+    meta: dict[str, Any] = {
+        "warmstart_enabled": bool(enabled),
+        "warmstart_steps": int(steps),
+        "warmstart_source": source_key,
+        "warmstart_train_cases": train_cases,
+        "warmstart_val_cases_excluded": val_cases,
+        "warmstart_validation_is_overlapping": bool(split_meta.get("validation_is_overlapping", False)),
+    }
+    if int(steps) < 0:
+        raise ValueError("--b-baseline-warmstart-steps must be >= 0")
+    if int(steps) > 0 and not isinstance(base, QueryFELinearResidualDeepONet):
+        raise ValueError("--b-baseline-warmstart-steps requires --model-style query-fe-linear-residual")
+    if int(steps) > 0 and bool(getattr(base, "train_point_baseline", True)) is False:
+        raise ValueError("B baseline warm-start requires trainable point baseline; do not use --freeze-fe-point-baseline")
+    before = (
+        _query_b_baseline_meta(
+            model,
+            point_norm,
+            target_norm,
+            train_idx,
+            b_target=b_target,
+            le_std=le_std,
+            q_std=q_std,
+            eval_columns=eval_columns,
+            device=device,
+            batch_size=max(1, int(point_norm.shape[0])),
+            prefix="b_prior_before",
+        )
+        if isinstance(base, QueryFELinearResidualDeepONet)
+        else {}
+    )
+    meta.update(before)
+    if not enabled:
+        meta.update(
+            {
+                "b_prior_after_train_rel": before.get("b_prior_before_train_rel"),
+                "b_prior_after_train_cos": before.get("b_prior_before_train_cos"),
+                "warmstart_final_loss": None,
+            }
+        )
+        return meta
+
+    target_train = np.asarray(target_norm, dtype=np.float32)[np.asarray(train_idx, dtype=np.int64)]
+    b_mean = np.mean(target_train, axis=0).astype(np.float32)
+    global_target = np.mean(b_mean, axis=0).astype(np.float32)
+    residual_target = (b_mean - global_target.reshape(1, *global_target.shape)).astype(np.float32)
+    with torch.no_grad():
+        base.global_b_norm.copy_(torch.as_tensor(global_target, dtype=torch.float32, device=device))
+
+    p_train = point_norm[np.asarray(train_idx, dtype=np.int64)]
+    p_ref = p_train[0]
+    max_point_diff = float(np.max(np.abs(p_train - p_ref.reshape(1, *p_ref.shape))))
+    p_t = torch.as_tensor(p_train.reshape(-1, p_train.shape[-1]), dtype=torch.float32, device=device)
+    y_np = np.broadcast_to(residual_target.reshape(1, *residual_target.shape), (p_train.shape[0],) + residual_target.shape)
+    y_t = torch.as_tensor(y_np.reshape(-1, residual_target.shape[-2], residual_target.shape[-1]), dtype=torch.float32, device=device)
+    opt = torch.optim.AdamW(base.point_b_net.parameters(), lr=float(lr), weight_decay=float(weight_decay))
+    final_loss = 0.0
+    base.train()
+    for _step in range(int(steps)):
+        opt.zero_grad(set_to_none=True)
+        pred = base.point_b_net(p_t).view(y_t.shape)
+        loss = nn.functional.mse_loss(pred, y_t)
+        loss.backward()
+        opt.step()
+        final_loss = float(loss.detach().cpu())
+
+    after = _query_b_baseline_meta(
+        model,
+        point_norm,
+        target_norm,
+        train_idx,
+        b_target=b_target,
+        le_std=le_std,
+        q_std=q_std,
+        eval_columns=eval_columns,
+        device=device,
+        batch_size=max(1, int(point_norm.shape[0])),
+        prefix="b_prior_after",
+    )
+    meta.update(after)
+    meta["warmstart_final_loss"] = final_loss
+    meta["warmstart_train_point_feature_max_abs_diff"] = max_point_diff
+    return meta
+
+
 def train(args: argparse.Namespace) -> dict[str, Any]:
     ctx = _distributed_context(args)
     rank = int(ctx["rank"])
@@ -452,6 +646,24 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         if not bool(getattr(base_model, "supports_dynamic_points", False)):
             raise ValueError("--train-point-sample-count requires --model-style query-fe-linear-residual")
     init_report = load_checkpoint(model, str(args.init_checkpoint))
+    warmstart_meta = _warmstart_query_b_baseline(
+        model,
+        point_norm,
+        j_norm_target,
+        train_idx,
+        val_idx,
+        b_target=b_train,
+        le_std=le_std,
+        q_std=q_std,
+        eval_columns=eval_columns,
+        data=data,
+        split_meta=split_meta,
+        device=device,
+        steps=int(args.b_baseline_warmstart_steps),
+        lr=float(args.b_baseline_warmstart_lr),
+        weight_decay=float(args.b_baseline_warmstart_weight_decay),
+        source=str(args.b_baseline_warmstart_source),
+    )
     if bool(ctx["distributed"]):
         model = DDP(model, device_ids=[int(ctx["local_rank"])] if device.type == "cuda" else None)
 
@@ -495,6 +707,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 "b_global_rms": b_global_rms,
                 "jacobian_target_relation": "J_norm = B_train * q_std / LE_std; B_train = J_norm * LE_std / q_std",
                 "le_normalization_meta": le_norm_meta,
+                "warmstart_meta": warmstart_meta,
                 "point_sampling": {
                     "train_point_sample_count": train_point_sample_count,
                     "train_point_sampling": "all_points" if train_point_sample_count <= 0 else "random_subset_per_batch",
@@ -651,6 +864,27 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             "lr": scheduler.get_last_lr()[0],
             "seconds": time.time() - t0,
         }
+        row["point_b_correction_norm_ratio"] = float(warmstart_meta.get("point_b_correction_norm_ratio") or 0.0)
+        row["global_b_prior_rms"] = float(warmstart_meta.get("global_b_prior_rms") or 0.0)
+        row["point_b_correction_rms"] = float(warmstart_meta.get("point_b_correction_rms") or 0.0)
+        if is_main and isinstance(_unwrap(model), QueryFELinearResidualDeepONet):
+            current_b_meta = _query_b_baseline_meta(
+                _unwrap(model),
+                point_norm,
+                j_norm_target,
+                train_idx,
+                b_target=b_train,
+                le_std=le_std,
+                q_std=q_std_np,
+                eval_columns=eval_columns,
+                device=device,
+                batch_size=max(1, int(args.eval_batch_size)),
+                prefix="b_prior_current",
+            )
+            row.update(current_b_meta)
+            row["point_b_correction_norm_ratio"] = float(current_b_meta["point_b_correction_norm_ratio"])
+            row["global_b_prior_rms"] = float(current_b_meta["global_b_prior_rms"])
+            row["point_b_correction_rms"] = float(current_b_meta["point_b_correction_rms"])
         do_eval = epoch == 1 or epoch % int(args.eval_every) == 0 or epoch == int(args.epochs)
         if do_eval and is_main:
             eval_model = _unwrap(model)
@@ -710,6 +944,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                         "branch_meta": branch_meta,
                         "model_meta": model_meta(eval_model, branch_meta),
                         "le_normalization_meta": le_norm_meta,
+                        "warmstart_meta": warmstart_meta,
                         "point_sampling": {
                             "train_point_sample_count": train_point_sample_count,
                             "eval_point_sampling": "all_points",
@@ -740,6 +975,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                     "branch_meta": branch_meta,
                     "model_meta": model_meta(latest_model, branch_meta),
                     "le_normalization_meta": le_norm_meta,
+                    "warmstart_meta": warmstart_meta,
                     "point_sampling": {
                         "train_point_sample_count": train_point_sample_count,
                         "eval_point_sampling": "all_points",
@@ -762,6 +998,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                     "args": vars(args),
                     "validation_split": split_meta,
                     "strain_meta": data.strain_meta,
+                    "warmstart_meta": warmstart_meta,
                     "history": history,
                     "best_score": best_score,
                     "best_report": best_report,
@@ -784,6 +1021,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 "args": vars(args),
                 "validation_split": split_meta,
                 "strain_meta": data.strain_meta,
+                "warmstart_meta": warmstart_meta,
                 "history": history,
                 "best_score": best_score,
                 "best_report": best_report,
@@ -837,6 +1075,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-zero-init-residual", action="store_true")
     p.add_argument("--baseline-jacobian-weight", type=float, default=1.0)
     p.add_argument("--baseline-j-loss-mode", default="norm-plus-physical", choices=["norm", "physical", "norm-plus-physical"])
+    p.add_argument("--b-baseline-warmstart-steps", type=int, default=0)
+    p.add_argument("--b-baseline-warmstart-lr", type=float, default=1.0e-3)
+    p.add_argument("--b-baseline-warmstart-weight-decay", type=float, default=0.0)
+    p.add_argument("--b-baseline-warmstart-source", default="train-only", choices=["train-only"])
     p.add_argument("--include-id-features", action="store_true")
     p.add_argument("--jacobian-columns", default="all")
     p.add_argument("--jacobian-columns-per-batch", type=int, default=8)

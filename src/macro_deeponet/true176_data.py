@@ -198,11 +198,17 @@ def sample_meta(n: int, sample_paths: np.ndarray) -> tuple[np.ndarray, np.ndarra
 
 
 def _infer_compact_frame_count(z: np.lib.npyio.NpzFile, compact: Path) -> int:
-    for key in ("shape4", "q48_raw", "LE128_base", "le", "B_LE128_forward", "b"):
+    for key in ("q48_raw", "LE128_base", "le", "B_LE128_forward", "b"):
         if key in z.files:
             arr = np.asarray(z[key])
             if arr.ndim >= 1:
                 return int(arr.shape[0])
+    if "shape4" in z.files:
+        arr = np.asarray(z["shape4"])
+        if arr.shape == (4,):
+            return 1
+        if arr.ndim >= 1:
+            return int(arr.shape[0])
     raise KeyError(f"{compact}: cannot infer frame count; expected shape4, q48_raw, LE128_base/le, or B_LE128_forward/b")
 
 
@@ -258,6 +264,20 @@ def load_one_compact(
                 "This TRUE176 DeepONet trainer requires full q48/B48 compact data."
             )
         return arr
+
+    def require_shape4(z: np.lib.npyio.NpzFile, n_total: int) -> np.ndarray:
+        arr = np.asarray(z["shape4"], dtype=np.float32)
+        expected = (int(n_total), 4)
+        if tuple(arr.shape) == expected:
+            return arr
+        if tuple(arr.shape) == (4,):
+            return np.broadcast_to(arr.reshape(1, 4), expected).copy()
+        if tuple(arr.shape) == (1, 4):
+            return np.broadcast_to(arr, expected).copy()
+        raise ValueError(
+            f"{compact}: expected shape4 shape {expected}, (1, 4), or (4,), got {tuple(arr.shape)}. "
+            "shape4 may be stored once for a constant geometry, but q/LE/B must remain frame-aligned."
+        )
 
     def require_ip_shape(z: np.lib.npyio.NpzFile, key: str, tail: tuple[int, ...], n_total: int) -> np.ndarray:
         arr = require_shape(z, key, tail, n_total)[idx]
@@ -328,7 +348,7 @@ def load_one_compact(
                 break
         return {
             "compact_path": str(compact),
-            "shape4": require_shape(z, "shape4", (4,), n_total)[idx]
+            "shape4": require_shape4(z, n_total)[idx]
             if "shape4" in z.files
             else np.zeros((idx.size, 4), dtype=np.float32),
             "q48_raw": require_shape(z, "q48_raw", (48,), n_total)[idx],

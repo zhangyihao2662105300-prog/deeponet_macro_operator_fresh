@@ -216,3 +216,118 @@ Known gaps:
 - Existing old compacts that lack `strain_field` cannot be retroactively proven
   to be `E` or `LE`; they remain marked `unknown` and should not be mixed into
   formal training without audit notes.
+
+## v1.1 follow-up - 2026-06-22 - Reference-frame IP audit
+
+Purpose:
+
+- Keep the IP geometry audit strict while avoiding false failures when Abaqus
+  `COORD` in loaded frames reports deformed integration-point coordinates.
+
+Included:
+
+- Complete compact exporter now uses frame 0 `COORD` / `IVOL` as the reference
+  geometry audit source when available.
+- Selected training/eval frame `COORD` values are stored separately as
+  `ip_xyz_abaqus_coord_selected_frames` and summarized by
+  `audit_selected_frame_coord_vs_reference_max_abs`.
+- `ip_xyz_abaqus_coord` / `ip_IVOL_abaqus` remain the blocking audit fields and
+  now explicitly carry reference-frame scope metadata.
+
+Validation:
+
+- `py -3 -m pytest tests/smoke_test.py -q`
+- `py -3 -m compileall src/macro_deeponet scripts`
+
+Known gaps:
+
+- This still assumes the TRUE176/CSS8 reference-frame `IVOL` is directly
+  comparable to `detJ`; other element families may need quadrature weights.
+
+## v1.1 follow-up - 2026-06-22 - Constant shape4 loader support
+
+Purpose:
+
+- Let the generic query-point trainer consume complete compacts where a constant
+  geometry is stored once as `shape4[4]` or `shape4[1,4]`, matching the exporter
+  behavior.
+
+Included:
+
+- Compact frame count inference now prioritizes frame-aligned arrays
+  (`q48_raw`, `LE128_base`, `B_LE128_forward`) before reading `shape4`.
+- `load_one_compact()` broadcasts constant `shape4` metadata to the selected
+  frame count, while still requiring `q48_raw`, `LE128_base`, and
+  `B_LE128_forward` to remain frame-aligned.
+- Smoke coverage verifies that `shape4[4]` is accepted and broadcast safely.
+
+Validation:
+
+- `py -3 -m pytest tests/smoke_test.py -q` -> `40 passed`
+- `py -3 -m compileall src/macro_deeponet scripts`
+
+## v1.1 follow-up - 2026-06-22 - Three-case formal small training audit
+
+Purpose:
+
+- Move from one-case `overlap-debug` smoke to a real non-overlapping
+  case-level query-point trainer run.
+
+Inputs:
+
+- `complete_case019_training_ready.npz`
+- `complete_case025_training_ready.npz`
+- `complete_case031_training_ready.npz`
+- All three declare `strain_field=LE`, `B_label_strain_field=LE`,
+  `merge_q48_max_abs_diff=0`, `merge_LE128_base_max_abs_diff=0`,
+  `merge_ip_keys_match=true`, `audit_ref_ip_xyz_vs_abaqus_coord_max_abs`
+  about `2.38e-7`, and `audit_detJ_vs_IVOL_max_abs` about `4.29e-10`.
+
+Trainer:
+
+- `model_style=query-fe-linear-residual`
+- `point_feature_source=data`
+- `branch_feature_mode=xkeep-qraw`
+- `le_normalization=global-component`
+- `train_point_sample_count=64`
+- `split_mode=case`, `val_fraction=0.34`, `allow_overlap_val=false`
+- `epochs=50`
+
+Audit result:
+
+- `validation_split_mode=case`
+- `validation_is_overlapping=false`
+- `train_cases=[25,31]`, `val_cases=[19]`
+- `train_frames=20`, `val_frames=10`
+- `point_feature_source=data_generic`, `feature_dim=35`
+- `supports_dynamic_points=true`
+- `strain_meta.strain_field=LE`
+
+Best observed checkpoint:
+
+- Epoch `25`, `score=2.3568`
+- `train_LE_rel=0.8248`, `val_LE_rel=1.3879`
+- `train_AD_B_rel=0.9668`, `val_AD_B_rel=0.9689`
+- `train_rand_dir_B_rel=0.9872`, `val_rand_dir_B_rel=0.9867`
+
+Latest epoch:
+
+- Epoch `50`, `score=5.3967`
+- `train_LE_rel=0.8435`, `val_LE_rel=4.0148`
+- `train_AD_B_rel=1.4325`, `val_AD_B_rel=1.3820`
+
+Conclusion:
+
+- Formal small training pipeline audit passed: real complete compacts, explicit
+  strain metadata, data point features, dynamic query model, and non-overlap
+  case split all worked end to end.
+- Model performance is not established. With only three load cases and one
+  validation case, validation metrics are poor and unstable; this run should not
+  be used as evidence that the architecture trains well.
+
+Known gaps:
+
+- This is case-level load extrapolation within one geometry, not geometry
+  generalization.
+- More real training-ready compacts are needed before judging convergence or
+  comparing architecture quality.

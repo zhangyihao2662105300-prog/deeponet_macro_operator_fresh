@@ -347,6 +347,16 @@ def _check_ip_keys_match(current: np.ndarray, merged: np.ndarray, *, source: Pat
         )
 
 
+def field_rows_by_keys(frame: Any, field_name: str, width: int, keys: list[tuple[int, int, int]]) -> np.ndarray | None:
+    if field_name not in frame.fieldOutputs:
+        return None
+    fmap = tensor_field_by_ip(frame, field_name, int(width))
+    return np.asarray(
+        [fmap.get(key, np.full(int(width), np.nan, dtype=np.float64)) for key in keys],
+        dtype=np.float64,
+    )
+
+
 def merge_existing_payload(
     payload: dict[str, Any],
     merge_path: str,
@@ -537,6 +547,9 @@ def main() -> None:
         geom = reference_ip_geometry(instance, keys)
         point_features, point_feature_names = point_features_from_raw(geom)
         ip_keys = np.asarray(keys, dtype=np.int64)
+        reference_frame = step.frames[0]
+        ref_coord_rows = field_rows_by_keys(reference_frame, "COORD", 3, keys)
+        ref_ivol_rows = field_rows_by_keys(reference_frame, "IVOL", 1, keys)
 
         x_keep = np.asarray([node_by_label[int(label)] for label in keep_labels], dtype=np.float32)
         x_macro = node_xyz.astype(np.float32)
@@ -555,11 +568,13 @@ def main() -> None:
                 raise ValueError("frame %d integration-point keys differ from first exported frame" % int(frame_index))
             le_rows.append(np.asarray([le_map[key] for key in keys], dtype=np.float64))
             if "COORD" in frame.fieldOutputs:
-                coord_map = tensor_field_by_ip(frame, "COORD", 3)
-                coord_rows.append(np.asarray([coord_map.get(key, np.full(3, np.nan)) for key in keys], dtype=np.float64))
+                cur_coord_rows = field_rows_by_keys(frame, "COORD", 3, keys)
+                if cur_coord_rows is not None:
+                    coord_rows.append(cur_coord_rows)
             if "IVOL" in frame.fieldOutputs:
-                ivol_map = tensor_field_by_ip(frame, "IVOL", 1)
-                ivol_rows.append(np.asarray([ivol_map.get(key, np.asarray([np.nan]))[0] for key in keys], dtype=np.float64))
+                cur_ivol_rows = field_rows_by_keys(frame, "IVOL", 1, keys)
+                if cur_ivol_rows is not None:
+                    ivol_rows.append(cur_ivol_rows.reshape(-1))
             frame_values.append(float(frame.frameValue))
             frame_indices_out.append(int(frame_index))
 
@@ -616,11 +631,22 @@ def main() -> None:
             payload["shape4"] = shape4
         if float(args.length_scale) > 0.0:
             payload["length_scale"] = np.full((n_frame, 1), float(args.length_scale), dtype=np.float32)
+        if ref_coord_rows is not None:
+            payload["ip_xyz_abaqus_coord"] = ref_coord_rows.reshape(1, 128, 3).astype(np.float32)
+            payload["ip_xyz_abaqus_coord_frame_index"] = np.asarray(0, dtype=np.int64)
+            payload["ip_xyz_abaqus_coord_scope"] = np.asarray("reference_frame", dtype=object)
+        if ref_ivol_rows is not None:
+            payload["ip_IVOL_abaqus"] = ref_ivol_rows.reshape(1, 128).astype(np.float32)
+            payload["ip_IVOL_abaqus_frame_index"] = np.asarray(0, dtype=np.int64)
+            payload["ip_IVOL_abaqus_scope"] = np.asarray("reference_frame", dtype=object)
         if coord_rows:
             coords = np.asarray(coord_rows, dtype=np.float32)
-            payload["ip_xyz_abaqus_coord"] = coords
+            payload["ip_xyz_abaqus_coord_selected_frames"] = coords
+            if ref_coord_rows is not None:
+                def_diff = float(np.nanmax(np.abs(coords.astype(np.float64) - ref_coord_rows.reshape(1, 128, 3))))
+                payload["audit_selected_frame_coord_vs_reference_max_abs"] = np.asarray(def_diff, dtype=np.float64)
         if ivol_rows:
-            payload["ip_IVOL_abaqus"] = np.asarray(ivol_rows, dtype=np.float32)
+            payload["ip_IVOL_abaqus_selected_frames"] = np.asarray(ivol_rows, dtype=np.float32)
 
         payload = enforce_ip_audit(
             payload,
@@ -657,6 +683,9 @@ def main() -> None:
             "training_ready_sobolev": bool("B_LE128_forward" in payload),
             "audit_ref_ip_xyz_vs_abaqus_coord_max_abs": float(payload.get("audit_ref_ip_xyz_vs_abaqus_coord_max_abs", np.nan)),
             "audit_detJ_vs_IVOL_max_abs": float(payload.get("audit_detJ_vs_IVOL_max_abs", np.nan)),
+            "audit_selected_frame_coord_vs_reference_max_abs": float(
+                payload.get("audit_selected_frame_coord_vs_reference_max_abs", np.nan)
+            ),
             "require_ip_audit": bool(payload.get("require_ip_audit", False)),
             "skip_ivol_audit": bool(payload.get("skip_ivol_audit", False)),
             "ip_audit_scope": str(payload.get("ip_audit_scope", "")),

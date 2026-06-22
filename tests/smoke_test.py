@@ -457,6 +457,24 @@ def test_true176_loader_rejects_non_full48_b() -> None:
             raise AssertionError("loader accepted a compact file with B last dimension != 48")
 
 
+def test_true176_loader_broadcasts_constant_shape4_metadata() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "constant_shape4_compact.npz"
+        n = 3
+        shape4 = np.asarray([1.0, 0.01, 0.0, 0.0], dtype=np.float32)
+        np.savez(
+            path,
+            shape4=shape4,
+            q48_raw=np.zeros((n, 48), dtype=np.float32),
+            LE128_base=np.zeros((n, 128, 6), dtype=np.float32),
+            B_LE128_forward=np.zeros((n, 128, 6, 48), dtype=np.float32),
+            sample_paths=np.asarray(["case001"], dtype=str),
+        )
+        data = load_one_compact(path)
+        assert data["shape4"].shape == (n, 4)
+        assert np.allclose(data["shape4"], shape4.reshape(1, 4))
+
+
 def test_true176_physical_train_requires_explicit_h() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
@@ -960,6 +978,27 @@ def test_exporter_ip_audit_can_block_bad_geometry() -> None:
         assert "COORD" in str(exc)
     else:
         raise AssertionError("IP audit accepted missing COORD in strict mode")
+
+
+def test_exporter_ip_audit_uses_reference_coord_not_selected_deformed_coord() -> None:
+    p = 128
+    payload = {
+        "ip_xyz": np.zeros((p, 3), dtype=np.float32),
+        "ip_detJ": np.ones((p,), dtype=np.float32),
+        "ip_xyz_abaqus_coord": np.zeros((1, p, 3), dtype=np.float32),
+        "ip_xyz_abaqus_coord_selected_frames": np.full((2, p, 3), 1.0e-2, dtype=np.float32),
+        "audit_selected_frame_coord_vs_reference_max_abs": np.asarray(1.0e-2, dtype=np.float64),
+        "ip_IVOL_abaqus": np.ones((1, p), dtype=np.float32),
+    }
+    out = enforce_ip_audit(
+        payload,
+        require_ip_audit=True,
+        ip_xyz_tol=1.0e-6,
+        detj_ivol_tol=1.0e-8,
+        skip_ivol_audit=False,
+    )
+    assert float(out["audit_ref_ip_xyz_vs_abaqus_coord_max_abs"]) == 0.0
+    assert float(out["audit_selected_frame_coord_vs_reference_max_abs"]) == 1.0e-2
 
 
 def test_generic_query_training_supports_global_le_norm_and_point_sampling() -> None:

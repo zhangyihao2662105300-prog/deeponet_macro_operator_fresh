@@ -28,7 +28,12 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
-from .models import FELinearResidualDeepONet, NOEMStyleMIONet, True176Shape4QrawDeepONet
+from .models import (
+    FELinearResidualDeepONet,
+    NOEMStyleMIONet,
+    QueryFELinearResidualDeepONet,
+    True176Shape4QrawDeepONet,
+)
 from .point_features import load_point_features_from_compacts, transform_point_features_for_scale
 from .train_true176_deeponet_sobolev import (
     ad_jacobian,
@@ -136,6 +141,13 @@ def build_model(
             train_point_baseline=not bool(args.freeze_fe_point_baseline),
             zero_init_residual=not bool(args.no_zero_init_residual),
         )
+    if style in {"query-fe-linear-residual", "query-fe-residual", "dynamic-fe-linear-residual"}:
+        return QueryFELinearResidualDeepONet(
+            **common,
+            baseline_scale=float(args.fe_baseline_scale),
+            train_point_baseline=not bool(args.freeze_fe_point_baseline),
+            zero_init_residual=not bool(args.no_zero_init_residual),
+        )
     if style in {"noem-mionet", "mionet", "noem"}:
         common.pop("residual_scale")
         return NOEMStyleMIONet(
@@ -145,12 +157,14 @@ def build_model(
         )
     if style in {"concat-skip", "legacy", "concat"}:
         return True176Shape4QrawDeepONet(**common)
-    raise ValueError("model_style must be one of: fe-linear-residual, noem-mionet, concat-skip")
+    raise ValueError("model_style must be one of: fe-linear-residual, query-fe-linear-residual, noem-mionet, concat-skip")
 
 
 def model_meta(model: nn.Module, branch_meta: dict[str, Any]) -> dict[str, Any]:
     base = _unwrap(model)
-    if isinstance(base, FELinearResidualDeepONet):
+    if isinstance(base, QueryFELinearResidualDeepONet):
+        style = "query-fe-linear-residual"
+    elif isinstance(base, FELinearResidualDeepONet):
         style = "fe-linear-residual"
     elif isinstance(base, NOEMStyleMIONet):
         style = "noem-mionet"
@@ -166,19 +180,37 @@ def model_meta(model: nn.Module, branch_meta: dict[str, Any]) -> dict[str, Any]:
         "basis_dim": int(getattr(base, "basis_dim")),
         "strain_dim": int(getattr(base, "strain_dim")),
     }
-    if isinstance(base, FELinearResidualDeepONet):
+    if isinstance(base, QueryFELinearResidualDeepONet):
+        meta.update(
+            {
+                "architecture_principle": (
+                    "Query-point FE-like linear B baseline plus standard branch/trunk DeepONet residual."
+                ),
+                "linear_baseline": "B_base_norm(point_features) @ q48_norm",
+                "static_baseline": "global [6,48] prior initialized from mean training d(LE_norm)/d(q48_norm)",
+                "point_baseline": "learned from Trunk/query-point features only; no fixed per-IP parameter table",
+                "residual": "standard single-branch DeepONet over [q48, geometry] and arbitrary query-point features",
+                "supports_dynamic_points": bool(base.supports_dynamic_points),
+                "baseline_scale": float(base.baseline_scale),
+                "residual_scale": float(base.residual_scale),
+                "train_point_baseline": bool(base.train_point_baseline),
+                "zero_init_residual": bool(base.zero_init_residual),
+            }
+        )
+    elif isinstance(base, FELinearResidualDeepONet):
         meta.update(
             {
                 "architecture_principle": (
                     "FE-like linear B baseline plus standard branch/trunk DeepONet residual."
                 ),
                 "linear_baseline": "B_base_norm(point_features) @ q48_norm",
-                "static_baseline": "initialized from mean training d(LE_norm)/d(q48_norm)",
+                "static_baseline": "fixed [P,6,48] table initialized from mean training d(LE_norm)/d(q48_norm)",
                 "point_baseline": "learned from Trunk/IP features only",
                 "residual": "standard single-branch DeepONet over [q48, geometry] and point features",
                 "baseline_scale": float(base.baseline_scale),
                 "residual_scale": float(base.residual_scale),
                 "train_point_baseline": bool(base.train_point_baseline),
+                "supports_dynamic_points": False,
                 "zero_init_residual": bool(base.zero_init_residual),
             }
         )
@@ -209,6 +241,56 @@ def model_meta(model: nn.Module, branch_meta: dict[str, Any]) -> dict[str, Any]:
             }
         )
     return meta
+
+
+def _le_stats(le_train: np.ndarray, mode: str) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    key = str(mode).strip().lower().replace("_", "-")
+    if key == "per-point":
+        mean, std = stats(le_train, axis=0)
+        meta = {
+            "le_normalization": "per-point",
+            "le_mean_shape": list(mean.shape),
+            "le_std_shape": list(std.shape),
+            "query_point_inference": "requires the same point table or externally supplied compatible LE statistics",
+        }
+        return mean, std, meta
+    if key in {"global-component", "component", "global"}:
+        mean, std = stats(le_train.reshape(-1, le_train.shape[-1]), axis=0)
+        mean = mean.reshape(1, 1, le_train.shape[-1]).astype(np.float32)
+        std = std.reshape(1, 1, le_train.shape[-1]).astype(np.float32)
+        meta = {
+            "le_normalization": "global-component",
+            "le_mean_shape": list(mean.shape),
+            "le_std_shape": list(std.shape),
+            "query_point_inference": "can broadcast to arbitrary query point count P",
+        }
+        return mean, std, meta
+    raise ValueError("le_normalization must be per-point or global-component")
+
+
+def _le_scale_np(le_std: np.ndarray, point_count: int) -> np.ndarray:
+    vals = np.asarray(le_std, dtype=np.float32)
+    if vals.ndim == 1:
+        vals = vals.reshape(1, 1, -1)
+    elif vals.ndim == 2:
+        vals = vals.reshape(1, vals.shape[0], vals.shape[1])
+    elif vals.ndim != 3:
+        raise ValueError(f"le_std must have shape [6], [P,6], or [1,P,6], got {vals.shape}")
+    if int(vals.shape[-1]) != 6:
+        raise ValueError(f"le_std last dimension must be 6, got {vals.shape}")
+    if int(vals.shape[1]) not in {1, int(point_count)}:
+        raise ValueError(f"le_std point dimension {vals.shape[1]} cannot broadcast to point count {point_count}")
+    return np.maximum(vals, np.asarray(1.0e-12, dtype=np.float32))[:, :, :, None]
+
+
+def _slice_le_std_for_points(le_std: torch.Tensor, point_indices: torch.Tensor | None) -> torch.Tensor:
+    if point_indices is None:
+        return le_std
+    if le_std.ndim == 3 and int(le_std.shape[1]) > 1:
+        return le_std.index_select(1, point_indices)
+    if le_std.ndim == 2 and int(le_std.shape[0]) > 1:
+        return le_std.index_select(0, point_indices)
+    return le_std
 
 
 def train(args: argparse.Namespace) -> dict[str, Any]:
@@ -267,11 +349,11 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     )
 
     x_mean, x_std = stats(x_raw[train_idx], axis=0)
-    le_mean, le_std = stats(le_raw[train_idx], axis=0)
+    le_mean, le_std, le_norm_meta = _le_stats(le_raw[train_idx], str(args.le_normalization))
     q_start = int(branch_meta["q_start"])
     q_dim = int(branch_meta["q_dim"])
     q_std = x_std.reshape(-1)[q_start : q_start + q_dim]
-    j_norm_target = (b_train * q_std.reshape(1, 1, 1, 48) / le_std.reshape(1, len(target_ips), 6, 1)).astype(np.float32)
+    j_norm_target = (b_train * q_std.reshape(1, 1, 1, 48) / _le_scale_np(le_std, len(target_ips))).astype(np.float32)
     skip_init = np.mean(j_norm_target[train_idx], axis=0).astype(np.float32)
     b_global_rms = float(np.sqrt(np.mean(np.asarray(b_train, dtype=np.float64)[train_idx] ** 2)))
 
@@ -355,6 +437,13 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         q_dim=q_dim,
         skip_init=skip_init,
     ).to(device)
+    train_point_sample_count = int(args.train_point_sample_count)
+    if train_point_sample_count < 0:
+        raise ValueError("--train-point-sample-count must be >= 0")
+    if train_point_sample_count > 0:
+        base_model = _unwrap(model)
+        if not bool(getattr(base_model, "supports_dynamic_points", False)):
+            raise ValueError("--train-point-sample-count requires --model-style query-fe-linear-residual")
     init_report = load_checkpoint(model, str(args.init_checkpoint))
     if bool(ctx["distributed"]):
         model = DDP(model, device_ids=[int(ctx["local_rank"])] if device.type == "cuda" else None)
@@ -364,6 +453,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     col_rng = np.random.default_rng(int(args.seed) + 311 + 1009 * rank)
     action_rng = torch.Generator(device=device)
     action_rng.manual_seed(int(args.seed) + 911 + 1009 * rank)
+    point_rng = torch.Generator(device=device)
+    point_rng.manual_seed(int(args.seed) + 1777 + 1009 * rank)
     le_std_t = torch.as_tensor(le_std, dtype=torch.float32, device=device)
     q_std_np = x_std.reshape(-1)[q_start : q_start + q_dim].astype(np.float32)
 
@@ -394,6 +485,12 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 },
                 "b_global_rms": b_global_rms,
                 "jacobian_target_relation": "J_norm = B_train * q_std / LE_std; B_train = J_norm * LE_std / q_std",
+                "le_normalization_meta": le_norm_meta,
+                "point_sampling": {
+                    "train_point_sample_count": train_point_sample_count,
+                    "train_point_sampling": "all_points" if train_point_sample_count <= 0 else "random_subset_per_batch",
+                    "eval_point_sampling": "all_points",
+                },
                 "init_report": init_report,
                 "generic_point_contract": True,
             },
@@ -401,6 +498,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
 
     history: list[dict[str, Any]] = []
     best_score = float("inf")
+    best_report: dict[str, Any] | None = None
     for epoch in range(1, int(args.epochs) + 1):
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
@@ -426,6 +524,14 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             pb = pb.to(device)
             leb = leb.to(device)
             jb = jb.to(device)
+            point_indices_t: torch.Tensor | None = None
+            if train_point_sample_count > 0 and train_point_sample_count < int(pb.shape[1]):
+                point_indices_t = torch.randperm(int(pb.shape[1]), generator=point_rng, device=device)[:train_point_sample_count]
+                point_indices_t, _ = torch.sort(point_indices_t)
+                pb = pb.index_select(1, point_indices_t)
+                leb = leb.index_select(1, point_indices_t)
+                jb = jb.index_select(1, point_indices_t)
+            le_std_batch_t = _slice_le_std_for_points(le_std_t, point_indices_t)
             optimizer.zero_grad(set_to_none=True)
             le_pred = model(xb, pb)
             le_loss = nn.functional.mse_loss(le_pred, leb)
@@ -438,7 +544,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 j_phys_loss, j_parts = physical_j_loss(
                     j_pred,
                     j_true,
-                    le_std_t,
+                    le_std_batch_t,
                     q_std_cols,
                     b_global_rms=b_global_rms,
                     rel_eps_scale=float(args.physical_j_rel_eps_scale),
@@ -462,13 +568,13 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                     "j_loss_action_mse": baseline_j_obj,
                 }
                 base_model = _unwrap(model)
-                if isinstance(base_model, FELinearResidualDeepONet) and float(args.baseline_jacobian_weight) > 0.0:
+                if isinstance(base_model, (FELinearResidualDeepONet, QueryFELinearResidualDeepONet)) and float(args.baseline_jacobian_weight) > 0.0:
                     b_base = base_model._linear_b_norm(pb)[:, :, :, columns]
                     baseline_j_norm_loss = nn.functional.mse_loss(b_base, j_true)
                     baseline_j_phys_loss, baseline_j_parts = physical_j_loss(
                         b_base,
                         j_true,
-                        le_std_t,
+                        le_std_batch_t,
                         q_std_cols,
                         b_global_rms=b_global_rms,
                         rel_eps_scale=float(args.physical_j_rel_eps_scale),
@@ -539,11 +645,50 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         do_eval = epoch == 1 or epoch % int(args.eval_every) == 0 or epoch == int(args.epochs)
         if do_eval and is_main:
             eval_model = _unwrap(model)
-            row.update(evaluate(eval_model, x_norm, point_norm, le_raw, b_train, j_norm_target, train_eval_idx, norms, device, int(args.eval_batch_size), eval_columns, str(args.jacobian_method), "train"))
-            row.update(evaluate(eval_model, x_norm, point_norm, le_raw, b_train, j_norm_target, val_eval_idx, norms, device, int(args.eval_batch_size), eval_columns, str(args.jacobian_method), "val"))
+            row.update(
+                evaluate(
+                    eval_model,
+                    x_norm,
+                    point_norm,
+                    le_raw,
+                    b_train,
+                    j_norm_target,
+                    train_eval_idx,
+                    norms,
+                    device,
+                    int(args.eval_batch_size),
+                    eval_columns,
+                    str(args.jacobian_method),
+                    "train",
+                    seed=int(args.seed) + 101 * epoch,
+                    b_global_rms=b_global_rms,
+                    rel_eps_scale=float(args.physical_j_rel_eps_scale),
+                )
+            )
+            row.update(
+                evaluate(
+                    eval_model,
+                    x_norm,
+                    point_norm,
+                    le_raw,
+                    b_train,
+                    j_norm_target,
+                    val_eval_idx,
+                    norms,
+                    device,
+                    int(args.eval_batch_size),
+                    eval_columns,
+                    str(args.jacobian_method),
+                    "val",
+                    seed=int(args.seed) + 101 * epoch + 1,
+                    b_global_rms=b_global_rms,
+                    rel_eps_scale=float(args.physical_j_rel_eps_scale),
+                )
+            )
             row["score"] = float(row.get("val_LE_rel", row["loss"])) + float(row.get("val_AD_B_rel", 0.0))
             if float(row["score"]) < best_score:
                 best_score = float(row["score"])
+                best_report = dict(row)
                 torch.save(
                     {
                         "model_state": eval_model.state_dict(),
@@ -553,23 +698,84 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                         "point_meta": point_meta,
                         "branch_meta": branch_meta,
                         "model_meta": model_meta(eval_model, branch_meta),
+                        "le_normalization_meta": le_norm_meta,
+                        "point_sampling": {
+                            "train_point_sample_count": train_point_sample_count,
+                            "eval_point_sampling": "all_points",
+                        },
                         "scale_meta": {
                             "scale_mode": scale_mode,
                             "length_scale_source": data.length_scale_source,
                             "b_scale_meta": b_scale_meta,
                         },
                         "best_score": best_score,
+                        "best_report": best_report,
                         "epoch": epoch,
                     },
                     out_dir / "best.pt",
                 )
         if is_main:
             history.append(row)
+            latest_model = _unwrap(model)
+            torch.save(
+                {
+                    "model_state": latest_model.state_dict(),
+                    "norms": norms,
+                    "args": vars(args),
+                    "target_ips": target_ips,
+                    "point_meta": point_meta,
+                    "branch_meta": branch_meta,
+                    "model_meta": model_meta(latest_model, branch_meta),
+                    "le_normalization_meta": le_norm_meta,
+                    "point_sampling": {
+                        "train_point_sample_count": train_point_sample_count,
+                        "eval_point_sampling": "all_points",
+                    },
+                    "scale_meta": {
+                        "scale_mode": scale_mode,
+                        "length_scale_source": data.length_scale_source,
+                        "b_scale_meta": b_scale_meta,
+                    },
+                    "best_score": best_score,
+                    "best_report": best_report,
+                    "latest_report": row,
+                    "epoch": epoch,
+                },
+                out_dir / "latest.pt",
+            )
+            write_json(
+                out_dir / "training_summary_partial.json",
+                {
+                    "args": vars(args),
+                    "history": history,
+                    "best_score": best_score,
+                    "best_report": best_report,
+                    "latest_report": row,
+                    "best_checkpoint": str(out_dir / "best.pt"),
+                    "latest_checkpoint": str(out_dir / "latest.pt"),
+                    "partial": True,
+                },
+            )
             write_json(out_dir / "latest_metrics.json", row)
             write_loss_history(out_dir, history)
             if epoch % int(args.log_every) == 0 or do_eval:
                 print(json.dumps(row, sort_keys=True), flush=True)
+        ddp_barrier(ctx)
 
+    if is_main:
+        write_json(
+            out_dir / "training_summary.json",
+            {
+                "args": vars(args),
+                "history": history,
+                "best_score": best_score,
+                "best_report": best_report,
+                "latest_report": history[-1] if history else None,
+                "best_checkpoint": str(out_dir / "best.pt"),
+                "latest_checkpoint": str(out_dir / "latest.pt"),
+                "partial": False,
+            },
+        )
     if bool(ctx["distributed"]) and dist.is_initialized():
         dist.destroy_process_group()
     return {"best_score": best_score, "out_dir": str(out_dir)}
@@ -585,6 +791,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--point-feature-source", default="data", choices=["data", "auto", "shape4-audited", "shape4"])
     p.add_argument("--allow-shape4-point-feature-fallback", action="store_true")
     p.add_argument("--allow-physical-shape4-trunk", action="store_true")
+    p.add_argument("--le-normalization", default="per-point", choices=["per-point", "global-component"])
+    p.add_argument("--train-point-sample-count", type=int, default=0)
     p.add_argument("--scale-mode", default="normalized", choices=["normalized", "physical"])
     p.add_argument("--b-label-coordinate", default="auto", choices=["auto", "physical", "dimensionless"])
     p.add_argument("--detj-scale-dim", type=int, default=3)
@@ -599,7 +807,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--branch-depth", type=int, default=5)
     p.add_argument("--trunk-depth", type=int, default=5)
     p.add_argument("--activation", default="tanh")
-    p.add_argument("--model-style", default="fe-linear-residual", choices=["fe-linear-residual", "noem-mionet", "concat-skip"])
+    p.add_argument(
+        "--model-style",
+        default="fe-linear-residual",
+        choices=["fe-linear-residual", "query-fe-linear-residual", "noem-mionet", "concat-skip"],
+    )
     p.add_argument("--mionet-product-scale", default="none", choices=["none", "sqrt", "basis"])
     p.add_argument("--use-q-skip", action="store_true")
     p.add_argument("--residual-scale", type=float, default=1.0)

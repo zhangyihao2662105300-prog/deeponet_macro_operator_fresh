@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import sys
 import tempfile
+from types import SimpleNamespace
 from pathlib import Path
 
 import numpy as np
@@ -16,7 +17,13 @@ from macro_deeponet.geometry import (
     shape_function_gradients_hex8,
     shape_functions_hex8,
 )
-from macro_deeponet.models import FELinearResidualDeepONet, MacroDeepONet, NOEMStyleMIONet, True176Shape4QrawDeepONet
+from macro_deeponet.models import (
+    FELinearResidualDeepONet,
+    MacroDeepONet,
+    NOEMStyleMIONet,
+    QueryFELinearResidualDeepONet,
+    True176Shape4QrawDeepONet,
+)
 from macro_deeponet.point_features import load_point_features_from_compacts, transform_point_features_for_scale
 from macro_deeponet.true176_data import (
     build_branch_features,
@@ -200,6 +207,51 @@ def test_fe_linear_residual_model_has_explicit_b_baseline() -> None:
     j = ad_jacobian(model, x_norm, p_norm, [0], create_graph=False, method="forward")
     assert j.shape == (2, 128, 6, 1)
     assert torch.allclose(j, torch.full_like(j, 0.25), atol=1.0e-6)
+
+
+def test_query_fe_linear_residual_model_supports_dynamic_points() -> None:
+    shape4 = np.asarray([[1.2, 0.05, 0.10, 0.00], [1.4, 0.04, 0.08, 0.20]], dtype=np.float32)
+    q48 = np.zeros((2, 48), dtype=np.float32)
+    branch, branch_meta = build_branch_features(shape4=shape4, q48_raw=q48, mode="xkeep-qraw")
+    point, _meta = build_point_features(shape4, include_id_features=False)
+    q_start = int(branch_meta["q_start"])
+    q_dim = int(branch_meta["q_dim"])
+    skip = torch.zeros((6, q_dim), dtype=torch.float32)
+    skip[:, 0] = 0.25
+    model = QueryFELinearResidualDeepONet(
+        input_dim=branch.shape[-1],
+        point_dim=point.shape[-1],
+        ip_count=128,
+        basis_dim=12,
+        hidden_dim=32,
+        branch_depth=2,
+        trunk_depth=2,
+        q_start=q_start,
+        q_dim=q_dim,
+        skip_init=skip,
+        train_skip=False,
+        residual_scale=0.0,
+        train_point_baseline=False,
+    )
+    assert model.supports_dynamic_points
+    x_norm = torch.zeros(2, branch.shape[-1])
+    x_norm[:, q_start] = torch.tensor([2.0, -1.0])
+    p_full = torch.as_tensor(point, dtype=torch.float32)
+    le_full = model(x_norm, p_full)
+    assert le_full.shape == (2, 128, 6)
+    assert torch.allclose(le_full[0], torch.full((128, 6), 0.5), atol=1.0e-6)
+    assert torch.allclose(le_full[1], torch.full((128, 6), -0.25), atol=1.0e-6)
+
+    subset = [0, 5, 17, 63, 127]
+    p_query = p_full[:, subset, :]
+    le_query = model(x_norm, p_query)
+    assert le_query.shape == (2, len(subset), 6)
+    assert torch.allclose(le_query, le_full[:, subset, :], atol=1.0e-6)
+    b_query = model._linear_b_norm(p_query)
+    assert b_query.shape == (2, len(subset), 6, q_dim)
+    j = ad_jacobian(model, x_norm, p_query, [0, 3, 7], create_graph=False, method="forward")
+    assert j.shape == (2, len(subset), 6, 3)
+    assert torch.allclose(j[:, :, :, 0], torch.full((2, len(subset), 6), 0.25), atol=1.0e-6)
 
 
 def test_true176_keep_node_order_matches_q48_contract() -> None:
@@ -483,6 +535,218 @@ def test_generic_point_feature_loader_reads_real_fields() -> None:
         assert np.allclose(points[:, -1, 3], ip_detj[127])
 
 
+def test_generic_point_feature_loader_carries_ip_keys() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "real_points_with_keys_compact.npz"
+        n = 2
+        ip_xi = np.zeros((n, 128, 3), dtype=np.float32)
+        ip_keys = np.stack(
+            [
+                np.arange(1, 129, dtype=np.int64),
+                np.arange(1001, 1129, dtype=np.int64),
+                np.arange(2001, 2129, dtype=np.int64),
+            ],
+            axis=1,
+        )
+        np.savez(
+            path,
+            shape4=np.zeros((n, 4), dtype=np.float32),
+            q48_raw=np.zeros((n, 48), dtype=np.float32),
+            LE128_base=np.zeros((n, 128, 6), dtype=np.float32),
+            B_LE128_forward=np.zeros((n, 128, 6, 48), dtype=np.float32),
+            ip_xi=ip_xi,
+            ip_keys=ip_keys,
+        )
+        target_ips = [0, 7, 127]
+        points, meta = load_point_features_from_compacts(
+            compact_paths=[str(path)],
+            source_index=np.zeros(n, dtype=np.int64),
+            source_row=np.arange(n, dtype=np.int64),
+            shape4=np.zeros((n, 4), dtype=np.float32),
+            target_ips=target_ips,
+            source="data",
+            include_id_features=False,
+            allow_shape4_fallback=False,
+        )
+        assert points.shape == (n, len(target_ips), 3)
+        assert meta["point_feature_target_ips"] == target_ips
+        assert meta["point_feature_ip_keys_source"] == "compact"
+        got = np.asarray(meta["point_feature_ip_keys"], dtype=np.int64)
+        assert got.shape == (n, len(target_ips), 3)
+        assert np.array_equal(got[0], ip_keys[target_ips])
+        assert np.array_equal(got[1], ip_keys[target_ips])
+
+
+def test_generic_point_feature_loader_uses_ip_keys_for_id_features() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "nonstandard_keys_compact.npz"
+        n = 1
+        ip_xi = np.zeros((n, 128, 3), dtype=np.float32)
+        ip_keys = np.zeros((128, 3), dtype=np.int64)
+        ip_keys[:, 0] = 16
+        ip_keys[:, 1] = 8
+        ip_keys[:, 2] = np.arange(1, 129, dtype=np.int64)
+        ip_keys[7] = np.asarray([3, 2, 99], dtype=np.int64)
+        np.savez(
+            path,
+            shape4=np.zeros((n, 4), dtype=np.float32),
+            q48_raw=np.zeros((n, 48), dtype=np.float32),
+            LE128_base=np.zeros((n, 128, 6), dtype=np.float32),
+            B_LE128_forward=np.zeros((n, 128, 6, 48), dtype=np.float32),
+            ip_xi=ip_xi,
+            ip_keys=ip_keys,
+        )
+        points, meta = load_point_features_from_compacts(
+            compact_paths=[str(path)],
+            source_index=np.zeros(n, dtype=np.int64),
+            source_row=np.arange(n, dtype=np.int64),
+            shape4=np.zeros((n, 4), dtype=np.float32),
+            target_ips=[7],
+            source="data",
+            include_id_features=True,
+            allow_shape4_fallback=False,
+        )
+        expected = np.asarray([(3 - 8.5) / 7.5, (2 - 4.5) / 3.5, -1.0 + 2.0 * (2.0 + 0.5) / 4.0, -1.0 + 2.0 * (0.0 + 0.5) / 4.0], dtype=np.float32)
+        assert points.shape == (n, 1, 7)
+        assert np.allclose(points[0, 0, -4:], expected)
+        assert meta["sources_used"][0]["id_feature_source"] == "ip_keys"
+
+
+def test_generic_complete_compact_can_omit_shape4_when_geometry_is_explicit() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "complete_no_shape4_compact.npz"
+        n = 2
+        ip_xi = np.zeros((128, 3), dtype=np.float32)
+        ip_xyz = np.zeros((128, 3), dtype=np.float32)
+        ip_keys = np.stack(
+            [
+                np.arange(1, 129, dtype=np.int64),
+                np.arange(1001, 1129, dtype=np.int64),
+                np.zeros(128, dtype=np.int64),
+            ],
+            axis=1,
+        )
+        np.savez(
+            path,
+            q48_raw=np.zeros((n, 48), dtype=np.float32),
+            LE128_base=np.zeros((n, 128, 6), dtype=np.float32),
+            B_LE128_forward=np.zeros((n, 128, 6, 48), dtype=np.float32),
+            X_keep=np.zeros((16, 3), dtype=np.float32),
+            ip_xi=ip_xi,
+            ip_xyz=ip_xyz,
+            ip_keys=ip_keys,
+        )
+        data = load_compacts([str(path)], target_ips=[0, 127])
+        assert data.shape4.shape == (n, 4)
+        assert np.allclose(data.shape4, 0.0)
+        assert data.keep_node_coords is not None
+        assert data.le.shape == (n, 2, 6)
+        assert data.b.shape == (n, 2, 6, 48)
+        points, meta = load_point_features_from_compacts(
+            compact_paths=data.compact_paths,
+            source_index=data.source_index,
+            source_row=data.source_row,
+            shape4=data.shape4,
+            target_ips=[0, 127],
+            source="data",
+            include_id_features=False,
+            allow_shape4_fallback=False,
+        )
+        assert points.shape == (n, 2, 6)
+        assert np.asarray(meta["point_feature_ip_keys"]).shape == (n, 2, 3)
+
+
+def test_generic_query_training_supports_global_le_norm_and_point_sampling() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        compact = tmp_path / "query_train_compact.npz"
+        out_dir = tmp_path / "out"
+        n = 4
+        rng = np.random.default_rng(123)
+        q48 = rng.normal(size=(n, 48)).astype(np.float32)
+        ip_xi = rng.normal(size=(128, 3)).astype(np.float32)
+        b = rng.normal(scale=0.01, size=(n, 128, 6, 48)).astype(np.float32)
+        le = np.einsum("npaj,nj->npa", b, q48).astype(np.float32)
+        np.savez(
+            compact,
+            q48_raw=q48,
+            LE128_base=le,
+            B_LE128_forward=b,
+            X_keep=np.zeros((n, 16, 3), dtype=np.float32),
+            ip_xi=ip_xi,
+        )
+        args = SimpleNamespace(
+            ddp=False,
+            cuda=False,
+            ddp_backend="gloo",
+            seed=7,
+            out_dir=out_dir,
+            compact=[str(compact)],
+            compact_list="",
+            target_ips="0,1,2,3",
+            scale_mode="normalized",
+            frame_stride=1,
+            max_frames_per_compact=0,
+            val_fraction=0.25,
+            val_cases="",
+            max_eval_frames=2,
+            branch_feature_mode="xkeep-qraw",
+            b_label_coordinate="auto",
+            point_feature_source="data",
+            include_id_features=False,
+            allow_shape4_point_feature_fallback=False,
+            allow_physical_shape4_trunk=False,
+            detj_scale_dim=3,
+            le_normalization="global-component",
+            epochs=1,
+            batch_size=2,
+            eval_batch_size=1,
+            basis_dim=8,
+            hidden_dim=16,
+            branch_depth=2,
+            trunk_depth=2,
+            activation="tanh",
+            model_style="query-fe-linear-residual",
+            mionet_product_scale="none",
+            use_q_skip=False,
+            residual_scale=1.0,
+            fe_baseline_scale=1.0,
+            freeze_fe_point_baseline=False,
+            no_zero_init_residual=False,
+            baseline_jacobian_weight=0.0,
+            baseline_j_loss_mode="norm-plus-physical",
+            jacobian_columns="0,1",
+            jacobian_columns_per_batch=1,
+            jacobian_method="forward",
+            eval_columns="0,1",
+            j_loss_mode="norm",
+            physical_j_aux_weight=0.0,
+            physical_j_abs_weight=1.0,
+            physical_j_rel_weight=0.0,
+            physical_j_action_weight=0.0,
+            physical_j_rel_eps_scale=0.02,
+            physical_j_action_directions=0,
+            initial_jacobian_weight=1.0,
+            initial_tangent_weight=0.0,
+            tangent_directions=0,
+            lr=1.0e-4,
+            lr_decay=1.0,
+            grad_clip=10.0,
+            weight_decay=0.0,
+            eval_every=1,
+            log_every=1,
+            init_checkpoint="",
+            freeze_skip=False,
+            train_point_sample_count=2,
+        )
+        train_true176_generic(args)
+        summary = out_dir / "training_summary.json"
+        assert summary.exists()
+        text = summary.read_text(encoding="utf-8")
+        assert '"le_normalization": "global-component"' in text
+        assert '"train_point_sample_count": 2' in text
+
+
 def test_generic_point_feature_loader_marks_shape4_fallback() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "missing_points_compact.npz"
@@ -557,6 +821,7 @@ if __name__ == "__main__":
     test_true176_xkeep_branch_and_ad_shapes()
     test_noem_style_mionet_splits_q_and_geometry()
     test_fe_linear_residual_model_has_explicit_b_baseline()
+    test_query_fe_linear_residual_model_supports_dynamic_points()
     test_true176_keep_node_order_matches_q48_contract()
     test_true176_loader_uses_explicit_xkeep_when_available()
     test_true176_physical_scale_transforms_branch_and_b()
@@ -571,6 +836,10 @@ if __name__ == "__main__":
     test_true176_loader_rejects_non_full48_b()
     test_true176_physical_train_requires_explicit_h()
     test_generic_point_feature_loader_reads_real_fields()
+    test_generic_point_feature_loader_carries_ip_keys()
+    test_generic_point_feature_loader_uses_ip_keys_for_id_features()
+    test_generic_complete_compact_can_omit_shape4_when_geometry_is_explicit()
+    test_generic_query_training_supports_global_le_norm_and_point_sampling()
     test_generic_point_feature_loader_marks_shape4_fallback()
     test_generic_point_feature_loader_shape4_audited()
     test_tiny_overfit_loss_decreases()

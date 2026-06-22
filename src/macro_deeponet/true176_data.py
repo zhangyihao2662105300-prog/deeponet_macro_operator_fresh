@@ -193,6 +193,15 @@ def sample_meta(n: int, sample_paths: np.ndarray) -> tuple[np.ndarray, np.ndarra
     return sample_index, frame_number, case_id
 
 
+def _infer_compact_frame_count(z: np.lib.npyio.NpzFile, compact: Path) -> int:
+    for key in ("shape4", "q48_raw", "LE128_base", "le", "B_LE128_forward", "b"):
+        if key in z.files:
+            arr = np.asarray(z[key])
+            if arr.ndim >= 1:
+                return int(arr.shape[0])
+    raise KeyError(f"{compact}: cannot infer frame count; expected shape4, q48_raw, LE128_base/le, or B_LE128_forward/b")
+
+
 def load_one_compact(
     path: str | Path,
     *,
@@ -225,7 +234,7 @@ def load_one_compact(
         raise ValueError(f"{compact}: target_ips must select one or more rows in [0,127]")
 
     with np.load(str(compact), allow_pickle=True) as z:
-        n_total = int(z["shape4"].shape[0])
+        n_total = _infer_compact_frame_count(z, compact)
         stride = max(1, int(frame_stride))
         idx = np.arange(0, n_total, stride, dtype=np.int64)
         if int(max_frames) > 0:
@@ -275,7 +284,9 @@ def load_one_compact(
                 break
         return {
             "compact_path": str(compact),
-            "shape4": require_shape(z, "shape4", (4,), n_total)[idx],
+            "shape4": require_shape(z, "shape4", (4,), n_total)[idx]
+            if "shape4" in z.files
+            else np.zeros((idx.size, 4), dtype=np.float32),
             "q48_raw": require_shape(z, "q48_raw", (48,), n_total)[idx],
             "le": require_ip_shape(z, le_key, (128, 6), n_total),
             "b": require_ip_shape(z, b_key, (128, 6, 48), n_total),

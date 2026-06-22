@@ -33,7 +33,13 @@ from typing import Any, Iterable
 
 import numpy as np
 
-from .true176_data import build_point_features_unique, canonical_scale_mode, length_scale_column, standard_css8_row_map
+from .true176_data import (
+    build_point_features_unique,
+    canonical_scale_mode,
+    length_scale_column,
+    standard_css8_row_map,
+    standard_ip_keys,
+)
 
 FEATURE_KEYS = ("point_features", "ip_features", "trunk_features")
 FEATURE_NAME_KEYS = ("point_feature_names", "ip_feature_names", "trunk_feature_names")
@@ -45,6 +51,7 @@ FIELD_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("ip_invJ", ("ip_invJ", "ip_inverse_jacobian", "invJ128", "invj", "ip_invj")),
     ("ip_detJ", ("ip_detJ", "detJ128", "detj", "ip_detj")),
 )
+IP_KEY_CANDIDATES = ("ip_keys", "integration_point_keys", "point_keys", "abaqus_ip_keys")
 
 
 def _find_key(z: np.lib.npyio.NpzFile, keys: Iterable[str]) -> str | None:
@@ -107,6 +114,37 @@ def _slice_point_array(arr: np.ndarray, *, rows: np.ndarray, target_ips: list[in
     return np.asarray(picked, dtype=np.float32)
 
 
+def _slice_ip_keys(arr: np.ndarray, *, rows: np.ndarray, target_ips: list[int], n_total: int, source_key: str) -> np.ndarray:
+    vals = np.asarray(arr)
+    rows = np.asarray(rows, dtype=np.int64).reshape(-1)
+    ips = np.asarray(target_ips, dtype=np.int64).reshape(-1)
+    if vals.ndim < 2:
+        raise ValueError(f"{source_key}: expected ip key array with point dimension, got shape {vals.shape}")
+
+    if vals.shape[0] == int(n_total):
+        picked = vals[rows]
+    elif vals.shape[0] == 128:
+        picked = np.broadcast_to(vals.reshape((1,) + vals.shape), (rows.size,) + vals.shape).copy()
+    else:
+        raise ValueError(
+            f"{source_key}: first dimension must be frame count {n_total} or fixed point count 128; got {vals.shape}"
+        )
+    if picked.shape[1] != 128:
+        raise ValueError(f"{source_key}: point dimension must be 128, got shape {picked.shape}")
+    return np.asarray(picked[:, ips])
+
+
+def _infer_frame_count(z: np.lib.npyio.NpzFile, fallback: int, source_key: str) -> int:
+    if int(fallback) > 0:
+        return int(fallback)
+    for key in ("shape4", "q48_raw", "LE128_base", "le", "B_LE128_forward", "b"):
+        if key in z.files:
+            arr = np.asarray(z[key])
+            if arr.ndim >= 1:
+                return int(arr.shape[0])
+    raise KeyError(f"{source_key}: cannot infer frame count")
+
+
 def _id_features(target_ips: list[int], batch: int) -> tuple[np.ndarray, list[str]]:
     row = standard_css8_row_map()
     ips = np.asarray(target_ips, dtype=np.int64)
@@ -119,6 +157,25 @@ def _id_features(target_ips: list[int], batch: int) -> tuple[np.ndarray, list[st
     elem_y = -1.0 + 2.0 * (ey + 0.5) / 4.0
     feats = np.stack([(elem - 8.5) / 7.5, (ip - 4.5) / 3.5, elem_x, elem_y], axis=-1)
     return np.broadcast_to(feats.reshape(1, feats.shape[0], feats.shape[1]), (int(batch), feats.shape[0], feats.shape[1])).astype(np.float32), [
+        "elem_index_norm",
+        "ip_index_norm",
+        "elem_x_center_id",
+        "elem_y_center_id",
+    ]
+
+
+def _id_features_from_ip_keys(ip_keys: np.ndarray) -> tuple[np.ndarray, list[str]]:
+    keys = np.asarray(ip_keys, dtype=np.float32)
+    if keys.ndim != 3 or keys.shape[-1] < 2:
+        raise ValueError(f"ip_keys must have shape [N,P,>=2], got {keys.shape}")
+    elem = keys[:, :, 0]
+    ip = keys[:, :, 1]
+    ex = np.mod(elem - 1.0, 4.0)
+    ey = np.floor((elem - 1.0) / 4.0)
+    elem_x = -1.0 + 2.0 * (ex + 0.5) / 4.0
+    elem_y = -1.0 + 2.0 * (ey + 0.5) / 4.0
+    feats = np.stack([(elem - 8.5) / 7.5, (ip - 4.5) / 3.5, elem_x, elem_y], axis=-1)
+    return feats.astype(np.float32), [
         "elem_index_norm",
         "ip_index_norm",
         "elem_x_center_id",
@@ -276,6 +333,10 @@ def _shape4_audited_features(
     return point_all[:, target_ips, :].astype(np.float32), {
         **meta,
         "point_feature_source": source_name,
+        "point_feature_axis": "point_features[:, k, :] aligns with LE/B[:, k, ...] after target_ips selection",
+        "point_feature_target_ips": [int(v) for v in target_ips],
+        "point_feature_ip_keys": standard_ip_keys()[np.asarray(target_ips, dtype=np.int64)].astype(np.int64).tolist(),
+        "point_feature_alignment": "shape4-reconstructed point_features[:, k, :] matches LE/B row target_ips[k] under the audited standard CSS8 Abaqus row order",
         "shape4_ip_contract": "standard_css8_elem_major_ip_major",
         "audit_required": True,
         "audit_note": audit_note,
@@ -332,6 +393,7 @@ def load_point_features_from_compacts(
     names: list[str] | None = None
     sources_used: list[dict[str, Any]] = []
     missing: list[str] = []
+    ip_key_chunks: list[np.ndarray] = []
 
     for compact_id, compact_text in enumerate(compact_paths):
         mask = source_index == int(compact_id)
@@ -340,7 +402,7 @@ def load_point_features_from_compacts(
         rows = source_row[mask]
         path = Path(compact_text).resolve()
         with np.load(str(path), allow_pickle=True) as z:
-            n_total = int(z["shape4"].shape[0])
+            n_total = _infer_frame_count(z, int(shape4.shape[0]), str(path))
             feature_key = _find_key(z, FEATURE_KEYS)
             if feature_key is not None:
                 arr = _slice_point_array(z[feature_key], rows=rows, target_ips=target_ips, n_total=n_total, source_key=feature_key)
@@ -363,6 +425,8 @@ def load_point_features_from_compacts(
                     missing.append(str(path))
                     if key == "auto" and bool(allow_shape4_fallback):
                         # Fill this compact from shape4-generated features for backward compatibility only.
+                        if "shape4" not in z.files:
+                            raise ValueError(f"{path}: shape4 fallback requested but compact has no shape4 field")
                         local_shape = np.asarray(z["shape4"], dtype=np.float32)[rows].reshape(-1, 4)
                         point_local, meta_local = build_point_features_unique(local_shape, include_id_features=bool(include_id_features))
                         arr = point_local[:, target_ips, :].astype(np.float32)
@@ -374,8 +438,20 @@ def load_point_features_from_compacts(
                     arr = np.concatenate(fields, axis=-1).astype(np.float32)
                     used = {"compact": str(path), "mode": "raw_fields", "keys": used_keys, "feature_dim": int(arr.shape[-1])}
 
+            ip_key_arr = None
+            ip_key = _find_key(z, IP_KEY_CANDIDATES)
+            if ip_key is not None:
+                ip_key_arr = _slice_ip_keys(z[ip_key], rows=rows, target_ips=target_ips, n_total=n_total, source_key=ip_key)
+                ip_key_chunks.append(ip_key_arr)
+                used["ip_key"] = ip_key
+
             if include_id_features and not (feature_key is None and used.get("mode") == "shape4_generated_fallback"):
-                ids, id_names = _id_features(target_ips, arr.shape[0])
+                if ip_key_arr is not None:
+                    ids, id_names = _id_features_from_ip_keys(ip_key_arr)
+                    used["id_feature_source"] = "ip_keys"
+                else:
+                    ids, id_names = _id_features(target_ips, arr.shape[0])
+                    used["id_feature_source"] = "standard_target_ips"
                 arr = np.concatenate([arr, ids], axis=-1).astype(np.float32)
                 cur_names = list(cur_names) + id_names
                 used["appended_id_features"] = True
@@ -414,6 +490,13 @@ def load_point_features_from_compacts(
     point = np.concatenate(chunks, axis=0).astype(np.float32)
     if point.shape[0] != shape4.shape[0]:
         raise ValueError(f"point feature frame count {point.shape[0]} does not match loaded frames {shape4.shape[0]}")
+    ip_keys: np.ndarray | None = None
+    if ip_key_chunks:
+        if len(ip_key_chunks) != len(chunks):
+            raise ValueError("ip_keys were present for only some point-feature chunks; provide them for every compact or none")
+        ip_keys = np.concatenate(ip_key_chunks, axis=0)
+        if ip_keys.shape[:2] != point.shape[:2]:
+            raise ValueError(f"ip_keys {ip_keys.shape[:2]} do not align with point features {point.shape[:2]}")
     modes = {str(item.get("mode", "")) for item in sources_used}
     if modes == {"shape4_generated_fallback"}:
         point_feature_source = "shape4_generated_fallback"
@@ -427,6 +510,11 @@ def load_point_features_from_compacts(
         "feature_dim": int(point.shape[-1]),
         "point_count": int(point.shape[1]),
         "target_ips": target_ips,
+        "point_feature_axis": "point_features[:, k, :] aligns with LE/B[:, k, ...] after target_ips selection",
+        "point_feature_target_ips": [int(v) for v in target_ips],
+        "point_feature_alignment": "data point_features were sliced from the same compact rows and target_ips order as LE/B labels",
+        "point_feature_ip_keys": None if ip_keys is None else ip_keys.tolist(),
+        "point_feature_ip_keys_source": "compact" if ip_keys is not None else "not_provided",
         "sources_used": sources_used,
         "missing_point_data_compacts": missing,
         "allow_shape4_fallback": bool(allow_shape4_fallback),

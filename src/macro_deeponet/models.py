@@ -328,6 +328,132 @@ class FELinearResidualDeepONet(nn.Module):
         return linear + self.residual_scale * residual + self.bias.view(1, 1, self.strain_dim)
 
 
+class QueryFELinearResidualDeepONet(nn.Module):
+    """FE-linear-residual DeepONet that supports arbitrary query point counts.
+
+    This keeps the current model's useful structure,
+
+        LE_norm = B_base_norm(point_features) @ q48_norm + DeepONet_residual,
+
+    but removes the fixed ``[128,6,48]`` per-IP parameter table.  The linear
+    baseline is a global q-linear prior plus a point-conditioned correction, so
+    the same model can be evaluated on any ``P`` query points whose point
+    features follow the training contract.
+    """
+
+    supports_dynamic_points = True
+
+    def __init__(
+        self,
+        *,
+        input_dim: int,
+        point_dim: int,
+        q_start: int,
+        q_dim: int = 48,
+        ip_count: int = 0,
+        strain_dim: int = 6,
+        basis_dim: int = 96,
+        hidden_dim: int = 384,
+        branch_depth: int = 5,
+        trunk_depth: int = 5,
+        activation: str = "tanh",
+        skip_init: torch.Tensor | None = None,
+        train_skip: bool = True,
+        residual_scale: float = 1.0,
+        baseline_scale: float = 1.0,
+        train_point_baseline: bool = True,
+        zero_init_residual: bool = True,
+    ) -> None:
+        super().__init__()
+        if input_dim <= 0:
+            raise ValueError("input_dim must be positive")
+        if point_dim <= 0:
+            raise ValueError("point_dim must be positive")
+        if int(q_start) < 0 or int(q_dim) <= 0 or int(q_start) + int(q_dim) > int(input_dim):
+            raise ValueError("q_start/q_dim must select a valid q slice inside the branch input")
+        self.input_dim = int(input_dim)
+        self.point_dim = int(point_dim)
+        self.q_start = int(q_start)
+        self.q_dim = int(q_dim)
+        self.ip_count = int(ip_count)
+        self.strain_dim = int(strain_dim)
+        self.basis_dim = int(basis_dim)
+        self.residual_scale = float(residual_scale)
+        self.baseline_scale = float(baseline_scale)
+        self.train_point_baseline = bool(train_point_baseline)
+        self.zero_init_residual = bool(zero_init_residual)
+
+        act = activation_module(activation)
+        coeff_dim = self.strain_dim * self.basis_dim
+        self.branch = MLP(
+            self.input_dim,
+            coeff_dim,
+            hidden_dim=hidden_dim,
+            depth=branch_depth,
+            activation=act,
+            zero_last=self.zero_init_residual,
+        )
+        self.trunk = MLP(self.point_dim, coeff_dim, hidden_dim=hidden_dim, depth=trunk_depth, activation=act)
+        self.point_b_net = MLP(
+            self.point_dim,
+            self.strain_dim * self.q_dim,
+            hidden_dim=hidden_dim,
+            depth=trunk_depth,
+            activation=act,
+            zero_last=True,
+        )
+        for p in self.point_b_net.parameters():
+            p.requires_grad_(self.train_point_baseline)
+        self.bias = nn.Parameter(torch.zeros(self.strain_dim))
+
+        if skip_init is None:
+            global_static = torch.zeros(self.strain_dim, self.q_dim, dtype=torch.float32)
+        else:
+            static = torch.as_tensor(skip_init, dtype=torch.float32)
+            if static.shape == (self.strain_dim, self.q_dim):
+                global_static = static
+            elif static.ndim == 3 and static.shape[-2:] == (self.strain_dim, self.q_dim):
+                global_static = static.mean(dim=0)
+            else:
+                raise ValueError(
+                    "skip_init for QueryFELinearResidualDeepONet must have shape "
+                    f"[{self.strain_dim},{self.q_dim}] or [P,{self.strain_dim},{self.q_dim}]"
+                )
+        self.global_b_norm = nn.Parameter(global_static, requires_grad=bool(train_skip))
+
+    def _linear_b_norm(self, point_norm: torch.Tensor) -> torch.Tensor:
+        if point_norm.ndim != 3:
+            raise ValueError("point_norm must have shape [B,P,F]")
+        batch, point_count, _ = point_norm.shape
+        delta = self.point_b_net(point_norm.reshape(-1, self.point_dim)).view(
+            batch, point_count, self.strain_dim, self.q_dim
+        )
+        return self.global_b_norm.view(1, 1, self.strain_dim, self.q_dim) + self.baseline_scale * delta
+
+    def forward(self, x_norm: torch.Tensor, point_norm: torch.Tensor) -> torch.Tensor:
+        if x_norm.ndim != 2:
+            raise ValueError(f"x_norm must have shape [B,{self.input_dim}]")
+        if point_norm.ndim != 3:
+            raise ValueError("point_norm must have shape [B,P,F]")
+        if x_norm.shape[-1] != self.input_dim:
+            raise ValueError(f"x_norm last dimension must be {self.input_dim}")
+        if point_norm.shape[-1] != self.point_dim:
+            raise ValueError(f"point_norm last dimension must be {self.point_dim}")
+        if point_norm.shape[0] != x_norm.shape[0]:
+            raise ValueError("x_norm and point_norm batch dimensions must match")
+
+        qn = x_norm[:, self.q_start : self.q_start + self.q_dim]
+        b_base = self._linear_b_norm(point_norm)
+        linear = torch.einsum("bpaj,bj->bpa", b_base, qn)
+        b = self.branch(x_norm).view(-1, self.strain_dim, self.basis_dim)
+        point_count = int(point_norm.shape[1])
+        t = self.trunk(point_norm.reshape(-1, self.point_dim)).view(
+            x_norm.shape[0], point_count, self.strain_dim, self.basis_dim
+        )
+        residual = torch.einsum("bak,bpak->bpa", b, t) / (self.basis_dim**0.5)
+        return linear + self.residual_scale * residual + self.bias.view(1, 1, self.strain_dim)
+
+
 class NOEMStyleMIONet(nn.Module):
     """NOEM/MIONet-style TRUE176 operator model.
 

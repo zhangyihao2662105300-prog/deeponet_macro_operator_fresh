@@ -77,6 +77,69 @@ def cos_np(pred: np.ndarray, true: np.ndarray) -> float:
     return float(np.dot(p, t) / den) if den > 1.0e-300 else float("nan")
 
 
+def random_direction_metrics(
+    pred: np.ndarray,
+    true: np.ndarray,
+    *,
+    direction_count: int = 16,
+    seed: int = 20260620,
+) -> dict[str, float]:
+    pred_arr = np.asarray(pred, dtype=np.float64)
+    true_arr = np.asarray(true, dtype=np.float64)
+    if pred_arr.size == 0 or pred_arr.shape[-1] == 0 or int(direction_count) <= 0:
+        return {}
+    rng = np.random.default_rng(int(seed))
+    dirs = rng.normal(size=(pred_arr.shape[0], int(direction_count), pred_arr.shape[-1]))
+    dirs /= np.maximum(np.linalg.norm(dirs, axis=-1, keepdims=True), 1.0e-12)
+    pred_action = np.einsum("bpaj,bdj->bpda", pred_arr, dirs)
+    true_action = np.einsum("bpaj,bdj->bpda", true_arr, dirs)
+    return {
+        "rand_dir_B_rel": rel_np(pred_action, true_action),
+        "rand_dir_B_cos": cos_np(pred_action, true_action),
+    }
+
+
+def physical_b_metrics(
+    b_pred: np.ndarray,
+    b_true: np.ndarray,
+    columns: list[int],
+    *,
+    b_global_rms: float | None,
+    rel_eps_scale: float,
+) -> dict[str, Any]:
+    pred = np.asarray(b_pred, dtype=np.float64)
+    true = np.asarray(b_true, dtype=np.float64)
+    if pred.size == 0:
+        return {}
+    err = pred - true
+    err_rms = float(np.sqrt(np.mean(err**2)))
+    target_rms = float(np.sqrt(np.mean(true**2)))
+    train_rms = max(float(target_rms if b_global_rms is None else b_global_rms), 1.0e-30)
+    eps = max(float(rel_eps_scale) * train_rms, 1.0e-30)
+    rel_eps_by_col = np.sqrt(np.mean((err / (np.abs(true) + eps)) ** 2, axis=(0, 1, 2)))
+    out: dict[str, Any] = {
+        "AD_B_error_rms": err_rms,
+        "AD_B_target_rms": target_rms,
+        "AD_B_abs_rel_train_rms": err_rms / train_rms,
+        "AD_B_rel_eps_rms": float(np.sqrt(np.mean((err / (np.abs(true) + eps)) ** 2))),
+        "AD_B_rel_eps": {"eps": eps, "eps_scale": float(rel_eps_scale)},
+    }
+    if rel_eps_by_col.size:
+        worst = np.argsort(-rel_eps_by_col)[:5]
+        out.update(
+            {
+                "AD_B_col_rel_eps_median": float(np.median(rel_eps_by_col)),
+                "AD_B_col_rel_eps_p95": float(np.quantile(rel_eps_by_col, 0.95)),
+                "AD_B_col_rel_eps_max": float(np.max(rel_eps_by_col)),
+                "AD_B_worst_eps_columns": [
+                    {"column": int(columns[int(i)]), "rel_eps": float(rel_eps_by_col[int(i)])}
+                    for i in worst
+                ],
+            }
+        )
+    return out
+
+
 def distributed_context(args: argparse.Namespace) -> dict[str, Any]:
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     rank = int(os.environ.get("RANK", "0"))
@@ -178,9 +241,39 @@ def sample_columns(columns: list[int], count: int, rng: np.random.Generator) -> 
     return [int(v) for v in picked.tolist()]
 
 
+def _le_std_scale_torch(le_std: torch.Tensor, point_count: int) -> torch.Tensor:
+    vals = le_std
+    if vals.ndim == 1:
+        vals = vals.reshape(1, 1, -1)
+    elif vals.ndim == 2:
+        vals = vals.reshape(1, vals.shape[0], vals.shape[1])
+    elif vals.ndim != 3:
+        raise ValueError(f"le_std must have shape [6], [P,6], or [1,P,6], got {tuple(vals.shape)}")
+    if int(vals.shape[-1]) != 6:
+        raise ValueError(f"le_std last dimension must be 6, got {tuple(vals.shape)}")
+    if int(vals.shape[1]) not in {1, int(point_count)}:
+        raise ValueError(f"le_std point dimension {vals.shape[1]} cannot broadcast to point count {point_count}")
+    return torch.clamp(vals, min=1.0e-12).unsqueeze(-1)
+
+
+def _le_std_scale_numpy(le_std: np.ndarray, point_count: int) -> np.ndarray:
+    vals = np.asarray(le_std, dtype=np.float32)
+    if vals.ndim == 1:
+        vals = vals.reshape(1, 1, -1)
+    elif vals.ndim == 2:
+        vals = vals.reshape(1, vals.shape[0], vals.shape[1])
+    elif vals.ndim != 3:
+        raise ValueError(f"le_std must have shape [6], [P,6], or [1,P,6], got {vals.shape}")
+    if int(vals.shape[-1]) != 6:
+        raise ValueError(f"le_std last dimension must be 6, got {vals.shape}")
+    if int(vals.shape[1]) not in {1, int(point_count)}:
+        raise ValueError(f"le_std point dimension {vals.shape[1]} cannot broadcast to point count {point_count}")
+    return np.maximum(vals, np.asarray(1.0e-12, dtype=np.float32))[:, :, :, None]
+
+
 def j_norm_to_b_phys(j_norm: torch.Tensor, le_std: torch.Tensor, q_std_cols: torch.Tensor) -> torch.Tensor:
     q_scale = torch.clamp(q_std_cols, min=1.0e-12).reshape(1, 1, 1, -1)
-    le_scale = torch.clamp(le_std, min=1.0e-12).reshape(1, j_norm.shape[1], 6, 1)
+    le_scale = _le_std_scale_torch(le_std, int(j_norm.shape[1]))
     return j_norm * le_scale / q_scale
 
 
@@ -232,6 +325,10 @@ def evaluate(
     columns: list[int],
     jacobian_method: str,
     prefix: str,
+    *,
+    seed: int = 20260620,
+    b_global_rms: float | None = None,
+    rel_eps_scale: float = 0.02,
 ) -> dict[str, Any]:
     base = unwrap_model(model)
     idx = np.asarray(indices, dtype=np.int64)
@@ -255,7 +352,7 @@ def evaluate(
             jn = ad_jacobian(base, xb, pb, columns, create_graph=False, method=jacobian_method)
         jn_np = jn.detach().cpu().numpy().astype(np.float64)
         jn_rows.append(jn_np)
-        b_phys = jn_np * le_std.reshape(1, le_std.shape[1], 6, 1) / q_std_cols.reshape(1, 1, 1, -1)
+        b_phys = jn_np * _le_std_scale_numpy(le_std, int(jn_np.shape[1])) / q_std_cols.reshape(1, 1, 1, -1)
         bp_rows.append(b_phys)
     le_pred = np.concatenate(le_rows, axis=0).astype(np.float64)
     j_pred = np.concatenate(jn_rows, axis=0).astype(np.float64)
@@ -263,7 +360,7 @@ def evaluate(
     le_true = le_raw[idx].astype(np.float64, copy=False)
     j_true = j_norm_target[idx][:, :, :, columns].astype(np.float64, copy=False)
     b_true = b_raw[idx][:, :, :, columns].astype(np.float64, copy=False)
-    return {
+    out: dict[str, Any] = {
         f"{prefix}_frames": int(idx.size),
         f"{prefix}_LE_rel": rel_np(le_pred, le_true),
         f"{prefix}_LE_cos": cos_np(le_pred, le_true),
@@ -272,6 +369,54 @@ def evaluate(
         f"{prefix}_AD_B_rel": rel_np(b_pred, b_true),
         f"{prefix}_AD_B_cos": cos_np(b_pred, b_true),
     }
+    if len(columns) > 0:
+        col_rel = np.asarray(
+            [rel_np(b_pred[:, :, :, local], b_true[:, :, :, local]) for local, _col in enumerate(columns)],
+            dtype=np.float64,
+        )
+        worst = np.argsort(-col_rel)[:5]
+        out.update(
+            {
+                f"{prefix}_AD_B_col_rel_median": float(np.median(col_rel)),
+                f"{prefix}_AD_B_col_rel_p95": float(np.quantile(col_rel, 0.95)),
+                f"{prefix}_AD_B_col_rel_max": float(np.max(col_rel)),
+                f"{prefix}_AD_B_worst_columns": [
+                    {"column": int(columns[int(i)]), "rel": float(col_rel[int(i)])}
+                    for i in worst
+                ],
+            }
+        )
+    ip_metrics = []
+    for ip_local in range(le_true.shape[1]):
+        ip_metrics.append(
+            {
+                "ip_local": int(ip_local),
+                "LE_rel": rel_np(le_pred[:, ip_local, :], le_true[:, ip_local, :]),
+                "AD_B_rel": rel_np(b_pred[:, ip_local, :, :], b_true[:, ip_local, :, :]),
+                "AD_B_cos": cos_np(b_pred[:, ip_local, :, :], b_true[:, ip_local, :, :]),
+            }
+        )
+    out[f"{prefix}_ip_metrics"] = ip_metrics
+    if ip_metrics:
+        worst_ad = max(ip_metrics, key=lambda item: float(item["AD_B_rel"]))
+        worst_le = max(ip_metrics, key=lambda item: float(item["LE_rel"]))
+        out[f"{prefix}_worst_ip_AD_B_rel"] = dict(worst_ad)
+        out[f"{prefix}_worst_ip_LE_rel"] = dict(worst_le)
+        out[f"{prefix}_AD_B_ip_rel_max"] = float(worst_ad["AD_B_rel"])
+        out[f"{prefix}_LE_ip_rel_max"] = float(worst_le["LE_rel"])
+    phys = physical_b_metrics(
+        b_pred,
+        b_true,
+        columns,
+        b_global_rms=b_global_rms,
+        rel_eps_scale=float(rel_eps_scale),
+    )
+    out.update({f"{prefix}_{key}": value for key, value in phys.items()})
+    rand_norm = random_direction_metrics(j_pred, j_true, direction_count=16, seed=int(seed))
+    out.update({f"{prefix}_{key}": value for key, value in rand_norm.items()})
+    rand_phys = random_direction_metrics(b_pred, b_true, direction_count=16, seed=int(seed) + 17)
+    out.update({f"{prefix}_phys_{key}": value for key, value in rand_phys.items()})
+    return out
 
 
 def write_loss_history(out_dir: Path, history: list[dict[str, Any]]) -> None:
@@ -283,7 +428,15 @@ def write_loss_history(out_dir: Path, history: list[dict[str, Any]]) -> None:
         "baseline_j_loss_objective", "baseline_j_loss_norm_mse",
         "baseline_j_loss_abs_normed_mse", "baseline_j_loss_rel_eps_mse",
         "baseline_j_loss_action_mse",
-        "train_LE_rel", "train_AD_B_rel", "train_AD_B_norm_rel", "val_LE_rel", "val_AD_B_rel", "score",
+        "train_LE_rel", "train_AD_B_rel", "train_AD_B_cos", "train_AD_B_norm_rel",
+        "train_AD_B_abs_rel_train_rms", "train_AD_B_rel_eps_rms",
+        "train_rand_dir_B_rel", "train_phys_rand_dir_B_rel",
+        "train_LE_ip_rel_max", "train_AD_B_ip_rel_max",
+        "val_LE_rel", "val_AD_B_rel", "val_AD_B_cos", "val_AD_B_norm_rel",
+        "val_AD_B_abs_rel_train_rms", "val_AD_B_rel_eps_rms",
+        "val_rand_dir_B_rel", "val_phys_rand_dir_B_rel",
+        "val_LE_ip_rel_max", "val_AD_B_ip_rel_max",
+        "score",
     ]
     with (out_dir / "loss_history.csv").open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=keys)
@@ -501,8 +654,46 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         do_eval = epoch == 1 or epoch % int(args.eval_every) == 0 or epoch == int(args.epochs)
         if do_eval and is_main:
             eval_model = unwrap_model(model)
-            row.update(evaluate(eval_model, x_norm, point_norm, le_raw, b_raw, j_norm_target, train_eval_idx, norms, device, int(args.eval_batch_size), eval_columns, str(args.jacobian_method), "train"))
-            row.update(evaluate(eval_model, x_norm, point_norm, le_raw, b_raw, j_norm_target, val_eval_idx, norms, device, int(args.eval_batch_size), eval_columns, str(args.jacobian_method), "val"))
+            row.update(
+                evaluate(
+                    eval_model,
+                    x_norm,
+                    point_norm,
+                    le_raw,
+                    b_raw,
+                    j_norm_target,
+                    train_eval_idx,
+                    norms,
+                    device,
+                    int(args.eval_batch_size),
+                    eval_columns,
+                    str(args.jacobian_method),
+                    "train",
+                    seed=int(args.seed) + 101 * epoch,
+                    b_global_rms=b_global_rms,
+                    rel_eps_scale=float(args.physical_j_rel_eps_scale),
+                )
+            )
+            row.update(
+                evaluate(
+                    eval_model,
+                    x_norm,
+                    point_norm,
+                    le_raw,
+                    b_raw,
+                    j_norm_target,
+                    val_eval_idx,
+                    norms,
+                    device,
+                    int(args.eval_batch_size),
+                    eval_columns,
+                    str(args.jacobian_method),
+                    "val",
+                    seed=int(args.seed) + 101 * epoch + 1,
+                    b_global_rms=b_global_rms,
+                    rel_eps_scale=float(args.physical_j_rel_eps_scale),
+                )
+            )
             row["score"] = float(row.get("val_LE_rel", row["loss"])) + float(row.get("val_AD_B_rel", 0.0))
             if float(row["score"]) < best_score:
                 best_score = float(row["score"])

@@ -34,6 +34,18 @@ from macro_deeponet.point_features import load_point_features_from_compacts
 from macro_deeponet.true176_data import parse_target_ips
 
 
+def json_default(obj):
+    if isinstance(obj, Path):
+        return str(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    return str(obj)
+
+
 def read_list(path: Path) -> list[str]:
     with path.open("r", encoding="utf-8") as f:
         return [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
@@ -44,13 +56,39 @@ def write_list(path: Path, rows: list[str]) -> None:
     path.write_text("\n".join(rows) + "\n", encoding="utf-8")
 
 
-def copy_with_point_features(src: Path, dst: Path, *, point_features: np.ndarray, feature_names: list[str], source_text: str) -> None:
+def copy_with_point_features(
+    src: Path,
+    dst: Path,
+    *,
+    point_features: np.ndarray,
+    feature_names: list[str],
+    source_text: str,
+    meta: dict,
+) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     with np.load(str(src), allow_pickle=True) as z:
-        payload = {key: z[key] for key in z.files if key not in {"point_features", "point_feature_names", "point_feature_source"}}
+        payload = {
+            key: z[key]
+            for key in z.files
+            if key
+            not in {
+                "point_features",
+                "point_feature_names",
+                "point_feature_source",
+                "point_feature_target_ips",
+                "point_feature_ip_keys",
+                "point_feature_alignment",
+                "point_feature_axis",
+            }
+        }
     payload["point_features"] = np.asarray(point_features, dtype=np.float32)
     payload["point_feature_names"] = np.asarray(feature_names, dtype=object)
     payload["point_feature_source"] = np.asarray(source_text, dtype=object)
+    payload["point_feature_target_ips"] = np.asarray(meta.get("point_feature_target_ips", list(range(point_features.shape[1]))), dtype=np.int64)
+    if meta.get("point_feature_ip_keys") is not None:
+        payload["point_feature_ip_keys"] = np.asarray(meta["point_feature_ip_keys"])
+    payload["point_feature_alignment"] = np.asarray(str(meta.get("point_feature_alignment", "")), dtype=object)
+    payload["point_feature_axis"] = np.asarray(str(meta.get("point_feature_axis", "")), dtype=object)
     np.savez_compressed(str(dst), **payload)
 
 
@@ -105,15 +143,16 @@ def main() -> None:
             point_features=point,
             feature_names=list(meta.get("feature_names", [f"point_feature_{k}" for k in range(point.shape[-1])])),
             source_text=str(meta.get("point_feature_source", "data_generic")),
+            meta=meta,
         )
         out_paths.append(str(dst))
         reports.append({"src": str(src), "dst": str(dst), "frames": n, "point_shape": list(point.shape), "meta": meta})
-        print(json.dumps(reports[-1], ensure_ascii=False, sort_keys=True))
+        print(json.dumps(reports[-1], ensure_ascii=False, sort_keys=True, default=json_default))
 
     out_list = out_root / args.out_list_name
     write_list(out_list, out_paths)
     (out_root / "point_feature_sync_report.json").write_text(
-        json.dumps({"out_list": str(out_list), "compacts": reports}, indent=2, ensure_ascii=False),
+        json.dumps({"out_list": str(out_list), "compacts": reports}, indent=2, ensure_ascii=False, default=json_default),
         encoding="utf-8",
     )
     print(f"wrote {out_list}")

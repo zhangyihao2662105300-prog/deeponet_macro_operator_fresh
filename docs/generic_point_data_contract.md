@@ -10,9 +10,12 @@ The safe contract is:
 Branch input:
   q48_raw: [N, 48]
   X_keep:  [N, 16, 3] or [16, 3]
+  X_macro: [N, 50, 3] or [50, 3]     # optional audit/ablation geometry
 
 Trunk input, stored in compact data:
   point_features: [N, 128, F]
+  or raw point fields:
+    ip_keys, ip_xi, ip_xyz, ip_J, ip_invJ, ip_detJ, ip_frame
 
 Labels:
   LE128_base:       [N, 128, 6]
@@ -28,6 +31,64 @@ B_LE128_forward[n, i, :, :]
 ```
 
 must describe the same physical integration point.
+
+`shape4` is metadata in the complete Abaqus schema, not a required model input.
+When `q48_raw`, explicit branch geometry, and explicit point fields are present,
+the generic loader can read a compact with no `shape4` field.  This is the
+preferred direction for arbitrary Abaqus geometry.
+
+## Complete Abaqus Compact
+
+For new data, the Abaqus-side compact should fully cover the operator input and
+output contract:
+
+```text
+schema_version:      scalar string
+q48_raw:             [N,48]
+X_keep:              [N,16,3] or [16,3]
+X_macro:             [N,50,3] or [50,3]
+LE128_base:          [N,128,6]
+B_LE128_forward:     [N,128,6,48]       # required for Sobolev/B training
+
+ip_keys:             [128,3] or [N,128,3]
+ip_xi:               [128,3] or [N,128,3]
+ip_xyz:              [128,3] or [N,128,3]
+ip_J:                [128,3,3] or [N,128,3,3]
+ip_invJ:             [128,3,3] or [N,128,3,3]
+ip_detJ:             [128] or [N,128]
+ip_frame:            [128,3,3] or [N,128,3,3]
+point_features:      [128,F] or [N,128,F]
+point_feature_names: [F]
+```
+
+The repository includes an Abaqus-Python exporter for this schema:
+
+```bash
+abaqus python scripts/export_abaqus_true176_complete_compact.py \
+  --odb /path/to/job.odb \
+  --out /path/to/job_complete_compact.npz \
+  --merge-compact /path/to/old_fd_B_compact.npz \
+  --require-b
+```
+
+The exporter obtains directly from ODB:
+
+```text
+U -> q48_raw
+COORD@INTEGRATION_POINT -> Abaqus integration-point coordinates for audit
+LE@INTEGRATION_POINT -> LE128_base
+IVOL@INTEGRATION_POINT -> volume/Jacobian audit
+elementLabel + integrationPoint -> ip_keys
+```
+
+It derives from the ODB mesh:
+
+```text
+ip_xi, ip_xyz, ip_J, ip_invJ, ip_detJ, ip_frame
+```
+
+On the one-sample TRUE176 CSS8 ODB probe, the derived `ip_xyz` matched Abaqus
+`COORD` to `4.77e-7`, and `ip_detJ` matched `IVOL` to `7.64e-10`.
 
 ## Length Scale Contract
 

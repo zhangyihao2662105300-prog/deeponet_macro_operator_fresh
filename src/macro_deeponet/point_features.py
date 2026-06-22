@@ -230,6 +230,33 @@ def _feature_name_mismatch_message(path: Path, expected: list[str], got: list[st
     )
 
 
+def _ip_keys_meta(ip_keys: np.ndarray | None) -> dict[str, Any]:
+    if ip_keys is None:
+        return {
+            "point_feature_ip_keys": None,
+            "point_feature_ip_keys_source": "not_provided",
+            "point_feature_ip_keys_frame_count": 0,
+            "point_feature_ip_keys_repeated_for_frames": False,
+        }
+    keys = np.asarray(ip_keys, dtype=np.int64)
+    frame_count = int(keys.shape[0]) if keys.ndim >= 1 else 0
+    if keys.ndim == 3 and frame_count > 0 and np.all(keys == keys[0:1]):
+        return {
+            "point_feature_ip_keys": keys[0].tolist(),
+            "point_feature_ip_keys_source": "compact",
+            "point_feature_ip_keys_shape": list(keys[0].shape),
+            "point_feature_ip_keys_frame_count": frame_count,
+            "point_feature_ip_keys_repeated_for_frames": True,
+        }
+    return {
+        "point_feature_ip_keys": keys.tolist(),
+        "point_feature_ip_keys_source": "compact",
+        "point_feature_ip_keys_shape": list(keys.shape),
+        "point_feature_ip_keys_frame_count": frame_count,
+        "point_feature_ip_keys_repeated_for_frames": False,
+    }
+
+
 def _is_dimensionless_point_feature_name(name: str) -> bool:
     """Return True for point features that do not carry a physical length unit."""
 
@@ -564,10 +591,9 @@ def load_point_features_from_compacts(
         "point_feature_axis": "point_features[:, k, :] aligns with LE/B[:, k, ...] after target_ips selection",
         "point_feature_target_ips": [int(v) for v in target_ips],
         "point_feature_alignment": "data point_features were sliced from the same compact rows and target_ips order as LE/B labels",
-        "point_feature_ip_keys": None if ip_keys is None else ip_keys.tolist(),
-        "point_feature_ip_keys_source": "compact" if ip_keys is not None else "not_provided",
         "sources_used": sources_used,
         "missing_point_data_compacts": missing,
         "allow_shape4_fallback": bool(allow_shape4_fallback),
     }
+    meta.update(_ip_keys_meta(ip_keys))
     return point, meta

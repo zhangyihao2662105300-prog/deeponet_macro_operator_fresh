@@ -666,10 +666,11 @@ def test_generic_point_feature_loader_carries_ip_keys() -> None:
         assert points.shape == (n, len(target_ips), 3)
         assert meta["point_feature_target_ips"] == target_ips
         assert meta["point_feature_ip_keys_source"] == "compact"
+        assert meta["point_feature_ip_keys_repeated_for_frames"] is True
+        assert meta["point_feature_ip_keys_frame_count"] == n
         got = np.asarray(meta["point_feature_ip_keys"], dtype=np.int64)
-        assert got.shape == (n, len(target_ips), 3)
-        assert np.array_equal(got[0], ip_keys[target_ips])
-        assert np.array_equal(got[1], ip_keys[target_ips])
+        assert got.shape == (len(target_ips), 3)
+        assert np.array_equal(got, ip_keys[target_ips])
 
 
 def test_generic_point_feature_loader_uses_standard_ip_keys_for_spatial_id_features() -> None:
@@ -749,6 +750,7 @@ def test_generic_complete_compact_can_omit_shape4_when_geometry_is_explicit() ->
             ],
             axis=1,
         )
+        ip_keys_by_frame = np.stack([ip_keys, ip_keys + np.asarray([1000, 0, 0], dtype=np.int64)], axis=0)
         np.savez(
             path,
             q48_raw=np.zeros((n, 48), dtype=np.float32),
@@ -757,7 +759,7 @@ def test_generic_complete_compact_can_omit_shape4_when_geometry_is_explicit() ->
             X_keep=np.zeros((16, 3), dtype=np.float32),
             ip_xi=ip_xi,
             ip_xyz=ip_xyz,
-            ip_keys=ip_keys,
+            ip_keys=ip_keys_by_frame,
         )
         data = load_compacts([str(path)], target_ips=[0, 127])
         assert data.shape4.shape == (n, 4)
@@ -776,6 +778,7 @@ def test_generic_complete_compact_can_omit_shape4_when_geometry_is_explicit() ->
             allow_shape4_fallback=False,
         )
         assert points.shape == (n, 2, 6)
+        assert meta["point_feature_ip_keys_repeated_for_frames"] is False
         assert np.asarray(meta["point_feature_ip_keys"]).shape == (n, 2, 3)
 
 

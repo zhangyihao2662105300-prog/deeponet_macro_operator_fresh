@@ -140,3 +140,46 @@ Known gaps:
 
 - The old fixed-128-IP trainer still calls `split_indices()` for compatibility;
   formal query-point/Abaqus training should keep using `split_indices_with_meta()`.
+
+## v1.1 follow-up - 2026-06-22 - One-case complete compact smoke audit
+
+Purpose:
+
+- Exercise the hard guards on a real Abaqus ODB plus matching Sobolev B compact
+  before attempting multi-case query-point training.
+
+Included:
+
+- Exporter `--shape4` and `--shape4-json` now accept a single 4-vector and
+  broadcast it across all exported frames.
+- Point-feature metadata compresses repeated per-frame `ip_keys` to one `[P,3]`
+  table with an explicit repeat marker, avoiding huge config/checkpoint JSON
+  when all frames share the same integration-point order.
+
+Audit result:
+
+- Generated one training-ready complete compact from
+  `sample_894100.../base/t176_s4_plus_894100_base.odb` with `--strain-field E`
+  and merged `css8_shape4_nonzero_sample_894100.npz`.
+- Merge/audit guards passed:
+  `merge_q48_max_abs_diff=0`,
+  `merge_LE128_base_max_abs_diff=0`,
+  `merge_ip_keys_match=true`,
+  `audit_ref_ip_xyz_vs_abaqus_coord_max_abs=4.76837158203125e-07`,
+  `audit_detJ_vs_IVOL_max_abs=7.639755494892597e-10`.
+- Formal `case` split correctly failed because only one case/geometry was
+  available.
+- A 3-epoch `overlap-debug` trainer smoke ran on 8 target IPs and recorded
+  `validation_is_overlapping=true`, worst-IP metrics, and random-direction B
+  metrics.
+
+Validation:
+
+- `py -3 -m pytest tests/smoke_test.py -q`
+- `py -3 -m compileall src/macro_deeponet scripts`
+
+Known gaps:
+
+- This is not a formal validation run. It uses one case and `overlap-debug`;
+  next training audit still needs at least two real training-ready complete
+  compacts/cases for case-level or geometry-level split.

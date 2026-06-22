@@ -262,7 +262,7 @@ def load_shape4_arg(text: str) -> np.ndarray | None:
     values = [float(v) for v in raw.replace(";", ",").split(",") if v.strip()]
     if len(values) != 4:
         raise ValueError("--shape4 must contain exactly four comma-separated numbers")
-    return np.asarray(values, dtype=np.float32).reshape(1, 4)
+    return np.asarray(values, dtype=np.float32).reshape(4)
 
 
 def load_shape4_json(path_text: str) -> np.ndarray | None:
@@ -273,8 +273,10 @@ def load_shape4_json(path_text: str) -> np.ndarray | None:
     if isinstance(data, dict):
         for key in ("shape4", "shape"):
             if key in data:
-                return np.asarray(data[key], dtype=np.float32).reshape(1, 4)
-    return np.asarray(data, dtype=np.float32).reshape(1, 4)
+                arr = np.asarray(data[key], dtype=np.float32)
+                return arr.reshape(4) if arr.size == 4 else arr.reshape(-1, 4)
+    arr = np.asarray(data, dtype=np.float32)
+    return arr.reshape(4) if arr.size == 4 else arr.reshape(-1, 4)
 
 
 def broadcast_or_match(arr: np.ndarray, n: int, tail: tuple[int, ...], name: str) -> np.ndarray:

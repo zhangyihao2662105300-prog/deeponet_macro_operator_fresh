@@ -691,3 +691,41 @@ Known gaps:
 - A project-specific q48-to-Abaqus boundary-control generator, shape4 values,
   and matching Sobolev B compact generation are still required before any
   case040-case051 compact can enter the formal v1.2 pool.
+
+## v1.2 follow-up - 2026-06-22 - Abaqus boundary bridge requirements
+
+Purpose:
+
+- Resolve the bridge between generated `case040-case051` q48 frame plans and
+  Abaqus boundary-node displacement inputs before running fresh ODB generation.
+
+Included:
+
+- Added `scripts/build_v1_2_abaqus_boundary_inputs.py`.
+- The script applies an explicit bridge contract:
+  `q_boundary96 = T_boundary_96x48 @ q48`.
+- The bridge is read from `boundary_contract_arrays.npz`, which provides
+  `T_boundary_96x48`, `keep_nodes`, and `boundary_nodes`.
+- The script writes per-case `case###_boundary96_frames.csv`,
+  `case###_boundary_nodes.json`, and `case###_abaqus_bc_commands.txt`, plus a
+  summary JSON/CSV under the output directory.
+- Added `docs/query_point_v1_2_abaqus_boundary_bridge_requirements.md` to record
+  the bridge source, node orders, pilot sequence, exporter template, and strict
+  audit template.
+
+Bridge audit:
+
+- Local boundary-contract files contain a fixed `T_boundary_96x48` with
+  `boundary_nodes = [1,2,3,4,5,6,10,11,15,16,20,21,22,23,24,25,26,27,28,29,30,31,35,36,40,41,45,46,47,48,49,50]`.
+- The checked contracts share the same T matrix and node orders.
+- For a representative contract,
+  `q48_frames @ T_boundary_96x48.T` reproduces stored
+  `q_boundary_frames` with `max_abs_diff=0`.
+
+Known gaps:
+
+- The generated Abaqus BC command files are templates only.  A fresh Abaqus
+  base model/input generator, shape4 selection, step/increment convention, field
+  output requests, and matching Sobolev B compact generation are still required.
+- Old TRUE176 `LE/B` values remain scale/provenance hints only and are not used
+  as v1.2 labels.

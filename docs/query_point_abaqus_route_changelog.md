@@ -183,3 +183,36 @@ Known gaps:
 - This is not a formal validation run. It uses one case and `overlap-debug`;
   next training audit still needs at least two real training-ready complete
   compacts/cases for case-level or geometry-level split.
+
+## v1.1 follow-up - 2026-06-22 - Strain-field consistency guard
+
+Purpose:
+
+- Prevent future training batches from silently mixing Abaqus `E` and `LE`
+  labels while the arrays are still named `LE128_base` / `B_LE128_forward` for
+  route compatibility.
+
+Included:
+
+- Complete compact exporter now writes `strain_field`, `B_label_strain_field`,
+  `strain_label_key`, and `B_label_key`.
+- Merge guard rejects explicit `strain_field` or `B_label_strain_field`
+  mismatch between the current ODB export and merged Sobolev B compact, unless
+  `--allow-merge-mismatch` is explicitly used for debug.
+- Compact loader rejects mixed explicit strain fields across multiple compact
+  files and records `strain_meta`.
+- Generic trainer records `strain_meta` in config, checkpoints, and training
+  summaries.
+- Legacy compacts without strain metadata remain loadable as `unknown`, but
+  future training-ready compacts should declare this field explicitly.
+
+Validation:
+
+- `py -3 -m pytest tests/smoke_test.py -q`
+- `py -3 -m compileall src/macro_deeponet scripts`
+
+Known gaps:
+
+- Existing old compacts that lack `strain_field` cannot be retroactively proven
+  to be `E` or `LE`; they remain marked `unknown` and should not be mixed into
+  formal training without audit notes.

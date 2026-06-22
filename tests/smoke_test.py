@@ -851,6 +851,80 @@ def test_exporter_merge_guards_q_le_and_ip_keys() -> None:
             raise AssertionError("merge accepted missing ip_keys in strict mode")
 
 
+def test_exporter_merge_rejects_strain_field_mismatch() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "merge_source.npz"
+        n = 2
+        p = 128
+        ip_keys = np.asarray([[elem, ip, 0] for elem in range(1, 17) for ip in range(1, 9)], dtype=np.int64)
+        payload = {
+            "q48_raw": np.zeros((n, 48), dtype=np.float32),
+            "LE128_base": np.zeros((n, p, 6), dtype=np.float32),
+            "ip_keys": ip_keys,
+            "strain_field": np.asarray("E", dtype=object),
+            "B_label_strain_field": np.asarray("E", dtype=object),
+        }
+        np.savez(
+            path,
+            q48_raw=np.zeros((n, 48), dtype=np.float32),
+            LE128_base=np.zeros((n, p, 6), dtype=np.float32),
+            B_LE128_forward=np.zeros((n, p, 6, 48), dtype=np.float32),
+            ip_keys=ip_keys,
+            strain_field=np.asarray("LE", dtype=object),
+            B_label_strain_field=np.asarray("LE", dtype=object),
+        )
+        try:
+            merge_existing_payload(dict(payload), str(path), require_b=True)
+        except ValueError as exc:
+            assert "strain_field" in str(exc)
+        else:
+            raise AssertionError("merge accepted mismatched strain_field")
+
+        merged = merge_existing_payload(dict(payload), str(path), require_b=True, allow_merge_mismatch=True)
+        assert bool(merged["merge_strain_field_match"]) is False
+
+
+def test_load_compacts_rejects_mixed_strain_fields() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        n = 2
+        p = 128
+        common = dict(
+            shape4=np.zeros((n, 4), dtype=np.float32),
+            q48_raw=np.zeros((n, 48), dtype=np.float32),
+            LE128_base=np.zeros((n, p, 6), dtype=np.float32),
+            B_LE128_forward=np.zeros((n, p, 6, 48), dtype=np.float32),
+        )
+        path_e = tmp_path / "strain_e.npz"
+        path_le = tmp_path / "strain_le.npz"
+        np.savez(path_e, **common, strain_field=np.asarray("E", dtype=object), B_label_strain_field=np.asarray("E", dtype=object))
+        np.savez(path_le, **common, strain_field=np.asarray("LE", dtype=object), B_label_strain_field=np.asarray("LE", dtype=object))
+        try:
+            load_compacts([str(path_e), str(path_le)])
+        except ValueError as exc:
+            assert "mixed compact strain_field" in str(exc)
+        else:
+            raise AssertionError("loader accepted mixed strain fields")
+
+
+def test_load_compacts_keeps_legacy_missing_strain_field_unknown() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "legacy_missing_strain.npz"
+        n = 2
+        p = 128
+        np.savez(
+            path,
+            shape4=np.zeros((n, 4), dtype=np.float32),
+            q48_raw=np.zeros((n, 48), dtype=np.float32),
+            LE128_base=np.zeros((n, p, 6), dtype=np.float32),
+            B_LE128_forward=np.zeros((n, p, 6, 48), dtype=np.float32),
+        )
+        data = load_compacts([str(path)])
+        assert data.strain_field == "unknown"
+        assert data.b_label_strain_field == "unknown"
+        assert data.strain_meta["missing_strain_field_count"] == 1
+
+
 def test_exporter_ip_audit_can_block_bad_geometry() -> None:
     p = 128
     payload = {

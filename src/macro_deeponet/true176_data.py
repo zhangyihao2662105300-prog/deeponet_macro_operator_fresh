@@ -70,6 +70,9 @@ class True176Arrays:
     source_index: np.ndarray
     source_row: np.ndarray
     shape_index: np.ndarray
+    strain_field: str
+    b_label_strain_field: str
+    strain_meta: dict[str, Any]
 
 
 def stats(arr: np.ndarray, axis: tuple[int, ...] | int, floor: float = 1.0e-8) -> tuple[np.ndarray, np.ndarray]:
@@ -203,6 +206,38 @@ def _infer_compact_frame_count(z: np.lib.npyio.NpzFile, compact: Path) -> int:
     raise KeyError(f"{compact}: cannot infer frame count; expected shape4, q48_raw, LE128_base/le, or B_LE128_forward/b")
 
 
+def _compact_scalar_text(z: np.lib.npyio.NpzFile, key: str, default: str = "unknown") -> str:
+    if key not in z.files:
+        return str(default)
+    arr = np.asarray(z[key])
+    if arr.size == 0:
+        return str(default)
+    values: list[str] = []
+    for item in arr.reshape(-1):
+        if isinstance(item, bytes):
+            values.append(item.decode("utf-8"))
+        else:
+            values.append(str(item))
+    unique = sorted({v.strip() for v in values if v.strip()})
+    if len(unique) > 1:
+        raise ValueError(f"{key} must be a scalar or constant metadata field, got values {unique[:5]}")
+    return unique[0] if unique else str(default)
+
+
+def canonical_strain_field(value: Any) -> str:
+    text = str(value).strip()
+    if not text:
+        return "unknown"
+    key = text.upper()
+    if key in {"UNKNOWN", "NONE", "NULL", "NA", "N/A"}:
+        return "unknown"
+    return key
+
+
+def _strain_known(value: str) -> bool:
+    return canonical_strain_field(value) != "unknown"
+
+
 def load_one_compact(
     path: str | Path,
     *,
@@ -244,6 +279,14 @@ def load_one_compact(
         sample_index, frame_number, case_id = sample_meta(n_total, sample_paths)
         le_key = "LE128_base" if "LE128_base" in z.files else "le"
         b_key = "B_LE128_forward" if "B_LE128_forward" in z.files else "b"
+        strain_field = canonical_strain_field(_compact_scalar_text(z, "strain_field", "unknown"))
+        b_label_strain_field = canonical_strain_field(_compact_scalar_text(z, "B_label_strain_field", strain_field))
+        if _strain_known(strain_field) and _strain_known(b_label_strain_field) and strain_field != b_label_strain_field:
+            raise ValueError(
+                f"{compact}: strain_field ({strain_field}) and B_label_strain_field ({b_label_strain_field}) differ"
+            )
+        strain_label_key = _compact_scalar_text(z, "strain_label_key", le_key)
+        b_label_key = _compact_scalar_text(z, "B_label_key", b_key)
         length_scale = np.ones((idx.size, 1), dtype=np.float32)
         length_scale_source = "implicit_H_1"
         for h_key in LENGTH_SCALE_KEYS:
@@ -300,6 +343,10 @@ def load_one_compact(
             "case_id": case_id[idx],
             "source_index": np.full(idx.size, -1, dtype=np.int64),
             "source_row": idx.astype(np.int64),
+            "strain_field": strain_field,
+            "b_label_strain_field": b_label_strain_field,
+            "strain_label_key": strain_label_key,
+            "b_label_key": b_label_key,
         }
 
 
@@ -336,6 +383,28 @@ def load_compacts(
     else:
         raise ValueError("Either every compact must provide X_keep/coords48/keep_node_coords, or none of them should.")
     length_scale_sources = sorted({str(c["length_scale_source"]) for c in chunks})
+    known_strains = sorted({str(c["strain_field"]) for c in chunks if _strain_known(str(c["strain_field"]))})
+    known_b_strains = sorted({str(c["b_label_strain_field"]) for c in chunks if _strain_known(str(c["b_label_strain_field"]))})
+    if len(known_strains) > 1:
+        raise ValueError(f"mixed compact strain_field values are not allowed: {known_strains}")
+    if len(known_b_strains) > 1:
+        raise ValueError(f"mixed compact B_label_strain_field values are not allowed: {known_b_strains}")
+    if known_strains and known_b_strains and known_strains[0] != known_b_strains[0]:
+        raise ValueError(
+            f"compact strain_field ({known_strains[0]}) and B_label_strain_field ({known_b_strains[0]}) differ"
+        )
+    strain_field = known_strains[0] if known_strains else "unknown"
+    b_label_strain_field = known_b_strains[0] if known_b_strains else strain_field
+    strain_meta = {
+        "strain_field": strain_field,
+        "B_label_strain_field": b_label_strain_field,
+        "strain_label_keys": sorted({str(c["strain_label_key"]) for c in chunks}),
+        "B_label_keys": sorted({str(c["b_label_key"]) for c in chunks}),
+        "compact_strain_fields": [str(c["strain_field"]) for c in chunks],
+        "compact_B_label_strain_fields": [str(c["b_label_strain_field"]) for c in chunks],
+        "missing_strain_field_count": int(sum(not _strain_known(str(c["strain_field"])) for c in chunks)),
+        "missing_B_label_strain_field_count": int(sum(not _strain_known(str(c["b_label_strain_field"])) for c in chunks)),
+    }
     _, shape_index = np.unique(shape4, axis=0, return_inverse=True)
     return True176Arrays(
         compact_paths=[str(c["compact_path"]) for c in chunks],
@@ -353,6 +422,9 @@ def load_compacts(
         source_index=np.concatenate([c["source_index"] for c in chunks], axis=0),
         source_row=np.concatenate([c["source_row"] for c in chunks], axis=0),
         shape_index=shape_index.astype(np.int64),
+        strain_field=strain_field,
+        b_label_strain_field=b_label_strain_field,
+        strain_meta=strain_meta,
     )
 
 

@@ -297,6 +297,43 @@ def _enforce_tolerance(name: str, diff: float, tol: float, *, allow_mismatch: bo
         raise ValueError(f"{name} mismatch exceeds tolerance: diff={diff:.9g}, tol={float(tol):.9g}")
 
 
+def _scalar_text(value: Any) -> str:
+    arr = np.asarray(value)
+    if arr.shape == ():
+        item = arr.item()
+    elif arr.size == 1:
+        item = arr.reshape(-1)[0]
+    else:
+        item = arr.reshape(-1)[0]
+    if isinstance(item, bytes):
+        item = item.decode("utf-8")
+    return str(item)
+
+
+def canonical_strain_field(value: Any) -> str:
+    text = _scalar_text(value).strip()
+    if not text:
+        return "unknown"
+    key = text.upper()
+    if key in {"UNKNOWN", "NONE", "NULL", "NA", "N/A"}:
+        return "unknown"
+    return key
+
+
+def _known_strain_field(value: str) -> bool:
+    return canonical_strain_field(value) != "unknown"
+
+
+def _enforce_strain_field_match(name: str, current: str, merged: str, *, source: Path, allow_mismatch: bool) -> bool:
+    cur = canonical_strain_field(current)
+    old = canonical_strain_field(merged)
+    if _known_strain_field(cur) and _known_strain_field(old) and cur != old:
+        if not bool(allow_mismatch):
+            raise ValueError(f"{name} mismatch for {source}: current={cur}, merged={old}")
+        return False
+    return True
+
+
 def _check_ip_keys_match(current: np.ndarray, merged: np.ndarray, *, source: Path) -> None:
     cur = np.asarray(current, dtype=np.int64).reshape(-1, np.asarray(current).shape[-1])
     old = np.asarray(merged, dtype=np.int64)
@@ -329,6 +366,46 @@ def merge_existing_payload(
     p = int(payload["ip_keys"].shape[0])
     with np.load(str(path), allow_pickle=True) as z:
         copied = []
+        current_strain = canonical_strain_field(payload.get("strain_field", "unknown"))
+        current_b_strain = canonical_strain_field(payload.get("B_label_strain_field", current_strain))
+        merged_strain = canonical_strain_field(z["strain_field"]) if "strain_field" in z.files else "unknown"
+        merged_b_strain = (
+            canonical_strain_field(z["B_label_strain_field"]) if "B_label_strain_field" in z.files else merged_strain
+        )
+        strain_match = True
+        strain_match = (
+            _enforce_strain_field_match(
+                "merge strain_field",
+                current_strain,
+                merged_strain,
+                source=path,
+                allow_mismatch=bool(allow_merge_mismatch),
+            )
+            and strain_match
+        )
+        strain_match = (
+            _enforce_strain_field_match(
+                "merge B_label_strain_field",
+                current_b_strain,
+                merged_b_strain,
+                source=path,
+                allow_mismatch=bool(allow_merge_mismatch),
+            )
+            and strain_match
+        )
+        strain_match = (
+            _enforce_strain_field_match(
+                "merge strain_field vs B_label_strain_field",
+                merged_strain,
+                merged_b_strain,
+                source=path,
+                allow_mismatch=bool(allow_merge_mismatch),
+            )
+            and strain_match
+        )
+        payload["merge_strain_field"] = np.asarray(merged_strain, dtype=object)
+        payload["merge_B_label_strain_field"] = np.asarray(merged_b_strain, dtype=object)
+        payload["merge_strain_field_match"] = np.asarray(bool(strain_match))
         for key in z.files:
             if key in payload:
                 continue
@@ -451,6 +528,7 @@ def main() -> None:
         elem_by_label, node_by_label, node_labels, node_xyz = element_and_node_maps(instance)
         del elem_by_label
 
+        strain_field_name = canonical_strain_field(str(args.strain_field))
         first_frame = step.frames[int(selected_frames[0])]
         le0 = tensor_field_by_ip(first_frame, str(args.strain_field), 6)
         keys = sorted(le0.keys())
@@ -509,6 +587,10 @@ def main() -> None:
             "keep_node_labels": np.asarray(keep_labels, dtype=np.int64),
             "macro_node_labels": node_labels.astype(np.int64),
             "LE128_base": le128,
+            "strain_field": np.asarray(strain_field_name, dtype=object),
+            "B_label_strain_field": np.asarray(strain_field_name, dtype=object),
+            "strain_label_key": np.asarray("LE128_base", dtype=object),
+            "B_label_key": np.asarray("B_LE128_forward", dtype=object),
             "ip_keys": ip_keys,
             "ip_xi": np.asarray(geom["ip_xi"], dtype=np.float32),
             "ip_xyz": np.asarray(geom["ip_xyz"], dtype=np.float32),
@@ -567,6 +649,10 @@ def main() -> None:
             "schema_version": SCHEMA_VERSION,
             "frames": n_frame,
             "point_count": int(ip_keys.shape[0]),
+            "strain_field": str(payload.get("strain_field", "unknown")),
+            "B_label_strain_field": str(payload.get("B_label_strain_field", "unknown")),
+            "strain_label_key": str(payload.get("strain_label_key", "")),
+            "B_label_key": str(payload.get("B_label_key", "")),
             "has_B_LE128_forward": bool("B_LE128_forward" in payload),
             "training_ready_sobolev": bool("B_LE128_forward" in payload),
             "audit_ref_ip_xyz_vs_abaqus_coord_max_abs": float(payload.get("audit_ref_ip_xyz_vs_abaqus_coord_max_abs", np.nan)),
@@ -577,6 +663,9 @@ def main() -> None:
             "merge_q48_max_abs_diff": float(payload.get("merge_q48_max_abs_diff", np.nan)),
             "merge_LE128_base_max_abs_diff": float(payload.get("merge_LE128_base_max_abs_diff", np.nan)),
             "merge_ip_keys_match": bool(payload.get("merge_ip_keys_match", False)),
+            "merge_strain_field": str(payload.get("merge_strain_field", "unknown")),
+            "merge_B_label_strain_field": str(payload.get("merge_B_label_strain_field", "unknown")),
+            "merge_strain_field_match": bool(payload.get("merge_strain_field_match", False)),
             "allow_merge_mismatch": bool(payload.get("allow_merge_mismatch", False)),
             "point_feature_dim": int(point_features.shape[-1]),
             "point_feature_names": point_feature_names.tolist(),

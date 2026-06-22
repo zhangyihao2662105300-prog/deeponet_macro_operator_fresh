@@ -651,3 +651,43 @@ Known gaps:
 - Formal pool entry still requires regenerating a fresh base ODB from
   `q_new = alpha * q_direction_48`, generating a matching Sobolev B compact,
   running the current complete-compact exporter, and passing strict v1.2.
+
+## v1.2 follow-up - 2026-06-22 - Fresh boundary-control case plan
+
+Purpose:
+
+- Convert selected legacy `q_direction_48` candidates into explicit fresh
+  Abaqus boundary-displacement control plans for case040-case051.
+- Keep v1.2 focused on data generation coverage, not model/loss/training
+  changes.
+
+Included:
+
+- Added `scripts/build_v1_2_boundary_control_cases.py`.
+- The script reads `legacy176_boundary_control_plan.json` and writes:
+  `fresh_boundary_control_plan.json`, `fresh_boundary_control_plan.csv`,
+  per-case `caseXXX_q48_frames.csv`, and
+  `abaqus_boundary_control_command_templates.md`.
+- Each selected case gets 10 frames with
+  `alpha_factors = 0.1, 0.2, ..., 1.0` and
+  `q48_frame = alpha_factor * q_norm_seed_mean * q_direction_48`.
+- The script validates that every frame satisfies `||q48_frame|| = alpha` and
+  keeps the same direction as the selected `q_direction_48`.
+- Added `docs/query_point_v1_2_fresh_boundary_control_cases.md` to document the
+  q48 order and fresh Abaqus/export/strict-audit workflow.
+
+Boundary condition note:
+
+- q48 is the current 16 keep-node x 3 DOF control vector.  Existing generated
+  Abaqus `.inp` examples often apply displacements on 32 boundary nodes / 96
+  DOF through a boundary-contract bridge.  If the Abaqus generator expects 96
+  DOF, it must explicitly apply the same `q48 -> q_boundary[32,3]` bridge; q48
+  must not be silently reinterpreted as a 96-DOF vector.
+
+Known gaps:
+
+- This commit does not run Abaqus and does not generate ODB/B/complete compact
+  files.
+- A project-specific q48-to-Abaqus boundary-control generator, shape4 values,
+  and matching Sobolev B compact generation are still required before any
+  case040-case051 compact can enter the formal v1.2 pool.

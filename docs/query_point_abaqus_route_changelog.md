@@ -839,3 +839,61 @@ Known gaps:
 - Large generated Abaqus/NPZ outputs remain outside git and must not be
   committed.
 - Old TRUE176 `LE/B` values were not used as training labels.
+
+## v1.2 follow-up - 2026-06-22 - Second fresh Abaqus batch reaches coverage target
+
+Purpose:
+
+- Expand the v1.2 fresh strict-pass compact pool beyond the first three fresh
+  pilots while still avoiding training/model/loss changes.
+- Re-rank the remaining case040-case051 candidates against the current 6-case
+  strict-pass pool before selecting the next cases.
+
+Selection:
+
+- Selected case044, case046, case049, and case045.
+- All selected candidates had `max_abs_cos_to_current_pool < 0.95`, were
+  expected to add q-direction clusters, and had non-tiny amplitude/LE scale
+  hints.
+- Deferred case040 even though its direction was independent because its
+  expected LE scale was extremely low (`LE_rms_hint_mean=2.8848e-06`,
+  `q_norm_max=6.6611e-05`).
+- Deferred case048 because it was near-duplicate with existing case050
+  (`max_abs_cos_to_current_pool=0.9551`).
+- Deferred case051 because it was close to case045/case049 in the candidate
+  set.  case042 and case047 remain usable follow-up candidates.
+
+Pilot result:
+
+- case044, case046, case049, and case045 each generated a fresh Abaqus base
+  ODB, matching Sobolev B compact, and complete training-ready compact.
+- All four single-case strict v1.2 audits passed.
+- Full-pool audit with case019/case025/case031/case041/case043/case050 plus
+  this second batch passed:
+  `strict_v1_2_pass=true`, `compact_count=10`, `case_count=10`,
+  `frame_count=100`, `q_direction_cluster_count=9`,
+  `pairwise_abs_cos_min=0.0279701647`,
+  `pairwise_abs_cos_median=0.6286590998`,
+  `pairwise_abs_cos_max=0.9937922950`.
+- case044 adds q-direction cluster 5 with
+  `max_abs_cos_to_current=0.6653788417`, nearest case031,
+  `LE_rms_mean=0.00008300474246`, and `B_rms_mean=9.1698764680`.
+- case046 adds q-direction cluster 6 with
+  `max_abs_cos_to_current=0.7669577541`, nearest case019,
+  `LE_rms_mean=0.0001091349404`, and `B_rms_mean=9.1698297192`.
+- case049 adds q-direction cluster 7 with
+  `max_abs_cos_to_current=0.8364611150`, nearest case031,
+  `LE_rms_mean=0.0001956932680`, and `B_rms_mean=9.1729725926`.
+- case045 adds q-direction cluster 8 with
+  `max_abs_cos_to_current=0.8522134771`, nearest case049,
+  `LE_rms_mean=0.0001667079867`, and `B_rms_mean=9.1675470365`.
+
+Current v1.2 status:
+
+- The data pool now meets the minimum coverage target:
+  10 strict-pass complete compacts and 9 q-direction clusters.
+- The pool still contains the original case019/case031 near-duplicate, so
+  `pairwise_abs_cos_max` remains `0.9937922950`.
+- This is a data coverage milestone only.  No training was run, no model/loss
+  settings changed, and old TRUE176 `LE/B` values were not used as labels.
+- Large Abaqus/NPZ outputs remain outside git and must not be committed.

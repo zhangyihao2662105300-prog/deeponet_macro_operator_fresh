@@ -897,3 +897,125 @@ Current v1.2 status:
 - This is a data coverage milestone only.  No training was run, no model/loss
   settings changed, and old TRUE176 `LE/B` values were not used as labels.
 - Large Abaqus/NPZ outputs remain outside git and must not be committed.
+
+## v1.2 follow-up - 2026-06-22 - Fixed-strategy 10-case training audit
+
+Purpose:
+
+- Start the first v1.2 fixed-strategy training audit after the fresh
+  strict-pass compact pool reached the minimum coverage target.
+- Keep the v1.2 strategy frozen and test whether the expanded 10-case /
+  9-cluster pool improves held-out LE/B behavior relative to the 3-case formal
+  split.
+- Do not tune the model, loss, learning rates, or epoch count in response to
+  this run.
+
+Pool:
+
+- Source coverage audit:
+  `D:\IS-FEM\outputs\query_point_v1_2_data_coverage_audit\full_pool_after_second_fresh_batch`
+- Frozen training manifest:
+  `D:\IS-FEM\outputs\query_point_v1_2_training_audit\pool_v1_2_min10_manifest`
+- Pool cases:
+  `case019`, `case025`, `case031`, `case041`, `case043`,
+  `case044`, `case045`, `case046`, `case049`, `case050`.
+- Coverage:
+  `strict_v1_2_pass=true`, `compact_count=10`, `case_count=10`,
+  `frame_count=100`, `q_direction_cluster_count=9`,
+  `pairwise_abs_cos_min=0.0279701647`,
+  `pairwise_abs_cos_median=0.6286590998`,
+  `pairwise_abs_cos_max=0.9937922950`.
+- All compacts declare `strain_field=LE` and
+  `B_label_strain_field=LE`; no unknown strain metadata and no legacy TRUE176
+  label compact were mixed into the pool.
+
+Split:
+
+- Split plan:
+  `D:\IS-FEM\outputs\query_point_v1_2_training_audit\split_plan_main_80_20.json`
+- Train cases:
+  `[19, 25, 31, 43, 44, 45, 46, 50]`
+- Validation cases:
+  `[41, 49]`
+- Trainer split metadata:
+  `validation_split_mode=case`, `validation_is_overlapping=false`,
+  `train_frames=80`, `val_frames=20`.
+- Validation case notes:
+  `case041` is a low-LE fresh direction with nearest-train abs-cosine
+  `0.6417599947` to `case044`.
+  `case049` is a mid-LE fresh direction with nearest-train abs-cosine
+  `0.8522134771` to `case045`.
+
+Fixed strategy:
+
+- Output directory:
+  `D:\IS-FEM\outputs\query_point_v1_2_training_audit\fixed_strategy_main_80_20`
+- Trainer:
+  `macro_deeponet.train_true176_generic_sobolev`
+- Fixed settings:
+  `model_style=query-fe-linear-residual`,
+  `point_feature_source=data`,
+  `branch_feature_mode=xkeep-qraw`,
+  `le_normalization=global-component`,
+  `train_point_sample_count=128`,
+  `split_mode=case`,
+  `allow_overlap_val=false`,
+  `epochs=50`,
+  `b_baseline_warmstart_source=train-only`,
+  `b_baseline_warmstart_steps=500`,
+  `j_loss_mode=physical`,
+  `global_b_lr_scale=0.05`,
+  `point_b_lr_scale=0.10`,
+  `le_loss_weight=1.0`.
+- Warm-start was train-only:
+  `warmstart_train_cases=[19,25,31,43,44,45,46,50]`,
+  `warmstart_val_cases_excluded=[41,49]`,
+  `warmstart_validation_is_overlapping=false`.
+
+Result:
+
+- Best and latest checkpoints are both epoch 50.
+- Best/latest metrics:
+  `best_score=5.6694053020`,
+  `train_LE_rel=0.3710049271`,
+  `val_LE_rel=5.1376408458`,
+  `train_AD_B_rel=0.5343235027`,
+  `val_AD_B_rel=0.5317644562`,
+  `train_AD_B_cos=0.8530025687`,
+  `val_AD_B_cos=0.8755700366`,
+  `train_phys_rand_dir_B_rel=0.5360939388`,
+  `val_phys_rand_dir_B_rel=0.5349325279`,
+  `b_prior_current_train_evalcols_B_rel=0.5338542326`,
+  `b_prior_current_val_evalcols_B_rel=0.5306775207`,
+  `train_AD_B_ip_rel_max=4.0114861980`,
+  `val_AD_B_ip_rel_max=3.5443742903`,
+  `val_AD_B_col_rel_max=0.9385777742`.
+- Epoch trend:
+  `val_LE_rel` decreased from `12.7145` at epoch 1 to `5.1376` at epoch 50,
+  while `val_AD_B_rel` stayed near `0.532`.
+
+Interpretation:
+
+- The fixed-strategy 10-case run completed with a clean non-overlapping
+  case-level split.
+- The B prior and full AD-B metrics remain closely aligned, so the residual AD
+  path did not destroy the B field in this split.
+- B did not match the 3-case formal split quality:
+  `val_AD_B_rel` is about `0.5318` here versus about `0.3716` in the 3-case
+  split.
+- LE generalization is not established:
+  `val_LE_rel=5.1376`, worse than the previous 3-case audit value
+  `val_LE_rel=2.3336`.
+- Conservative conclusion:
+  the v1.2 fixed-strategy training audit ran cleanly, but this main 80/20 split
+  does not show LE generalization improvement from the expanded 10-case pool.
+  The next diagnostic step should be additional fixed-strategy split or
+  leave-one-case-out audits, not ad hoc model/loss/lr/epoch tuning.
+
+Validation boundary:
+
+- No model structure, loss, learning-rate strategy, or epoch schedule was
+  changed for this audit.
+- Old TRUE176 `LE/B` values were not used as v1.2 labels.
+- Large generated training artifacts and checkpoints remain outside git and
+  must not be committed.

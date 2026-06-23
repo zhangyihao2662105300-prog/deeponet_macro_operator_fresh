@@ -1508,3 +1508,89 @@ Validation boundary:
 - No old TRUE176 `LE/B` labels were used as v1.2/v1.3 labels.
 - No tag was moved.
 - Large generated artifacts remain outside git and must not be committed.
+
+## v1.3 summary - 2026-06-23 - Two-split formal evidence
+
+Purpose:
+
+- Freeze the v1.3 evidence from split_A and split_B before running additional
+  LOO audits.
+- Record the current interpretation conservatively: two non-overlapping case
+  splits improved, but full case-level generalization is not yet proven.
+- Define a risk-prioritized LOO plan instead of immediately running full LOO or
+  changing hyperparameters.
+
+Included:
+
+- Added `docs/query_point_v1_3_two_split_formal_summary.md`.
+- The summary records the fixed strategy, split_A/split_B metrics, per-case
+  attribution, and LOO priority plan.
+
+Two-split result:
+
+- split_A:
+  `train_cases=[19,25,31,43,44,45,46,50]`,
+  `val_cases=[41,49]`,
+  `validation_is_overlapping=false`.
+  v1.2 `val_LE_rel=5.137640845816213`;
+  v1.3 best `val_LE_rel=2.1796218548207182`,
+  `val_AD_B_rel=0.5322959397919018`,
+  `val_zero_q_LE_pred_rms=1.1484941768098402e-11`.
+- split_B:
+  `train_cases=[19,25,31,41,43,45,49,50]`,
+  `val_cases=[44,46]`,
+  `validation_is_overlapping=false`.
+  v1.2 `val_LE_rel=8.515458607946384`;
+  v1.3 best `val_LE_rel=1.5595633647976805`,
+  `val_AD_B_rel=0.5125447167349023`,
+  `val_zero_q_LE_pred_rms=1.157102562071606e-11`.
+
+Per-case v1.3 attribution:
+
+- split_A `case041`: `LE_rel=3.609960155721904`,
+  `AD_B_rel=0.5321915350416156`,
+  `zero_q_LE_pred_rms=1.1484941768098398e-11`,
+  `Bprior_q_LE_rel=3.8535600056709796`.
+- split_A `case049`: `LE_rel=1.8090445751604918`,
+  `AD_B_rel=0.5324002526523295`,
+  `zero_q_LE_pred_rms=1.1484941768098398e-11`,
+  `Bprior_q_LE_rel=1.8501516802362072`.
+- split_B `case044`: `LE_rel=1.2623462866926172`,
+  `AD_B_rel=0.512531727633403`,
+  `zero_q_LE_pred_rms=1.157102562071606e-11`,
+  `Bprior_q_LE_rel=1.2603167162795477`.
+- split_B `case046`: `LE_rel=1.7080236136717677`,
+  `AD_B_rel=0.5125577066694196`,
+  `zero_q_LE_pred_rms=1.157102562071606e-11`,
+  `Bprior_q_LE_rel=1.706468997850503`.
+
+Current interpretation:
+
+- v1.3 anchored head materially improves held-out `LE` on split_A and split_B.
+- The zero-q ghost LE field is structurally removed.
+- AD-B is not broken: validation AD-B metrics remain close to v1.2.
+- Best epochs are early (`split_A` epoch 10, `split_B` epoch 1), so epoch
+  sensitivity remains part of the evidence.
+- Full case-level generalization is not yet proven because `case019`,
+  `case025`, `case031`, `case043`, `case045`, and `case050` have not yet been
+  held out under v1.3.
+
+LOO priority plan:
+
+- Priority 1: `LOO_case031`, because `case031` is the high-amplitude / high-LE
+  case and tests whether the anchored head can extrapolate without that training
+  anchor.
+- Priority 2: `LOO_case050`, because it is a mixed / larger fresh direction and
+  tests non-low-amplitude mixed-direction generalization.
+- Priority 3: `LOO_case043` or `LOO_case045`, to add medium fresh-direction
+  evidence.
+- Priority 4: full 10-case LOO for a final formal generalization claim.
+
+Validation boundary:
+
+- This step did not run additional training.
+- No model, loss, learning-rate, epoch, split-policy, or data-pool changes were
+  made.
+- No old TRUE176 `LE/B` labels were used as v1.2/v1.3 labels.
+- No tag was moved.
+- Large generated artifacts remain outside git and must not be committed.

@@ -8,8 +8,9 @@ as a substitute for data-contract checks.
 - `query-point-abaqus-v1`: route baseline.
 - `query-point-abaqus-v1.1`: hard guards for data trustworthiness.
 - `query-point-abaqus-v1.2`: data-coverage audit for independent load/case directions.
-- `query-point-abaqus-v1.3`: ID feature rules and polished inference entry point.
-- `query-point-abaqus-v2`: first long-training-ready route.
+- `query-point-abaqus-v1.3`: anchored LE head diagnostics for the current raw-q route.
+- `query-point-abaqus-v2`: coordinate-consistent route with useful boundary
+  displacement, standard/local query coordinates, and explicit B chain rule.
 
 ## Review Order
 
@@ -93,6 +94,58 @@ Use both 80/20 case split and leave-one-case-out audits before interpreting
 LE generalization.  `train_80_20_summary.json` and `loo_summary.json` may start
 as coverage/split plans; fill their metric fields only after the corresponding
 training runs complete.
+
+## v2 Gate
+
+Do not start long v2 training until a one-case coordinate-consistency audit
+passes.  v2 changes the learned operator coordinate contract, not just model
+capacity.
+
+The v2 branch coordinate must be explicit:
+
+```text
+q_useful = T_q_raw_to_useful @ q48_raw
+```
+
+The compact must store `q_useful`, `T_q_raw_to_useful`, and metadata describing
+the local frame and rigid-body projection.  The audit must verify that stored
+`q_useful` is reproduced from `q48_raw` and `T_q_raw_to_useful`.
+
+The v2 trunk coordinate must prefer standard/local point coordinates:
+
+```text
+ip_xi, ip_J, ip_invJ, ip_detJ, local frame / geometry features
+```
+
+The v2 strain and B coordinate systems must be explicit:
+
+```text
+strain_output_coordinate
+B_label_q_coordinate
+B_label_output_coordinate
+B_chain_rule
+```
+
+If the network predicts standard/local strain and differentiates with respect
+to `q_useful`, the Sobolev comparison to Abaqus raw labels must use:
+
+```text
+B_raw_hat = T_eps_to_abq @ d(strain_standard)/d(q_useful) @ T_q_raw_to_useful
+```
+
+Directly comparing `d(strain_standard)/d(q_useful)` with the current
+`B_LE128_forward = d(LE_Abaqus)/d(q48_raw)` is not valid.
+
+Use:
+
+```powershell
+py -3 scripts/audit_v2_coordinate_consistent_contract.py `
+  --compact-list <strict-fresh-compact-list.txt> `
+  --out-root <v2-contract-audit-output>
+```
+
+Existing v1.x compacts are expected to fail strict v2 until the useful-q and
+strain-transform metadata are generated.
 
 ## Current Data Contract Wording
 

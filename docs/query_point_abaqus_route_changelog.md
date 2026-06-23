@@ -1675,6 +1675,86 @@ Validation boundary:
 - No tag was moved.
 - Large generated artifacts remain outside git and must not be committed.
 
+## v2 planning - 2026-06-23 - Coordinate-consistent route contract
+
+Purpose:
+
+- Freeze the conceptual transition from v1.3 raw-q diagnostics to a v2
+  coordinate-consistent finite-element operator route.
+- Record that the final route should learn a standard/local macro-element
+  operator, not only a raw Abaqus-coordinate black-box map.
+- Add a read-only contract audit that identifies which current/future compacts
+  contain the fields needed for v2 chain-rule-consistent B supervision.
+
+Key route change:
+
+```text
+q48_raw
+  -> q_useful = T_q_raw_to_useful @ q48_raw
+  -> NN(q_useful, xi_standard, geometry_features)
+  -> strain_standard_or_local
+  -> LE_Abaqus
+```
+
+The v2 B comparison must use:
+
+```text
+B_raw_hat = T_eps_to_abq @ d(strain_standard)/d(q_useful) @ T_q_raw_to_useful
+```
+
+and may not directly compare `d(strain_standard)/d(q_useful)` against the
+current raw Abaqus/Sobolev label:
+
+```text
+B_LE128_forward = d(LE_Abaqus)/d(q48_raw)
+```
+
+Added:
+
+- `docs/query_point_v2_coordinate_consistent_route.md`
+- `scripts/audit_v2_coordinate_consistent_contract.py`
+- v2 gate wording in `docs/query_point_abaqus_workflow.md`
+
+Probe result on the current 10-case strict fresh pool:
+
+```powershell
+py -3 scripts\audit_v2_coordinate_consistent_contract.py `
+  --compact-list D:\IS-FEM\outputs\query_point_v1_2_training_audit\pool_v1_2_min10_manifest\compact_list.txt `
+  --out-root D:\IS-FEM\outputs\query_point_v2_coordinate_contract_audit\v1_2_min10_probe
+```
+
+- `compact_count=10`
+- `strict_v2_coordinate_pass=false`
+- `strict_v2_coordinate_pass_count=0`
+- The existing v1.x compacts already have valid standard/IP geometry fields:
+  `ip_xi_ok=true`, `ip_J_ok=true`, `ip_invJ_ok=true`, `ip_detJ_ok=true`.
+- All 10 fail the new v2 coordinate-contract fields:
+  `missing_q_useful`, `missing_T_q_raw_to_useful`,
+  `missing_strain_output_coordinate`, `missing_q_useful_coordinate`,
+  `missing_B_label_q_coordinate`, `missing_B_label_output_coordinate`,
+  `missing_T_eps_to_abq_or_B_standard_useful`, and
+  `missing_B_chain_rule_metadata`.
+- `--strict-v2` was checked on one current compact and failed nonzero as
+  expected.
+
+Current interpretation:
+
+- v1.3 remains useful diagnostic evidence: strict compacts, case splits,
+  anchored zero-q behavior, and AD-B stability are not discarded.
+- v1.3 is not the final clean operator contract because the branch coordinate,
+  strain coordinate, and B-label coordinate are still raw-coordinate coupled.
+- The next scientific step is a one-case v2 coordinate-chain audit, not another
+  long v1.3 training run.
+
+Validation boundary:
+
+- No model, loss, learning-rate, epoch, split-policy, or tag changes were made.
+- No old TRUE176 `LE/B` labels were used as v2 labels.
+- The new audit script is read-only and does not train or transform labels.
+- Existing v1.x compacts are expected to fail strict v2 until `q_useful`,
+  `T_q_raw_to_useful`, strain-coordinate metadata, and chain-rule metadata are
+  generated.
+
 ## v1.3 audit - 2026-06-23 - Anchored LOO case043
 
 Purpose:

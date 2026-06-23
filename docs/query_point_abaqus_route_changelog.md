@@ -1594,3 +1594,83 @@ Validation boundary:
 - No old TRUE176 `LE/B` labels were used as v1.2/v1.3 labels.
 - No tag was moved.
 - Large generated artifacts remain outside git and must not be committed.
+
+## v1.3 audit - 2026-06-23 - Anchored LOO case031
+
+Purpose:
+
+- Run the first risk-prioritized LOO audit after the two-split summary.
+- Hold out `case031`, the high-amplitude / high-LE case, to test whether v1.3
+  can extrapolate without that case as a training anchor.
+- Keep the fixed v1.3 strategy unchanged.
+
+Inputs:
+
+- Compact pool:
+  `D:\IS-FEM\outputs\query_point_v1_2_training_audit\pool_v1_2_min10_manifest\compact_list.txt`
+- Validation split:
+  `train_cases=[19,25,41,43,44,45,46,49,50]`,
+  `val_cases=[31]`.
+- `validation_is_overlapping=false`, `train_frames=90`, `val_frames=10`.
+
+Outputs:
+
+- Training:
+  `D:\IS-FEM\outputs\query_point_v1_3_training_audit\anchored_LOO_case031`
+- Case attribution:
+  `D:\IS-FEM\outputs\query_point_v1_3_training_audit\anchored_LOO_case031_case_attribution`
+- B@q diagnostic:
+  `D:\IS-FEM\outputs\query_point_v1_3_training_audit\anchored_LOO_case031_bq_anchor_oracle\LOO_case031_best`
+- Comparison:
+  `D:\IS-FEM\outputs\query_point_v1_3_training_audit\anchored_LOO_case031_comparison`
+- Documentation:
+  `docs/query_point_v1_3_anchored_LOO_case031_audit.md`
+
+Key result:
+
+- Best and latest are both epoch 50:
+  `val_LE_rel=0.9255415441048325`,
+  `train_LE_rel=0.4854010592101344`,
+  `val_AD_B_rel=0.7236396387001852`,
+  `val_AD_B_cos=0.7363247525021522`,
+  `b_prior_current_val_evalcols_B_rel=0.7239878680693814`,
+  `val_zero_q_LE_pred_rms=2.3911419659618957e-13`,
+  `val_Bprior_q_LE_rel=0.9346750750874383`,
+  `val_model_minus_Bprior_offset_rms=0.0009073160436565322`.
+- Per-case attribution for `case031`:
+  `LE_rel=0.9255415441048325`,
+  `AD_B_rel=0.7236396387001852`,
+  `B_prior_rel=0.7239878680693814`,
+  `zero_q_LE_pred_rms=2.3911419659618957e-13`,
+  `Bprior_q_LE_rel=0.9346750750874383`,
+  `model_minus_Bprior_offset_rms=0.0009073160436565322`.
+- B@q diagnostic:
+  `Btrue_q_LE_rel=0.6522641115009261`,
+  `Bprior_q_LE_rel=0.967480304420319`,
+  `model_LE_rel=0.9255415441048325`,
+  `zero_q_pred_rms=3.720241450096156e-13`,
+  `current_offset_rms=0.0009074376473615923`,
+  `true_offset_rms=0.008277004439016715`.
+
+Current interpretation:
+
+- `LOO_case031` does not collapse on held-out high-amplitude LE:
+  `val_LE_rel` is below 1.0.
+- The zero-q ghost remains structurally removed.
+- AD-B and the B prior are substantially harder than in split_A/split_B:
+  `val_AD_B_rel=0.7236` versus about `0.53` and `0.51` in split_A/split_B.
+- `Btrue @ q` is not a near-perfect value oracle on `case031`
+  (`Btrue_q_LE_rel=0.6523`), which is consistent with stronger high-amplitude
+  nonlinearity or state/path effects.
+- This supports the anchored head as a useful structural fix while exposing a
+  remaining high-amplitude B coverage / state-dependence risk.
+- Recommended next audit: run `LOO_case050` with the same fixed strategy before
+  changing model, loss, learning rate, or epoch count.
+
+Validation boundary:
+
+- No model, loss, learning-rate, epoch, split-policy, or data-pool changes were
+  made.
+- No old TRUE176 `LE/B` labels were used as v1.2/v1.3 labels.
+- No tag was moved.
+- Large generated artifacts remain outside git and must not be committed.

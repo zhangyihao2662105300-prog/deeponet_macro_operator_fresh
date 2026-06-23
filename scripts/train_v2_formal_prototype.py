@@ -657,12 +657,20 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         raise SystemExit("compact list is empty")
     case_ids = sorted(c.case_id for c in cases)
     val_cases = parse_cases(args.val_cases)
-    train_cases = [case for case in case_ids if case not in set(val_cases)]
-    if set(train_cases).intersection(val_cases):
+    train_cases = parse_cases(args.train_cases) if str(args.train_cases).strip() else [case for case in case_ids if case not in set(val_cases)]
+    overlap_cases = sorted(set(train_cases).intersection(val_cases))
+    if overlap_cases and not bool(args.allow_overlap_val):
         raise SystemExit("train/val split overlaps")
+    unknown_train = sorted(set(train_cases).difference(case_ids))
     unknown_val = sorted(set(val_cases).difference(case_ids))
+    if unknown_train:
+        raise SystemExit(f"train cases not found: {unknown_train}")
     if unknown_val:
         raise SystemExit(f"val cases not found: {unknown_val}")
+    if not train_cases:
+        raise SystemExit("train case selection is empty")
+    if not val_cases:
+        raise SystemExit("val case selection is empty; use --allow-overlap-val with an explicit val case for overfit diagnostics")
 
     train_np_raw = concat_cases([c for c in cases if c.case_id in set(train_cases)])
     val_np_raw = concat_cases([c for c in cases if c.case_id in set(val_cases)])
@@ -676,7 +684,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     norm_summary = {
         "train_only": True,
         "train_cases": train_cases,
-        "val_cases_excluded": val_cases,
+        "val_cases": val_cases,
+        "val_cases_excluded": sorted(set(val_cases).difference(train_cases)),
+        "validation_is_overlapping": bool(overlap_cases),
+        "overlap_cases": overlap_cases,
         "q_std_min": norm["q_std_min"],
         "q_std_max": norm["q_std_max"],
         "q_std_ratio_before_floor": norm["q_std_ratio_before_floor"],
@@ -718,7 +729,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         use_q_dir=bool(args.use_q_dir),
         gate_c=float(args.gate_c),
     ).to(device=device, dtype=dtype)
-    opt = torch.optim.AdamW(model.parameters(), lr=float(args.lr), weight_decay=float(args.weight_decay))
+    if bool(args.freeze_b_prior_table):
+        for param in model.b_delta_head.parameters():
+            param.requires_grad_(False)
+    opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=float(args.lr), weight_decay=float(args.weight_decay))
 
     frame_count = int(train_data["q_norm"].shape[0])
     point_count = int(train_data["le_norm"].shape[1])
@@ -850,12 +864,14 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "case_ids": case_ids,
         "train_cases": train_cases,
         "val_cases": val_cases,
-        "validation_is_overlapping": False,
+        "validation_is_overlapping": bool(overlap_cases),
+        "overlap_cases": overlap_cases,
         "normalization_train_only": True,
         "normalization_summary": str(norm_summary_path),
         "use_q_amp": bool(args.use_q_amp),
         "use_q_dir": bool(args.use_q_dir),
         "use_geometry_features": False,
+        "freeze_b_prior_table": bool(args.freeze_b_prior_table),
         "gate_c": float(args.gate_c),
         "steps": int(args.steps),
         "latest_step": int(latest["step"]),
@@ -885,7 +901,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--compact-list", required=True)
     parser.add_argument("--out-root", required=True)
+    parser.add_argument("--train-cases", default="")
     parser.add_argument("--val-cases", default="44,46")
+    parser.add_argument("--allow-overlap-val", action="store_true")
     parser.add_argument("--steps", type=int, default=5000)
     parser.add_argument("--seed", type=int, default=20260623)
     parser.add_argument("--device", default="auto")
@@ -904,6 +922,7 @@ def main() -> None:
     parser.add_argument("--grad-clip", type=float, default=10.0)
     parser.add_argument("--use-q-amp", action="store_true")
     parser.add_argument("--use-q-dir", action="store_true")
+    parser.add_argument("--freeze-b-prior-table", action="store_true")
     parser.add_argument("--gate-c", type=float, default=0.1)
     args = parser.parse_args()
 

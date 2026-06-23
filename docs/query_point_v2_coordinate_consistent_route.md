@@ -526,6 +526,75 @@ to the v2e latest baseline.  This means the v2 coordinate contract and formal
 prototype machinery are in place, while low-amplitude value-field learning
 remains unsolved.
 
+## v2h Formal Prototype Sanity / Ablation Audit Status
+
+v2h audits why v2g does not reduce multi-case train LE.  It adds:
+
+```text
+scripts/audit_v2_formal_prototype_sanity.py
+docs/query_point_v2_formal_prototype_sanity_audit.md
+```
+
+No-training sanity output:
+
+```text
+D:\IS-FEM\outputs\query_point_v2_design_audit\v2g_sanity\sanity_summary.json
+```
+
+Normalization roundtrips are closed:
+
+```text
+train q_roundtrip_rel = 4.792623713739907e-17
+train LE_roundtrip_rel = 3.441183768746357e-17
+train B_roundtrip_rel = 3.787348081354616e-17
+val q_roundtrip_rel = 4.0597878073265377e-17
+val LE_roundtrip_rel = 3.354931535711588e-17
+val B_roundtrip_rel = 3.759929863285529e-17
+```
+
+Baselines:
+
+```text
+exact B@q train_LE_local_rel = 0.6407233225614739
+exact B@q val_LE_local_rel = 0.037104433513767326
+
+train-mean B prior train_LE_local_rel = 29.466125499590156
+train-mean B prior val_LE_local_rel = 10.826594009457496
+train-mean B prior train_AD_B_local_rel = 0.2952528280656775
+train-mean B prior val_AD_B_local_rel = 0.195877397799659
+```
+
+The normalized train-mean B prior matches the physical train-mean B prior,
+which means the normalized B-prior implementation is not the reason for the
+large train LE error.
+
+Single-case `case050` overfit passes:
+
+```text
+train_LE_local_rel = 0.03293348103761673
+train_AD_B_local_rel = 0.0039431145414710045
+train_AD_B_local_cos = 0.9999921321868896
+```
+
+Freeze-B-prior and gate-open ablations do not solve multi-case train LE.  The
+current narrowed diagnosis is:
+
+```text
+normalization bug: unlikely
+B-prior normalized/physical mismatch: unlikely
+B-prior table corruption: unlikely
+gate suppression: unlikely as the main cause
+single-case implementation capacity: passes
+multi-case formal split learning: still fails
+```
+
+The likely remaining issue is that the v2g branch/trunk residual is not
+expressive or well-conditioned enough to learn a case/state-dependent
+value-field correction on the mixed 8-case train pool, starting from a
+train-mean B prior whose `B@q` value prediction is poor for high-amplitude/mixed
+train cases.  Broader v2 training should wait until this value-field correction
+mechanism is diagnosed.
+
 ## Reusable Existing Pieces
 
 The current repository already has useful pieces:

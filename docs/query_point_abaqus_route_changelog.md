@@ -3,6 +3,95 @@
 This file records the route-level history for the Abaqus real-integration-point
 DeepONet/query-point training line.  Keep it updated whenever this route changes.
 
+## v2h - 2026-06-23 - Formal prototype sanity / ablation audit
+
+Purpose:
+
+- Diagnose why v2g formal prototype execution succeeds but multi-case train LE
+  remains high.
+- Check normalization roundtrip, B@q baselines, v2g initialization,
+  single-case overfit, B-prior freeze, and gate behavior.
+- Keep this as a sanity/ablation audit, not formal training.
+
+Included:
+
+- `scripts/audit_v2_formal_prototype_sanity.py`
+- Diagnostic switches in `scripts/train_v2_formal_prototype.py`:
+  `--train-cases`, `--allow-overlap-val`, and `--freeze-b-prior-table`.
+- `docs/query_point_v2_formal_prototype_sanity_audit.md`
+- Route documentation update in
+  `docs/query_point_v2_coordinate_consistent_route.md`.
+
+No-training sanity output:
+
+```text
+D:\IS-FEM\outputs\query_point_v2_design_audit\v2g_sanity\sanity_summary.json
+```
+
+Key sanity results:
+
+- Normalization roundtrip closes:
+  - `train_q_roundtrip_rel=4.792623713739907e-17`
+  - `train_LE_roundtrip_rel=3.441183768746357e-17`
+  - `train_B_roundtrip_rel=3.787348081354616e-17`
+  - `val_q_roundtrip_rel=4.0597878073265377e-17`
+  - `val_LE_roundtrip_rel=3.354931535711588e-17`
+  - `val_B_roundtrip_rel=3.759929863285529e-17`
+- Exact B@q oracle:
+  - `train_LE_local_rel=0.6407233225614739`
+  - `val_LE_local_rel=0.037104433513767326`
+- Train-mean B prior:
+  - `train_LE_local_rel=29.466125499590156`
+  - `val_LE_local_rel=10.826594009457496`
+  - `train_AD_B_local_rel=0.2952528280656775`
+  - `val_AD_B_local_rel=0.195877397799659`
+- Normalized train-mean B prior matches physical train-mean B prior.
+- v2g initialization matches the train-mean B-prior baseline.
+
+Single-case overfit:
+
+- Run: `case050` train/val overlap diagnostic, 2000 steps.
+- Result:
+  - `train_LE_local_rel=0.03293348103761673`
+  - `train_AD_B_local_rel=0.0039431145414710045`
+  - `train_AD_B_local_cos=0.9999921321868896`
+  - `zero_q_LE_local_rms=0.0`
+
+Light ablations:
+
+- Freeze-B-prior best:
+  - `train_LE_local_rel=28.97667121887207`
+  - `val_LE_local_rel=10.584187507629395`
+  - `train_AD_B_local_rel=0.5441113114356995`
+  - `val_AD_B_local_rel=0.2669954299926758`
+- Gate-open latest (`--gate-c 1e-9`):
+  - `train_LE_local_rel=28.90526008605957`
+  - `val_LE_local_rel=19.146818161010742`
+  - `train_AD_B_local_rel=0.8936592936515808`
+  - `val_AD_B_local_rel=0.8248840570449829`
+
+Current interpretation:
+
+```text
+normalization bug: unlikely
+B-prior normalized/physical mismatch: unlikely
+B-prior table corruption: unlikely
+gate suppression: unlikely as the main cause
+single-case implementation capacity: passes
+multi-case formal split learning: still fails
+```
+
+The narrowed issue is that the v2g residual/value branch is not yet learning a
+case/state-dependent correction on the mixed multi-case train pool.  Broader v2
+training is still not ready.
+
+Validation boundary:
+
+- No old TRUE176 `LE/B` labels were used as v2 labels.
+- No tag was moved.
+- No `.npz`, `.odb`, `.pt`, `.pth`, checkpoint, loss-history, or generated
+  output file is committed.
+
 ## v2g - 2026-06-23 - Formal v2 prototype audit
 
 Commit:

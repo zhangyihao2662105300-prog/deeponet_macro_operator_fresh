@@ -32,6 +32,7 @@ from torch.func import jacrev, vmap
 
 
 B_USEFUL_KEYS = ("B_standard_useful", "B_local_useful")
+B_PRIOR_MODES = ("global_mean", "amp_median_cluster", "amp_p75_cluster", "amp_linear_interp")
 
 V2E_BASELINE_LATEST = {
     "train_LE_local_rel": 1.1830968856811523,
@@ -314,6 +315,63 @@ def normalize_dataset(data: dict[str, np.ndarray], norm: dict[str, Any]) -> dict
     return out
 
 
+def q_amp_np(data: dict[str, np.ndarray]) -> np.ndarray:
+    return np.linalg.norm(np.asarray(data["q"], dtype=np.float64), axis=1)
+
+
+def build_b_prior_state(train_np: dict[str, np.ndarray], mode: str) -> dict[str, Any]:
+    if mode not in B_PRIOR_MODES:
+        raise ValueError(f"unknown b prior mode {mode!r}; expected one of {B_PRIOR_MODES}")
+    b_norm = np.asarray(train_np["b_norm"], dtype=np.float32)
+    q_amp = q_amp_np(train_np)
+    global_mean = b_norm.mean(axis=0).astype(np.float32)
+    median = float(np.median(q_amp))
+    p75 = float(np.percentile(q_amp, 75.0))
+    threshold = None
+    if mode == "amp_median_cluster":
+        threshold = median
+    elif mode in {"amp_p75_cluster", "amp_linear_interp"}:
+        threshold = p75
+
+    low_mean = global_mean
+    high_mean = global_mean
+    low_count = int(q_amp.shape[0])
+    high_count = 0
+    amp_low_ref = float(np.min(q_amp)) if q_amp.size else 0.0
+    amp_high_ref = float(np.max(q_amp)) if q_amp.size else 1.0
+    if threshold is not None:
+        low_mask = q_amp <= float(threshold)
+        high_mask = q_amp > float(threshold)
+        low_count = int(np.sum(low_mask))
+        high_count = int(np.sum(high_mask))
+        if low_count:
+            low_mean = b_norm[low_mask].mean(axis=0).astype(np.float32)
+            amp_low_ref = float(np.mean(q_amp[low_mask]))
+        if high_count:
+            high_mean = b_norm[high_mask].mean(axis=0).astype(np.float32)
+            amp_high_ref = float(np.mean(q_amp[high_mask]))
+        if amp_high_ref <= amp_low_ref:
+            amp_low_ref = float(np.min(q_amp))
+            amp_high_ref = float(np.max(q_amp))
+        if amp_high_ref <= amp_low_ref:
+            amp_high_ref = amp_low_ref + 1.0e-12
+
+    return {
+        "mode": mode,
+        "global_mean": global_mean,
+        "low_mean": low_mean.astype(np.float32),
+        "high_mean": high_mean.astype(np.float32),
+        "amp_median": median,
+        "amp_p75": p75,
+        "cluster_threshold": threshold,
+        "cluster_threshold_kind": "none" if threshold is None else ("median" if mode == "amp_median_cluster" else "p75"),
+        "cluster_low_frame_count": low_count,
+        "cluster_high_frame_count": high_count,
+        "amp_low_ref": amp_low_ref,
+        "amp_high_ref": amp_high_ref,
+    }
+
+
 def make_tensors(data: dict[str, np.ndarray], *, device: torch.device, dtype: torch.dtype) -> dict[str, torch.Tensor]:
     return {
         "q": torch.as_tensor(data["q"], dtype=dtype, device=device),
@@ -335,7 +393,7 @@ class FormalV2Prototype(nn.Module):
     def __init__(
         self,
         ip_xi: torch.Tensor,
-        b_prior_norm_mean: torch.Tensor,
+        b_prior_state: dict[str, Any],
         q_std: torch.Tensor,
         *,
         q_amp_ref: float,
@@ -343,16 +401,28 @@ class FormalV2Prototype(nn.Module):
         use_q_amp: bool,
         use_q_dir: bool,
         use_amp_regime_descriptor: bool,
+        b_prior_mode: str,
+        detach_b_prior_regime_weight: bool,
         gate_c: float,
     ) -> None:
         super().__init__()
         self.register_buffer("ip_xi", ip_xi)
-        self.register_buffer("b_prior_base", b_prior_norm_mean.clone())
+        self.register_buffer("b_prior_base", torch.as_tensor(b_prior_state["global_mean"], dtype=ip_xi.dtype, device=ip_xi.device).clone())
+        self.register_buffer("b_prior_low", torch.as_tensor(b_prior_state["low_mean"], dtype=ip_xi.dtype, device=ip_xi.device).clone())
+        self.register_buffer("b_prior_high", torch.as_tensor(b_prior_state["high_mean"], dtype=ip_xi.dtype, device=ip_xi.device).clone())
         self.register_buffer("q_std", q_std.clone())
+        self.b_prior_mode = str(b_prior_mode)
         self.q_amp_ref = float(q_amp_ref)
+        self.cluster_threshold = None if b_prior_state["cluster_threshold"] is None else float(b_prior_state["cluster_threshold"])
+        self.cluster_threshold_kind = str(b_prior_state["cluster_threshold_kind"])
+        self.cluster_low_frame_count = int(b_prior_state["cluster_low_frame_count"])
+        self.cluster_high_frame_count = int(b_prior_state["cluster_high_frame_count"])
+        self.amp_low_ref = float(b_prior_state["amp_low_ref"])
+        self.amp_high_ref = float(b_prior_state["amp_high_ref"])
         self.use_q_amp = bool(use_q_amp)
         self.use_q_dir = bool(use_q_dir)
         self.use_amp_regime_descriptor = bool(use_amp_regime_descriptor)
+        self.detach_b_prior_regime_weight = bool(detach_b_prior_regime_weight)
         self.gate_c = float(gate_c)
 
         branch_dim = 42 + (1 if self.use_q_amp else 0) + (42 if self.use_q_dir else 0)
@@ -370,9 +440,13 @@ class FormalV2Prototype(nn.Module):
         nn.init.zeros_(self.b_delta_head.weight)
         nn.init.zeros_(self.b_delta_head.bias)
 
+    def q_amp_raw(self, q_norm: torch.Tensor) -> torch.Tensor:
+        q_useful = q_norm * self.q_std.reshape(1, 42)
+        return torch.sqrt(torch.sum(q_useful * q_useful, dim=-1, keepdim=True) + 1.0e-24)
+
     def branch_features(self, q_norm: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         q_useful = q_norm * self.q_std.reshape(1, 42)
-        q_amp_raw = torch.sqrt(torch.sum(q_useful * q_useful, dim=-1, keepdim=True) + 1.0e-24)
+        q_amp_raw = self.q_amp_raw(q_norm)
         q_amp_scaled = q_amp_raw / max(self.q_amp_ref, 1.0e-12)
         pieces = [q_norm]
         if self.use_q_amp:
@@ -384,24 +458,53 @@ class FormalV2Prototype(nn.Module):
             pieces.append(torch.log1p(q_amp_scaled))
         return torch.cat(pieces, dim=-1), q_amp_scaled
 
-    def b_prior(self, point_idx: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+    def b_prior_delta(self, point_idx: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         if point_idx is None:
             xi = self.ip_xi
-            base = self.b_prior_base
         else:
             xi = self.ip_xi.index_select(0, point_idx)
-            base = self.b_prior_base.index_select(0, point_idx)
         point_latent = self.point_encoder(xi)
         delta = self.b_delta_head(point_latent).reshape(xi.shape[0], 6, 42)
-        return base + delta, point_latent
+        return delta, point_latent
+
+    def prior_base_for_q(self, q_norm: torch.Tensor, point_idx: torch.Tensor | None = None) -> torch.Tensor:
+        if point_idx is None:
+            global_base = self.b_prior_base
+            low_base = self.b_prior_low
+            high_base = self.b_prior_high
+        else:
+            global_base = self.b_prior_base.index_select(0, point_idx)
+            low_base = self.b_prior_low.index_select(0, point_idx)
+            high_base = self.b_prior_high.index_select(0, point_idx)
+        if self.b_prior_mode == "global_mean":
+            return global_base.unsqueeze(0).expand(q_norm.shape[0], *global_base.shape)
+        q_amp = self.q_amp_raw(q_norm)
+        if self.detach_b_prior_regime_weight:
+            q_amp = q_amp.detach()
+        if self.b_prior_mode in {"amp_median_cluster", "amp_p75_cluster"}:
+            threshold = float(self.cluster_threshold if self.cluster_threshold is not None else 0.0)
+            weight = (q_amp > threshold).to(dtype=q_norm.dtype).reshape(q_norm.shape[0], 1, 1, 1)
+        elif self.b_prior_mode == "amp_linear_interp":
+            denom = max(float(self.amp_high_ref - self.amp_low_ref), 1.0e-12)
+            weight = torch.clamp((q_amp - float(self.amp_low_ref)) / denom, 0.0, 1.0).reshape(q_norm.shape[0], 1, 1, 1)
+        else:
+            raise RuntimeError(f"unknown b_prior_mode {self.b_prior_mode!r}")
+        low = low_base.unsqueeze(0).expand(q_norm.shape[0], *low_base.shape)
+        high = high_base.unsqueeze(0).expand(q_norm.shape[0], *high_base.shape)
+        return (1.0 - weight) * low + weight * high
+
+    def b_prior(self, q_norm: torch.Tensor, point_idx: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+        delta, point_latent = self.b_prior_delta(point_idx)
+        base = self.prior_base_for_q(q_norm, point_idx=point_idx)
+        return base + delta.unsqueeze(0), point_latent
 
     def components(self, q_norm: torch.Tensor, point_idx: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if q_norm.ndim == 1:
             q_norm = q_norm.unsqueeze(0)
-        b_prior, point_latent = self.b_prior(point_idx)
+        b_prior, point_latent = self.b_prior(q_norm, point_idx=point_idx)
         branch_in, q_amp = self.branch_features(q_norm)
         branch_latent = self.branch_encoder(branch_in)
-        linear = torch.einsum("pak,bk->bpa", b_prior, q_norm)
+        linear = torch.einsum("bpak,bk->bpa", b_prior, q_norm)
 
         batch = q_norm.shape[0]
         point_count = point_latent.shape[0]
@@ -425,10 +528,23 @@ class FormalV2Prototype(nn.Module):
     def forward(self, q_norm: torch.Tensor, point_idx: torch.Tensor | None = None) -> torch.Tensor:
         return self.components(q_norm, point_idx=point_idx)[0]
 
+    def anchor_forward(self, q_norm: torch.Tensor, point_idx: torch.Tensor | None = None) -> torch.Tensor:
+        if q_norm.ndim == 1:
+            q_norm = q_norm.unsqueeze(0)
+        b_prior = self.prior_base_for_q(q_norm, point_idx=point_idx)
+        return torch.einsum("bpak,bk->bpa", b_prior, q_norm)
+
 
 def jacobian_norm(model: FormalV2Prototype, q_norm: torch.Tensor, point_idx: torch.Tensor | None = None) -> torch.Tensor:
     def one(q_single: torch.Tensor) -> torch.Tensor:
         return model(q_single, point_idx=point_idx)[0]
+
+    return vmap(jacrev(one))(q_norm)
+
+
+def jacobian_anchor_norm(model: FormalV2Prototype, q_norm: torch.Tensor, point_idx: torch.Tensor | None = None) -> torch.Tensor:
+    def one(q_single: torch.Tensor) -> torch.Tensor:
+        return model.anchor_forward(q_single, point_idx=point_idx)[0]
 
     return vmap(jacrev(one))(q_norm)
 
@@ -451,6 +567,7 @@ def eval_split(
     le_std: torch.Tensor,
     frame_chunk: int,
     point_chunk: int,
+    anchor_only: bool = False,
 ) -> dict[str, float]:
     q_norm = data["q_norm"]
     le_norm = data["le_norm"]
@@ -470,7 +587,7 @@ def eval_split(
     with torch.no_grad():
         for f0 in range(0, int(q_norm.shape[0]), int(frame_chunk)):
             f1 = min(f0 + int(frame_chunk), int(q_norm.shape[0]))
-            pred_norm = model(q_norm[f0:f1])
+            pred_norm = model.anchor_forward(q_norm[f0:f1]) if anchor_only else model(q_norm[f0:f1])
             pred_local = pred_norm * le_std.reshape(1, 1, 6)
             target_norm = le_norm[f0:f1]
             target_local = le[f0:f1]
@@ -481,7 +598,8 @@ def eval_split(
             le_diff_sq = le_diff_sq + torch.sum(diff_local * diff_local)
             le_den_sq = le_den_sq + torch.sum(target_local * target_local)
             le_count += int(diff_local.numel())
-        zero_norm = model(torch.zeros(1, q_norm.shape[-1], device=q_norm.device, dtype=q_norm.dtype))
+        zero_input = torch.zeros(1, q_norm.shape[-1], device=q_norm.device, dtype=q_norm.dtype)
+        zero_norm = model.anchor_forward(zero_input) if anchor_only else model(zero_input)
         zero_local = zero_norm * le_std.reshape(1, 1, 6)
 
     ad_norm_diff_sq = torch.zeros((), device=q_norm.device, dtype=q_norm.dtype)
@@ -503,7 +621,7 @@ def eval_split(
         for p0 in range(0, int(le.shape[1]), int(point_chunk)):
             p1 = min(p0 + int(point_chunk), int(le.shape[1]))
             pidx = torch.arange(p0, p1, device=q_norm.device, dtype=torch.long)
-            ad_norm = jacobian_norm(model, q_chunk, point_idx=pidx)
+            ad_norm = jacobian_anchor_norm(model, q_chunk, point_idx=pidx) if anchor_only else jacobian_norm(model, q_chunk, point_idx=pidx)
             target_norm = b_norm[f0:f1, p0:p1]
             target_local = b_local[f0:f1, p0:p1]
             ad_local = denormalize_b(ad_norm, le_std, q_std)
@@ -642,6 +760,7 @@ def per_case_metrics(
                 "Bq_oracle_rel": scalar_float(rel_norm_torch(bq_oracle - target_local, target_local)),
                 "Bq_oracle_rmse": scalar_float(torch.sqrt(torch.mean((bq_oracle - target_local) ** 2))),
                 "B_mean_prior_LE_rel": scalar_float(rel_norm_torch(prior_local - target_local, target_local)),
+                "B_prior_part_LE_rel": scalar_float(rel_norm_torch(prior_local - target_local, target_local)),
                 "pred_local_rms": scalar_float(torch.sqrt(torch.mean(pred_local * pred_local))),
                 "B_prior_part_rms": scalar_float(torch.sqrt(torch.mean(prior_local * prior_local))),
                 "residual_part_rms": scalar_float(torch.sqrt(torch.mean(residual_local * residual_local))),
@@ -701,6 +820,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     norm = compute_normalization(train_np_raw)
     train_np = normalize_dataset(train_np_raw, norm)
     val_np = normalize_dataset(val_np_raw, norm)
+    b_prior_state = build_b_prior_state(train_np, str(args.b_prior_mode))
 
     out_root = Path(args.out_root).resolve()
     out_root.mkdir(parents=True, exist_ok=True)
@@ -731,6 +851,14 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "B_norm_scale_min": norm["B_norm_scale_min"],
         "B_norm_scale_max": norm["B_norm_scale_max"],
         "B_norm_scale_rms": norm["B_norm_scale_rms"],
+        "B_prior_mode": str(args.b_prior_mode),
+        "B_prior_cluster_threshold": b_prior_state["cluster_threshold"],
+        "B_prior_cluster_threshold_kind": b_prior_state["cluster_threshold_kind"],
+        "B_prior_cluster_low_frame_count": b_prior_state["cluster_low_frame_count"],
+        "B_prior_cluster_high_frame_count": b_prior_state["cluster_high_frame_count"],
+        "B_prior_amp_low_ref": b_prior_state["amp_low_ref"],
+        "B_prior_amp_high_ref": b_prior_state["amp_high_ref"],
+        "detach_b_prior_regime_weight": bool(args.detach_b_prior_regime_weight),
     }
     norm_summary_path.write_text(json.dumps(norm_summary, indent=2, ensure_ascii=False, sort_keys=True, default=json_default), encoding="utf-8")
 
@@ -742,16 +870,17 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     ip_xi = torch.as_tensor(train_np["ip_xi"], dtype=dtype, device=device)
     q_std = torch.as_tensor(norm["q_std_floor"], dtype=dtype, device=device)
     le_std = torch.as_tensor(norm["le_std_floor"], dtype=dtype, device=device)
-    b_prior_norm_mean = train_data["b_norm"].mean(dim=0)
     model = FormalV2Prototype(
         ip_xi,
-        b_prior_norm_mean,
+        b_prior_state,
         q_std,
         q_amp_ref=float(norm["q_amp_ref"]),
         hidden=int(args.hidden),
         use_q_amp=bool(args.use_q_amp),
         use_q_dir=bool(args.use_q_dir),
         use_amp_regime_descriptor=bool(args.use_amp_regime_descriptor),
+        b_prior_mode=str(args.b_prior_mode),
+        detach_b_prior_regime_weight=bool(args.detach_b_prior_regime_weight),
         gate_c=float(args.gate_c),
     ).to(device=device, dtype=dtype)
     if bool(args.freeze_b_prior_table):
@@ -796,6 +925,27 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         }
         row["score"] = checkpoint_score(row)
         return row
+
+    anchor_train = eval_split(
+        model,
+        train_data,
+        prefix="B_prior_anchor_train",
+        q_std=q_std,
+        le_std=le_std,
+        frame_chunk=int(args.eval_frame_batch),
+        point_chunk=int(args.eval_point_batch),
+        anchor_only=True,
+    )
+    anchor_val = eval_split(
+        model,
+        val_data,
+        prefix="B_prior_anchor_val",
+        q_std=q_std,
+        le_std=le_std,
+        frame_chunk=int(args.eval_frame_batch),
+        point_chunk=int(args.eval_point_batch),
+        anchor_only=True,
+    )
 
     initial = eval_all(0)
     history.append(initial)
@@ -941,6 +1091,15 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "use_q_amp": bool(args.use_q_amp),
         "use_q_dir": bool(args.use_q_dir),
         "use_amp_regime_descriptor": bool(args.use_amp_regime_descriptor),
+        "B_prior_mode": str(args.b_prior_mode),
+        "B_prior_cluster_threshold": b_prior_state["cluster_threshold"],
+        "B_prior_cluster_threshold_kind": b_prior_state["cluster_threshold_kind"],
+        "B_prior_cluster_low_frame_count": b_prior_state["cluster_low_frame_count"],
+        "B_prior_cluster_high_frame_count": b_prior_state["cluster_high_frame_count"],
+        "B_prior_amp_low_ref": b_prior_state["amp_low_ref"],
+        "B_prior_amp_high_ref": b_prior_state["amp_high_ref"],
+        "detach_b_prior_regime_weight": bool(args.detach_b_prior_regime_weight),
+        "B_prior_anchor_metrics": {**anchor_train, **anchor_val},
         "use_geometry_features": False,
         "freeze_b_prior_table": bool(args.freeze_b_prior_table),
         "write_per_case_history": bool(args.write_per_case_history),
@@ -997,6 +1156,9 @@ def main() -> None:
     parser.add_argument("--use-q-amp", action="store_true")
     parser.add_argument("--use-q-dir", action="store_true")
     parser.add_argument("--use-amp-regime-descriptor", action="store_true")
+    parser.add_argument("--b-prior-mode", choices=B_PRIOR_MODES, default="global_mean")
+    parser.add_argument("--detach-b-prior-regime-weight", dest="detach_b_prior_regime_weight", action="store_true", default=True)
+    parser.add_argument("--no-detach-b-prior-regime-weight", dest="detach_b_prior_regime_weight", action="store_false")
     parser.add_argument("--freeze-b-prior-table", action="store_true")
     parser.add_argument("--write-per-case-history", action="store_true")
     parser.add_argument("--gate-c", type=float, default=0.1)

@@ -3,6 +3,98 @@
 This file records the route-level history for the Abaqus real-integration-point
 DeepONet/query-point training line.  Keep it updated whenever this route changes.
 
+## v2j - 2026-06-24 - State-dependent B prior prototype audit
+
+Purpose:
+
+- Test the v2i diagnosis that the point-only global train-mean B prior is a
+  poor LE value anchor.
+- Add simple train-only state/regime-dependent B priors before widening the
+  residual model or making a formal training claim.
+- Preserve zero-q anchor, AD-B local metrics, and raw-B backprojection metrics.
+
+Included:
+
+- `scripts/audit_v2_state_dependent_b_prior.py`
+- `scripts/train_v2_formal_prototype.py` options:
+  `--b-prior-mode`, `--detach-b-prior-regime-weight`, and
+  `--no-detach-b-prior-regime-weight`.
+- `docs/query_point_v2_state_dependent_b_prior_audit.md`
+- Route documentation update in
+  `docs/query_point_v2_coordinate_consistent_route.md`.
+
+Prior modes:
+
+```text
+global_mean
+amp_median_cluster
+amp_p75_cluster
+amp_linear_interp
+```
+
+The default remains `global_mean`, preserving old behavior.
+
+No-training anchor audit:
+
+- `global_mean`:
+  - `train_LE_local_rel=29.46612548828125`
+  - `val_LE_local_rel=10.826595306396484`
+  - `train_AD_B_local_rel=0.29525285959243774`
+  - `val_AD_B_local_rel=0.19587740302085876`
+- `amp_median_cluster`:
+  - threshold `0.003093380878729739`
+  - cluster sizes `40 low / 40 high`
+  - `train_LE_local_rel=21.19461441040039`
+  - `val_LE_local_rel=5.700911998748779`
+- `amp_p75_cluster`:
+  - threshold `0.005826574499032849`
+  - cluster sizes `60 low / 20 high`
+  - `train_LE_local_rel=4.77639102935791`
+  - `val_LE_local_rel=5.700374126434326`
+  - `train_AD_B_local_rel=0.22865082323551178`
+  - `val_AD_B_local_rel=0.10279608517885208`
+- `amp_linear_interp_detached`:
+  - `train_LE_local_rel=5.709594249725342`
+  - `val_LE_local_rel=5.700374126434326`
+
+Training diagnostic, best run:
+
+- `amp_p75_cluster`, detached regime weight, best combined at step `1250`:
+  - `train_LE_local_rel=4.701291084289551`
+  - `val_LE_local_rel=5.470116138458252`
+  - `train_AD_B_local_rel=0.31725096702575684`
+  - `val_AD_B_local_rel=0.11935402452945709`
+  - `val_AD_B_local_cos=0.9963414072990417`
+  - `val_B_model_raw_projected_rel=0.12048347294330597`
+  - `zero_q_LE_local_rms=0.0`
+
+Current interpretation:
+
+```text
+v2j prototype diagnostic completed.
+State/regime-dependent B prior clearly improves the LE value anchor.
+The p75 cluster reproduces the v2i no-training p75 baseline.
+The training prototype starts from train_LE_rel≈4.78 instead of ≈29.47.
+Residual training gives only small LE improvement and can degrade AD-B/raw-B.
+Model performance is not established.
+```
+
+Next recommendation:
+
+```text
+Keep B_prior(point, state/regime) on the v2 route, but run another targeted
+audit on regime-gate smoothness, residual/anchor training schedule, and whether
+AD-B supervision should use anchor-only, detached-regime, or full-tangent
+derivatives.
+```
+
+Validation boundary:
+
+- No old TRUE176 `LE/B` labels were used as v2 labels.
+- No tag was moved.
+- No `.npz`, `.odb`, `.pt`, `.pth`, checkpoint, loss-history, or generated
+  output file is committed.
+
 ## v2i - 2026-06-24 - Value-field correction diagnostics
 
 Purpose:

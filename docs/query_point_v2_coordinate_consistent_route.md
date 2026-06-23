@@ -688,6 +688,86 @@ Start with an auditable low-risk variant such as a two-regime or
 amplitude-interpolated B prior, while preserving the anchored zero-q structure,
 AD-B-local metrics, and raw-B backprojection metrics.
 
+## v2j State-Dependent B Prior Prototype Status
+
+v2j implements a low-risk diagnostic version of the v2i recommendation.  It
+does not change the residual network size and does not make a formal
+performance claim.
+
+Added:
+
+```text
+scripts/audit_v2_state_dependent_b_prior.py
+docs/query_point_v2_state_dependent_b_prior_audit.md
+```
+
+`scripts/train_v2_formal_prototype.py` now supports:
+
+```text
+--b-prior-mode global_mean
+--b-prior-mode amp_median_cluster
+--b-prior-mode amp_p75_cluster
+--b-prior-mode amp_linear_interp
+--detach-b-prior-regime-weight
+--no-detach-b-prior-regime-weight
+```
+
+The default remains `global_mean`, preserving prior behavior.
+
+No-training anchor audit:
+
+```text
+global_mean:
+  train_LE_local_rel = 29.46612548828125
+  val_LE_local_rel = 10.826595306396484
+  train_AD_B_local_rel = 0.29525285959243774
+  val_AD_B_local_rel = 0.19587740302085876
+
+amp_p75_cluster:
+  threshold = 0.005826574499032849
+  cluster sizes = 60 low / 20 high
+  train_LE_local_rel = 4.77639102935791
+  val_LE_local_rel = 5.700374126434326
+  train_AD_B_local_rel = 0.22865082323551178
+  val_AD_B_local_rel = 0.10279608517885208
+```
+
+This reproduces the v2i p75 anchor baseline and confirms that the catastrophic
+global-mean value anchor is not inherent to the v2 coordinate contract.
+
+Training diagnostic:
+
+```text
+amp_p75_cluster best_combined:
+  step = 1250
+  train_LE_local_rel = 4.701291084289551
+  val_LE_local_rel = 5.470116138458252
+  train_AD_B_local_rel = 0.31725096702575684
+  val_AD_B_local_rel = 0.11935402452945709
+  val_AD_B_local_cos = 0.9963414072990417
+  val_B_model_raw_projected_rel = 0.12048347294330597
+  zero_q_LE_local_rms = 0.0
+```
+
+Conservative interpretation:
+
+```text
+state/regime-dependent B prior clearly improves the LE value anchor;
+the p75-cluster prototype starts from a much less catastrophic train_LE state;
+short residual training gives only small LE improvement and can degrade AD-B;
+model performance is not established.
+```
+
+The next v2 step should refine state-dependent B-prior/tangent handling rather
+than simply widening the residual branch:
+
+```text
+B_prior(point, state/regime)
+```
+
+should stay on the route, but its regime gate and AD-B tangent definition need
+another targeted audit before formal training claims.
+
 ## Reusable Existing Pieces
 
 The current repository already has useful pieces:

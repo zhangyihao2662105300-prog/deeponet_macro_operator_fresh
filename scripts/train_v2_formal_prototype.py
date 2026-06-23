@@ -342,6 +342,7 @@ class FormalV2Prototype(nn.Module):
         hidden: int,
         use_q_amp: bool,
         use_q_dir: bool,
+        use_amp_regime_descriptor: bool,
         gate_c: float,
     ) -> None:
         super().__init__()
@@ -351,9 +352,11 @@ class FormalV2Prototype(nn.Module):
         self.q_amp_ref = float(q_amp_ref)
         self.use_q_amp = bool(use_q_amp)
         self.use_q_dir = bool(use_q_dir)
+        self.use_amp_regime_descriptor = bool(use_amp_regime_descriptor)
         self.gate_c = float(gate_c)
 
         branch_dim = 42 + (1 if self.use_q_amp else 0) + (42 if self.use_q_dir else 0)
+        branch_dim += 2 if self.use_amp_regime_descriptor else 0
         self.point_encoder = nn.Sequential(nn.Linear(3, hidden), nn.Tanh(), nn.Linear(hidden, hidden), nn.Tanh())
         self.branch_encoder = nn.Sequential(nn.Linear(branch_dim, hidden), nn.Tanh(), nn.Linear(hidden, hidden), nn.Tanh())
         self.b_delta_head = nn.Linear(hidden, 6 * 42)
@@ -376,6 +379,9 @@ class FormalV2Prototype(nn.Module):
             pieces.append(q_amp_scaled)
         if self.use_q_dir:
             pieces.append(q_useful / torch.clamp(q_amp_raw, min=1.0e-12))
+        if self.use_amp_regime_descriptor:
+            pieces.append(q_amp_scaled * q_amp_scaled)
+            pieces.append(torch.log1p(q_amp_scaled))
         return torch.cat(pieces, dim=-1), q_amp_scaled
 
     def b_prior(self, point_idx: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
@@ -389,7 +395,7 @@ class FormalV2Prototype(nn.Module):
         delta = self.b_delta_head(point_latent).reshape(xi.shape[0], 6, 42)
         return base + delta, point_latent
 
-    def forward(self, q_norm: torch.Tensor, point_idx: torch.Tensor | None = None) -> torch.Tensor:
+    def components(self, q_norm: torch.Tensor, point_idx: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if q_norm.ndim == 1:
             q_norm = q_norm.unsqueeze(0)
         b_prior, point_latent = self.b_prior(point_idx)
@@ -413,7 +419,11 @@ class FormalV2Prototype(nn.Module):
         residual0_in = torch.cat([point_expand, branch0_expand, amp0_expand], dim=-1)
         residual0 = self.residual(residual0_in.reshape(batch * point_count, -1)).reshape(batch, point_count, 6)
         gate = q_amp[:, None, :] / (q_amp[:, None, :] + float(self.gate_c))
-        return linear + gate * (residual_q - residual0)
+        residual_part = gate * (residual_q - residual0)
+        return linear + residual_part, linear, residual_part
+
+    def forward(self, q_norm: torch.Tensor, point_idx: torch.Tensor | None = None) -> torch.Tensor:
+        return self.components(q_norm, point_idx=point_idx)[0]
 
 
 def jacobian_norm(model: FormalV2Prototype, q_norm: torch.Tensor, point_idx: torch.Tensor | None = None) -> torch.Tensor:
@@ -608,6 +618,13 @@ def per_case_metrics(
         metrics = eval_split(model, subset, prefix=split, q_std=q_std, le_std=le_std, frame_chunk=frame_chunk, point_chunk=point_chunk)
         q_useful = subset["q"]
         q_amp = torch.linalg.vector_norm(q_useful, dim=1)
+        with torch.no_grad():
+            pred_norm, prior_norm, residual_norm = model.components(subset["q_norm"])
+            pred_local = pred_norm * le_std.reshape(1, 1, 6)
+            prior_local = prior_norm * le_std.reshape(1, 1, 6)
+            residual_local = residual_norm * le_std.reshape(1, 1, 6)
+            bq_oracle = torch.einsum("npak,nk->npa", subset["b"], q_useful)
+            target_local = subset["le"]
         rows.append(
             {
                 "split": split,
@@ -622,6 +639,13 @@ def per_case_metrics(
                 "AD_B_local_cos": metrics[f"{split}_AD_B_local_cos"],
                 "B_raw_projected_rel": metrics[f"{split}_B_model_raw_projected_rel"],
                 "B_raw_rel": metrics[f"{split}_B_model_raw_rel"],
+                "Bq_oracle_rel": scalar_float(rel_norm_torch(bq_oracle - target_local, target_local)),
+                "Bq_oracle_rmse": scalar_float(torch.sqrt(torch.mean((bq_oracle - target_local) ** 2))),
+                "B_mean_prior_LE_rel": scalar_float(rel_norm_torch(prior_local - target_local, target_local)),
+                "pred_local_rms": scalar_float(torch.sqrt(torch.mean(pred_local * pred_local))),
+                "B_prior_part_rms": scalar_float(torch.sqrt(torch.mean(prior_local * prior_local))),
+                "residual_part_rms": scalar_float(torch.sqrt(torch.mean(residual_local * residual_local))),
+                "target_rms": scalar_float(torch.sqrt(torch.mean(target_local * target_local))),
                 "zero_q_LE_norm_rms": metrics[f"{split}_zero_q_LE_norm_rms"],
                 "zero_q_LE_local_rms": metrics[f"{split}_zero_q_LE_local_rms"],
                 "q_norm_mean": scalar_float(torch.mean(torch.linalg.vector_norm(subset["q_norm"], dim=1))),
@@ -727,6 +751,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         hidden=int(args.hidden),
         use_q_amp=bool(args.use_q_amp),
         use_q_dir=bool(args.use_q_dir),
+        use_amp_regime_descriptor=bool(args.use_amp_regime_descriptor),
         gate_c=float(args.gate_c),
     ).to(device=device, dtype=dtype)
     if bool(args.freeze_b_prior_table):
@@ -743,6 +768,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     eval_steps.add(int(args.steps))
 
     history: list[dict[str, Any]] = []
+    per_case_history_rows: list[dict[str, Any]] = []
     bests: dict[str, dict[str, Any]] = {}
 
     def eval_all(step: int, extra: dict[str, float] | None = None) -> dict[str, Any]:
@@ -774,6 +800,27 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     initial = eval_all(0)
     history.append(initial)
     update_best(bests, initial)
+    if bool(args.write_per_case_history):
+        for row in per_case_metrics(
+            model,
+            train_data,
+            split="train",
+            q_std=q_std,
+            le_std=le_std,
+            q_amp_ref=float(norm["q_amp_ref"]),
+            frame_chunk=int(args.eval_frame_batch),
+            point_chunk=int(args.eval_point_batch),
+        ) + per_case_metrics(
+            model,
+            val_data,
+            split="val",
+            q_std=q_std,
+            le_std=le_std,
+            q_amp_ref=float(norm["q_amp_ref"]),
+            frame_chunk=int(args.eval_frame_batch),
+            point_chunk=int(args.eval_point_batch),
+        ):
+            per_case_history_rows.append({"step": 0, **row})
 
     for step in range(1, int(args.steps) + 1):
         model.train()
@@ -817,6 +864,27 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             )
             history.append(row)
             update_best(bests, row)
+            if bool(args.write_per_case_history):
+                for case_row in per_case_metrics(
+                    model,
+                    train_data,
+                    split="train",
+                    q_std=q_std,
+                    le_std=le_std,
+                    q_amp_ref=float(norm["q_amp_ref"]),
+                    frame_chunk=int(args.eval_frame_batch),
+                    point_chunk=int(args.eval_point_batch),
+                ) + per_case_metrics(
+                    model,
+                    val_data,
+                    split="val",
+                    q_std=q_std,
+                    le_std=le_std,
+                    q_amp_ref=float(norm["q_amp_ref"]),
+                    frame_chunk=int(args.eval_frame_batch),
+                    point_chunk=int(args.eval_point_batch),
+                ):
+                    per_case_history_rows.append({"step": int(step), **case_row})
             print(json.dumps(row, sort_keys=True), flush=True)
 
     latest = history[-1]
@@ -855,6 +923,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     paths["latest"].write_text(json.dumps(latest, indent=2, ensure_ascii=False, sort_keys=True, default=json_default), encoding="utf-8")
     write_csv(paths["metrics_history"], history)
     write_csv(paths["per_case_attribution"], per_case_rows)
+    if per_case_history_rows:
+        write_csv(out_root / "per_case_history.csv", per_case_history_rows)
 
     summary = {
         "audit_name": "v2g_formal_prototype",
@@ -870,8 +940,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "normalization_summary": str(norm_summary_path),
         "use_q_amp": bool(args.use_q_amp),
         "use_q_dir": bool(args.use_q_dir),
+        "use_amp_regime_descriptor": bool(args.use_amp_regime_descriptor),
         "use_geometry_features": False,
         "freeze_b_prior_table": bool(args.freeze_b_prior_table),
+        "write_per_case_history": bool(args.write_per_case_history),
         "gate_c": float(args.gate_c),
         "steps": int(args.steps),
         "latest_step": int(latest["step"]),
@@ -892,6 +964,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "checkpoint_written": False,
         "output_paths": {key: str(path) for key, path in paths.items()},
     }
+    if per_case_history_rows:
+        summary["output_paths"]["per_case_history"] = str(out_root / "per_case_history.csv")
     paths["training_summary"].write_text(json.dumps(summary, indent=2, ensure_ascii=False, sort_keys=True, default=json_default), encoding="utf-8")
     print(json.dumps(summary, indent=2, ensure_ascii=False, sort_keys=True, default=json_default))
     return summary
@@ -922,7 +996,9 @@ def main() -> None:
     parser.add_argument("--grad-clip", type=float, default=10.0)
     parser.add_argument("--use-q-amp", action="store_true")
     parser.add_argument("--use-q-dir", action="store_true")
+    parser.add_argument("--use-amp-regime-descriptor", action="store_true")
     parser.add_argument("--freeze-b-prior-table", action="store_true")
+    parser.add_argument("--write-per-case-history", action="store_true")
     parser.add_argument("--gate-c", type=float, default=0.1)
     args = parser.parse_args()
 

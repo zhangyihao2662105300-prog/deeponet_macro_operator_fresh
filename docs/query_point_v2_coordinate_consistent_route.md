@@ -595,6 +595,99 @@ train-mean B prior whose `B@q` value prediction is poor for high-amplitude/mixed
 train cases.  Broader v2 training should wait until this value-field correction
 mechanism is diagnosed.
 
+## v2i Value-Field Correction Diagnostic Status
+
+v2i diagnoses why the formal v2 residual/value branch does not learn the
+multi-case LE value-field correction.  It adds:
+
+```text
+scripts/diagnose_v2_value_field_correction.py
+docs/query_point_v2_value_field_correction_diagnostic.md
+```
+
+It also extends `scripts/train_v2_formal_prototype.py` with diagnostic-only
+support for:
+
+```text
+--write-per-case-history
+--use-amp-regime-descriptor
+per-case Bq oracle / B-prior / residual attribution
+```
+
+Outputs are kept outside git:
+
+```text
+D:\IS-FEM\outputs\query_point_v2_design_audit\v2i_value_correction\
+```
+
+Key diagnostic results:
+
+```text
+LE-only best:
+  train_LE_local_rel = 28.903217315673828
+  val_LE_local_rel = 10.226631164550781
+
+LE+B best:
+  train_LE_local_rel = 28.91905975341797
+  val_LE_local_rel = 10.357998847961426
+
+remove case031 best:
+  train_LE_local_rel = 36.591793060302734
+  val_LE_local_rel = 7.851358890533447
+
+q_dir best:
+  train_LE_local_rel = 28.908042907714844
+  val_LE_local_rel = 10.261488914489746
+
+amplitude-regime descriptor best:
+  train_LE_local_rel = 28.912452697753906
+  val_LE_local_rel = 10.579803466796875
+```
+
+These runs are diagnostic only.  They do not establish model performance.
+
+Value-anchor baselines narrow the issue further:
+
+```text
+global train-mean B prior:
+  train_LE_local_rel = 29.466125499590156
+  val_LE_local_rel = 10.826594009457496
+
+clustered B prior by q_amp median:
+  train_LE_local_rel = 21.19461440553013
+  val_LE_local_rel = 5.700911624442508
+
+clustered B prior by q_amp p75:
+  train_LE_local_rel = 4.77639109241935
+  val_LE_local_rel = 5.700373146340969
+
+per-case train B-prior upper bound:
+  train_LE_local_rel = 0.29293951890558007
+  train_AD_B_local_rel = 0.027328778282940253
+```
+
+Current diagnosis:
+
+```text
+AD-B loss alone is not the main cause.
+case031 alone is not the main cause.
+q_dir alone is insufficient.
+simple nonlinear q_amp descriptors are insufficient.
+The point-only global train-mean B prior is a poor value anchor.
+State/regime-dependent B prior is strongly indicated.
+```
+
+The recommended next step is a v2j prototype that changes the value anchor /
+B-prior mechanism before broadening training:
+
+```text
+B_prior_norm(point, q_amp, q_dir or q_cluster)
+```
+
+Start with an auditable low-risk variant such as a two-regime or
+amplitude-interpolated B prior, while preserving the anchored zero-q structure,
+AD-B-local metrics, and raw-B backprojection metrics.
+
 ## Reusable Existing Pieces
 
 The current repository already has useful pieces:

@@ -3,6 +3,104 @@
 This file records the route-level history for the Abaqus real-integration-point
 DeepONet/query-point training line.  Keep it updated whenever this route changes.
 
+## v2i - 2026-06-24 - Value-field correction diagnostics
+
+Purpose:
+
+- Diagnose why the v2 formal prototype does not learn multi-case LE
+  value-field correction after v2h excluded normalization, B-prior coordinate
+  mismatch, B-prior table corruption, gate suppression as the main cause, and
+  single-case capacity failure.
+- Keep this as a targeted diagnostic stage, not formal performance training.
+
+Included:
+
+- `scripts/diagnose_v2_value_field_correction.py`
+- Diagnostic extensions in `scripts/train_v2_formal_prototype.py`:
+  `--write-per-case-history`, `--use-amp-regime-descriptor`, decomposed
+  `components()`, and per-case Bq/B-prior/residual attribution fields.
+- `docs/query_point_v2_value_field_correction_diagnostic.md`
+- Route documentation update in
+  `docs/query_point_v2_coordinate_consistent_route.md`.
+
+Diagnostic outputs:
+
+```text
+D:\IS-FEM\outputs\query_point_v2_design_audit\v2i_value_correction\
+```
+
+Key training-diagnostic results:
+
+- LE-only best:
+  - `train_LE_local_rel=28.903217315673828`
+  - `val_LE_local_rel=10.226631164550781`
+  - Interpretation: removing AD-B loss does not make the value residual learn.
+- LE+B best:
+  - `train_LE_local_rel=28.91905975341797`
+  - `val_LE_local_rel=10.357998847961426`
+  - Interpretation: AD-B loss alone is not the main blocker.
+- Remove `case031` best:
+  - `train_LE_local_rel=36.591793060302734`
+  - `val_LE_local_rel=7.851358890533447`
+  - Interpretation: removing the high-amplitude case improves held-out
+    low-amplitude validation LE, but does not fix train LE.
+- `--use-q-dir` best:
+  - `train_LE_local_rel=28.908042907714844`
+  - `val_LE_local_rel=10.261488914489746`
+  - Interpretation: direction descriptors alone are insufficient.
+- `--use-amp-regime-descriptor` best:
+  - `train_LE_local_rel=28.912452697753906`
+  - `val_LE_local_rel=10.579803466796875`
+  - Interpretation: simple nonlinear amplitude descriptors alone are
+    insufficient.
+
+Value-anchor baselines:
+
+- Global train-mean B prior:
+  - `train_LE_local_rel=29.466125499590156`
+  - `val_LE_local_rel=10.826594009457496`
+- Clustered B prior by `q_amp` median:
+  - `train_LE_local_rel=21.19461440553013`
+  - `val_LE_local_rel=5.700911624442508`
+  - `train_AD_B_local_rel=0.27490432440403983`
+  - `val_AD_B_local_rel=0.10293348806464925`
+- Clustered B prior by `q_amp` p75:
+  - `train_LE_local_rel=4.77639109241935`
+  - `val_LE_local_rel=5.700373146340969`
+  - `train_AD_B_local_rel=0.22865080859937914`
+  - `val_AD_B_local_rel=0.10279608559825179`
+- Per-case train B-prior upper bound:
+  - `train_LE_local_rel=0.29293951890558007`
+  - `train_AD_B_local_rel=0.027328778282940253`
+  - `train_B_raw_projected_rel=0.02765599599942974`
+
+Current interpretation:
+
+```text
+v2i engineering diagnostic completed.
+Model performance is not established.
+The most likely blocker is not the v2 coordinate chain or normalized B metrics,
+but the point-only global train-mean B prior used as a value anchor.  It is a
+reasonable average derivative baseline but a poor multi-case B@q value anchor.
+The residual branch is then asked to repair a large case/state-dependent value
+error while preserving AD-B, and it does not.
+```
+
+Recommended next step:
+
+```text
+v2j should change the value anchor / B-prior mechanism, starting with an
+auditable state- or regime-dependent B_prior_norm(point, q_amp, q_dir or
+q_cluster), such as a two-cluster or amplitude-interpolated B prior.
+```
+
+Validation boundary:
+
+- No old TRUE176 `LE/B` labels were used as v2 labels.
+- No tag was moved.
+- No `.npz`, `.odb`, `.pt`, `.pth`, checkpoint, loss-history, or generated
+  output file is committed.
+
 ## v2h - 2026-06-23 - Formal prototype sanity / ablation audit
 
 Purpose:

@@ -5,6 +5,7 @@ from .models import (
     FELinearResidualDeepONet,
     MacroDeepONet,
     NOEMStyleMIONet,
+    QueryFEAnchoredLinearResidualDeepONet,
     QueryFELinearResidualDeepONet,
     True176Shape4QrawDeepONet,
 )
@@ -13,6 +14,7 @@ __all__ = [
     "FELinearResidualDeepONet",
     "MacroDeepONet",
     "NOEMStyleMIONet",
+    "QueryFEAnchoredLinearResidualDeepONet",
     "QueryFELinearResidualDeepONet",
     "True176Shape4QrawDeepONet",
     "strain_jacobian_wrt_q",

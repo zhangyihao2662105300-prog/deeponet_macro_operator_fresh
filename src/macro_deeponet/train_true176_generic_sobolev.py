@@ -31,6 +31,7 @@ from torch.utils.data.distributed import DistributedSampler
 from .models import (
     FELinearResidualDeepONet,
     NOEMStyleMIONet,
+    QueryFEAnchoredLinearResidualDeepONet,
     QueryFELinearResidualDeepONet,
     True176Shape4QrawDeepONet,
 )
@@ -87,6 +88,9 @@ def _unwrap(model: nn.Module) -> nn.Module:
     return model.module if isinstance(model, DDP) else model
 
 
+QUERY_B_MODEL_TYPES = (QueryFELinearResidualDeepONet, QueryFEAnchoredLinearResidualDeepONet)
+
+
 def validate_point_feature_source_for_scale(
     *,
     scale_mode: str,
@@ -119,6 +123,10 @@ def build_model(
     q_start: int,
     q_dim: int,
     skip_init: np.ndarray,
+    q_zero_norm: np.ndarray | None = None,
+    le_zero_norm: np.ndarray | None = None,
+    q_raw_mean: np.ndarray | None = None,
+    q_raw_std: np.ndarray | None = None,
 ) -> nn.Module:
     style = str(args.model_style).strip().lower().replace("_", "-")
     common = {
@@ -150,6 +158,18 @@ def build_model(
             train_point_baseline=not bool(args.freeze_fe_point_baseline),
             zero_init_residual=not bool(args.no_zero_init_residual),
         )
+    if style in {"query-fe-linear-residual-anchored", "query-fe-anchored-linear-residual", "query-fe-anchored"}:
+        return QueryFEAnchoredLinearResidualDeepONet(
+            **common,
+            baseline_scale=float(args.fe_baseline_scale),
+            train_point_baseline=not bool(args.freeze_fe_point_baseline),
+            zero_init_residual=not bool(args.no_zero_init_residual),
+            q_zero_norm=q_zero_norm,
+            le_zero_norm=le_zero_norm,
+            q_raw_mean=q_raw_mean,
+            q_raw_std=q_raw_std,
+            gate_q0=float(getattr(args, "anchored_residual_gate_q0", 0.0)),
+        )
     if style in {"noem-mionet", "mionet", "noem"}:
         common.pop("residual_scale")
         return NOEMStyleMIONet(
@@ -159,12 +179,14 @@ def build_model(
         )
     if style in {"concat-skip", "legacy", "concat"}:
         return True176Shape4QrawDeepONet(**common)
-    raise ValueError("model_style must be one of: fe-linear-residual, query-fe-linear-residual, noem-mionet, concat-skip")
+    raise ValueError("model_style must be one of: fe-linear-residual, query-fe-linear-residual, query-fe-linear-residual-anchored, noem-mionet, concat-skip")
 
 
 def model_meta(model: nn.Module, branch_meta: dict[str, Any]) -> dict[str, Any]:
     base = _unwrap(model)
-    if isinstance(base, QueryFELinearResidualDeepONet):
+    if isinstance(base, QueryFEAnchoredLinearResidualDeepONet):
+        style = "query-fe-linear-residual-anchored"
+    elif isinstance(base, QueryFELinearResidualDeepONet):
         style = "query-fe-linear-residual"
     elif isinstance(base, FELinearResidualDeepONet):
         style = "fe-linear-residual"
@@ -182,7 +204,28 @@ def model_meta(model: nn.Module, branch_meta: dict[str, Any]) -> dict[str, Any]:
         "basis_dim": int(getattr(base, "basis_dim")),
         "strain_dim": int(getattr(base, "strain_dim")),
     }
-    if isinstance(base, QueryFELinearResidualDeepONet):
+    if isinstance(base, QueryFEAnchoredLinearResidualDeepONet):
+        meta.update(
+            {
+                "architecture_principle": (
+                    "Query-point FE-like B baseline used as a normalized LE value anchor, plus "
+                    "zero-subtracted residual."
+                ),
+                "linear_baseline": "le_zero_norm + B_base_norm(point_features) @ (q48_norm - q0_norm)",
+                "static_baseline": "global [6,48] prior initialized from mean training d(LE_norm)/d(q48_norm)",
+                "point_baseline": "learned from Trunk/query-point features only; no fixed per-IP parameter table",
+                "residual": "gate(q_raw) * (R_raw(q_norm, point) - R_raw(q0_norm, point))",
+                "anchor_contract": "raw q=0 maps to raw LE=0 by construction",
+                "supports_dynamic_points": bool(base.supports_dynamic_points),
+                "anchored_le_head": True,
+                "baseline_scale": float(base.baseline_scale),
+                "residual_scale": float(base.residual_scale),
+                "residual_gate_q0": float(base.gate_q0),
+                "train_point_baseline": bool(base.train_point_baseline),
+                "zero_init_residual": bool(base.zero_init_residual),
+            }
+        )
+    elif isinstance(base, QueryFELinearResidualDeepONet):
         meta.update(
             {
                 "architecture_principle": (
@@ -303,8 +346,8 @@ def _query_b_baseline_arrays(
     batch_size: int,
 ) -> tuple[np.ndarray, float, float, float]:
     base = _unwrap(model)
-    if not isinstance(base, QueryFELinearResidualDeepONet):
-        raise TypeError("query B baseline metrics require QueryFELinearResidualDeepONet")
+    if not isinstance(base, QUERY_B_MODEL_TYPES):
+        raise TypeError("query B baseline metrics require a query FE-linear residual model")
     rows: list[np.ndarray] = []
     corr_sq = 0.0
     corr_count = 0
@@ -401,7 +444,7 @@ def _warmstart_query_b_baseline(
     if source_key != "train-only":
         raise ValueError("--b-baseline-warmstart-source currently only allows train-only")
     base = _unwrap(model)
-    enabled = int(steps) > 0 and isinstance(base, QueryFELinearResidualDeepONet)
+    enabled = int(steps) > 0 and isinstance(base, QUERY_B_MODEL_TYPES)
     train_cases = sorted(np.unique(data.case_id[np.asarray(train_idx, dtype=np.int64)]).astype(np.int64).tolist())
     val_cases = sorted(np.unique(data.case_id[np.asarray(val_idx, dtype=np.int64)]).astype(np.int64).tolist())
     meta: dict[str, Any] = {
@@ -414,8 +457,8 @@ def _warmstart_query_b_baseline(
     }
     if int(steps) < 0:
         raise ValueError("--b-baseline-warmstart-steps must be >= 0")
-    if int(steps) > 0 and not isinstance(base, QueryFELinearResidualDeepONet):
-        raise ValueError("--b-baseline-warmstart-steps requires --model-style query-fe-linear-residual")
+    if int(steps) > 0 and not isinstance(base, QUERY_B_MODEL_TYPES):
+        raise ValueError("--b-baseline-warmstart-steps requires a query FE-linear residual model_style")
     if int(steps) > 0 and bool(getattr(base, "train_point_baseline", True)) is False:
         raise ValueError("B baseline warm-start requires trainable point baseline; do not use --freeze-fe-point-baseline")
     before = (
@@ -432,7 +475,7 @@ def _warmstart_query_b_baseline(
             batch_size=max(1, int(point_norm.shape[0])),
             prefix="b_prior_before",
         )
-        if isinstance(base, QueryFELinearResidualDeepONet)
+        if isinstance(base, QUERY_B_MODEL_TYPES)
         else {}
     )
     meta.update(before)
@@ -492,13 +535,13 @@ def _warmstart_query_b_baseline(
 def _freeze_b_baseline_for_main_train(model: nn.Module) -> dict[str, Any]:
     base = _unwrap(model)
     frozen: list[str] = []
-    if isinstance(base, QueryFELinearResidualDeepONet):
+    if isinstance(base, QUERY_B_MODEL_TYPES):
         base.global_b_norm.requires_grad_(False)
         frozen.append("global_b_norm")
     elif isinstance(base, FELinearResidualDeepONet):
         base.static_b_norm.requires_grad_(False)
         frozen.append("static_b_norm")
-    if isinstance(base, (FELinearResidualDeepONet, QueryFELinearResidualDeepONet)):
+    if isinstance(base, (FELinearResidualDeepONet, *QUERY_B_MODEL_TYPES)):
         for p in base.point_b_net.parameters():
             p.requires_grad_(False)
         frozen.append("point_b_net")
@@ -709,6 +752,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         q_start=q_start,
         q_dim=q_dim,
         skip_init=skip_init,
+        q_zero_norm=((0.0 - x_mean.reshape(-1)[q_start : q_start + q_dim]) / x_std.reshape(-1)[q_start : q_start + q_dim]).astype(np.float32),
+        le_zero_norm=((0.0 - le_mean) / le_std).astype(np.float32),
+        q_raw_mean=x_mean.reshape(-1)[q_start : q_start + q_dim].astype(np.float32),
+        q_raw_std=x_std.reshape(-1)[q_start : q_start + q_dim].astype(np.float32),
     ).to(device)
     train_point_sample_count = int(args.train_point_sample_count)
     if train_point_sample_count < 0:
@@ -716,7 +763,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     if train_point_sample_count > 0:
         base_model = _unwrap(model)
         if not bool(getattr(base_model, "supports_dynamic_points", False)):
-            raise ValueError("--train-point-sample-count requires --model-style query-fe-linear-residual")
+            raise ValueError("--train-point-sample-count requires a query FE-linear residual model_style")
     init_report = load_checkpoint(model, str(args.init_checkpoint))
     warmstart_meta = _warmstart_query_b_baseline(
         model,
@@ -874,7 +921,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                     "j_loss_action_mse": baseline_j_obj,
                 }
                 base_model = _unwrap(model)
-                if isinstance(base_model, (FELinearResidualDeepONet, QueryFELinearResidualDeepONet)) and float(args.baseline_jacobian_weight) > 0.0:
+                if isinstance(base_model, (FELinearResidualDeepONet, *QUERY_B_MODEL_TYPES)) and float(args.baseline_jacobian_weight) > 0.0:
                     b_base = base_model._linear_b_norm(pb)[:, :, :, columns]
                     baseline_j_norm_loss = nn.functional.mse_loss(b_base, j_true)
                     baseline_j_phys_loss, baseline_j_parts = physical_j_loss(
@@ -952,7 +999,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         row["point_b_correction_norm_ratio"] = float(warmstart_meta.get("point_b_correction_norm_ratio") or 0.0)
         row["global_b_prior_rms"] = float(warmstart_meta.get("global_b_prior_rms") or 0.0)
         row["point_b_correction_rms"] = float(warmstart_meta.get("point_b_correction_rms") or 0.0)
-        if is_main and isinstance(_unwrap(model), QueryFELinearResidualDeepONet):
+        if is_main and isinstance(_unwrap(model), QUERY_B_MODEL_TYPES):
             current_b_meta = _query_b_baseline_meta(
                 _unwrap(model),
                 point_norm,
@@ -1169,11 +1216,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--model-style",
         default="fe-linear-residual",
-        choices=["fe-linear-residual", "query-fe-linear-residual", "noem-mionet", "concat-skip"],
+        choices=["fe-linear-residual", "query-fe-linear-residual", "query-fe-linear-residual-anchored", "noem-mionet", "concat-skip"],
     )
     p.add_argument("--mionet-product-scale", default="none", choices=["none", "sqrt", "basis"])
     p.add_argument("--use-q-skip", action="store_true")
     p.add_argument("--residual-scale", type=float, default=1.0)
+    p.add_argument("--anchored-residual-gate-q0", type=float, default=0.0)
     p.add_argument("--le-loss-weight", type=float, default=1.0)
     p.add_argument("--fe-baseline-scale", type=float, default=1.0)
     p.add_argument("--freeze-fe-point-baseline", action="store_true")

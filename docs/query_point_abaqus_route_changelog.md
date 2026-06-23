@@ -1288,3 +1288,42 @@ Validation boundary:
 - No old TRUE176 `LE/B` labels were used as v1.2 labels.
 - No model, loss, learning-rate, or epoch settings were changed.
 - Large generated artifacts remain outside git and must not be committed.
+
+## v1.3 prototype - 2026-06-23 - Anchored LE head
+
+Purpose:
+
+- Move from v1.2 diagnostics to a structural LE value-anchor prototype.
+- Keep the old `query-fe-linear-residual` model style unchanged.
+- Add an opt-in anchored model style that enforces raw `q=0 -> LE=0`.
+
+Included:
+
+- Added `QueryFEAnchoredLinearResidualDeepONet`.
+- Added `--model-style query-fe-linear-residual-anchored`.
+- The anchored model computes:
+  `LE_hat_norm = LE_zero_norm + B_prior_norm(point) @ (q_norm - q0_norm)
+  + gate(||q_raw||) * (R_raw(q, point) - R_raw(q0, point))`.
+- Added evaluation metrics:
+  `zero_q_LE_pred_rms`, `zero_q_LE_pred_max_abs`,
+  `zero_q_residual_rms`, `Bprior_q_LE_rel`, and
+  `model_minus_Bprior_offset_rms`.
+- Added smoke coverage for forward shape, raw zero-q anchor,
+  residual zero-subtraction, AD-B, old model style compatibility, and a tiny
+  1-epoch anchored training smoke.
+- Added `docs/query_point_v1_3_anchored_le_head_design.md`.
+
+Current interpretation:
+
+- v1.3 is not a hyperparameter tuning step.  It is motivated by v1.2 evidence
+  that the LE value branch has a wrong zero/value anchor while the fresh
+  `q/LE/B` data contract and query B prior remain credible.
+- This prototype only establishes the optional structure and smoke behavior.
+  It does not claim improved formal case-level performance.
+
+Validation boundary:
+
+- No formal 50-epoch v1.3 training audit was run in this commit.
+- No old TRUE176 `LE/B` labels were used as v1.2/v1.3 labels.
+- No tag was moved.
+- Large generated artifacts remain outside git and must not be committed.

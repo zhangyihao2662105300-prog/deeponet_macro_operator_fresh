@@ -454,6 +454,151 @@ class QueryFELinearResidualDeepONet(nn.Module):
         return linear + self.residual_scale * residual + self.bias.view(1, 1, self.strain_dim)
 
 
+class QueryFEAnchoredLinearResidualDeepONet(QueryFELinearResidualDeepONet):
+    """Query FE-linear residual model with an explicit zero-displacement anchor.
+
+    The model stays in normalized LE coordinates internally:
+
+        LE_norm = B_base_norm(point) @ q_norm
+                  + gate(q_raw) * (R_raw(q_norm, point) - R_raw(q0_norm, point)).
+
+    ``q0_norm`` is the standardized branch vector for raw ``q=0``.  The
+    residual subtraction guarantees ``R(q=0)=0``.  ``le_zero_norm`` is the
+    normalized raw ``LE=0`` value, so the output also satisfies
+    ``LE_hat(raw q=0)=0`` after de-normalization.
+    """
+
+    supports_dynamic_points = True
+    anchored_le_head = True
+
+    def __init__(
+        self,
+        *,
+        input_dim: int,
+        point_dim: int,
+        q_start: int,
+        q_dim: int = 48,
+        ip_count: int = 0,
+        strain_dim: int = 6,
+        basis_dim: int = 96,
+        hidden_dim: int = 384,
+        branch_depth: int = 5,
+        trunk_depth: int = 5,
+        activation: str = "tanh",
+        skip_init: torch.Tensor | None = None,
+        train_skip: bool = True,
+        residual_scale: float = 1.0,
+        baseline_scale: float = 1.0,
+        train_point_baseline: bool = True,
+        zero_init_residual: bool = True,
+        q_zero_norm: torch.Tensor | None = None,
+        le_zero_norm: torch.Tensor | None = None,
+        q_raw_mean: torch.Tensor | None = None,
+        q_raw_std: torch.Tensor | None = None,
+        gate_q0: float = 0.0,
+    ) -> None:
+        super().__init__(
+            input_dim=input_dim,
+            point_dim=point_dim,
+            q_start=q_start,
+            q_dim=q_dim,
+            ip_count=ip_count,
+            strain_dim=strain_dim,
+            basis_dim=basis_dim,
+            hidden_dim=hidden_dim,
+            branch_depth=branch_depth,
+            trunk_depth=trunk_depth,
+            activation=activation,
+            skip_init=skip_init,
+            train_skip=train_skip,
+            residual_scale=residual_scale,
+            baseline_scale=baseline_scale,
+            train_point_baseline=train_point_baseline,
+            zero_init_residual=zero_init_residual,
+        )
+        if q_zero_norm is None:
+            q_zero = torch.zeros(self.q_dim, dtype=torch.float32)
+        else:
+            q_zero = torch.as_tensor(q_zero_norm, dtype=torch.float32).reshape(self.q_dim)
+        if le_zero_norm is None:
+            le_zero = torch.zeros(self.strain_dim, dtype=torch.float32)
+        else:
+            le_zero = torch.as_tensor(le_zero_norm, dtype=torch.float32).reshape(-1, self.strain_dim)
+            if le_zero.shape[0] == 1:
+                le_zero = le_zero.reshape(self.strain_dim)
+            elif le_zero.shape[0] != self.ip_count:
+                raise ValueError("le_zero_norm must have shape [6], [1,6], or [P,6]")
+        if q_raw_mean is None:
+            q_mean = torch.zeros(self.q_dim, dtype=torch.float32)
+        else:
+            q_mean = torch.as_tensor(q_raw_mean, dtype=torch.float32).reshape(self.q_dim)
+        if q_raw_std is None:
+            q_std = torch.ones(self.q_dim, dtype=torch.float32)
+        else:
+            q_std = torch.clamp(torch.as_tensor(q_raw_std, dtype=torch.float32).reshape(self.q_dim), min=1.0e-12)
+        self.register_buffer("q_zero_norm", q_zero)
+        self.register_buffer("le_zero_norm", le_zero)
+        self.register_buffer("q_raw_mean", q_mean)
+        self.register_buffer("q_raw_std", q_std)
+        self.gate_q0 = float(max(0.0, gate_q0))
+        self.bias.requires_grad_(False)
+
+    def _residual_raw(self, x_norm: torch.Tensor, point_norm: torch.Tensor) -> torch.Tensor:
+        b = self.branch(x_norm).view(-1, self.strain_dim, self.basis_dim)
+        point_count = int(point_norm.shape[1])
+        t = self.trunk(point_norm.reshape(-1, self.point_dim)).view(
+            x_norm.shape[0], point_count, self.strain_dim, self.basis_dim
+        )
+        return torch.einsum("bak,bpak->bpa", b, t) / (self.basis_dim**0.5)
+
+    def _q_zero_branch(self, x_norm: torch.Tensor) -> torch.Tensor:
+        x0 = x_norm.clone()
+        x0[:, self.q_start : self.q_start + self.q_dim] = self.q_zero_norm.to(dtype=x_norm.dtype, device=x_norm.device)
+        return x0
+
+    def _residual_gate(self, x_norm: torch.Tensor) -> torch.Tensor:
+        qn = x_norm[:, self.q_start : self.q_start + self.q_dim]
+        q_raw = qn * self.q_raw_std.to(dtype=x_norm.dtype, device=x_norm.device) + self.q_raw_mean.to(
+            dtype=x_norm.dtype,
+            device=x_norm.device,
+        )
+        norm = torch.linalg.norm(q_raw, dim=-1, keepdim=True)
+        if self.gate_q0 <= 0.0:
+            return torch.ones_like(norm)
+        return norm / (norm + torch.as_tensor(self.gate_q0, dtype=x_norm.dtype, device=x_norm.device))
+
+    def zero_q_prediction(self, x_norm: torch.Tensor, point_norm: torch.Tensor) -> torch.Tensor:
+        return self.forward(self._q_zero_branch(x_norm), point_norm)
+
+    def residual_offset_norm(self, x_norm: torch.Tensor, point_norm: torch.Tensor) -> torch.Tensor:
+        raw = self._residual_raw(x_norm, point_norm)
+        raw0 = self._residual_raw(self._q_zero_branch(x_norm), point_norm)
+        return self.residual_scale * self._residual_gate(x_norm).view(-1, 1, 1) * (raw - raw0)
+
+    def forward(self, x_norm: torch.Tensor, point_norm: torch.Tensor) -> torch.Tensor:
+        if x_norm.ndim != 2:
+            raise ValueError(f"x_norm must have shape [B,{self.input_dim}]")
+        if point_norm.ndim != 3:
+            raise ValueError("point_norm must have shape [B,P,F]")
+        if x_norm.shape[-1] != self.input_dim:
+            raise ValueError(f"x_norm last dimension must be {self.input_dim}")
+        if point_norm.shape[-1] != self.point_dim:
+            raise ValueError(f"point_norm last dimension must be {self.point_dim}")
+        if point_norm.shape[0] != x_norm.shape[0]:
+            raise ValueError("x_norm and point_norm batch dimensions must match")
+
+        qn = x_norm[:, self.q_start : self.q_start + self.q_dim]
+        b_base = self._linear_b_norm(point_norm)
+        q0 = self.q_zero_norm.to(dtype=x_norm.dtype, device=x_norm.device).view(1, self.q_dim)
+        linear = torch.einsum("bpaj,bj->bpa", b_base, qn - q0)
+        le0 = self.le_zero_norm.to(dtype=x_norm.dtype, device=x_norm.device)
+        if le0.ndim == 1:
+            anchor = le0.view(1, 1, self.strain_dim)
+        else:
+            anchor = le0.view(1, le0.shape[0], self.strain_dim)
+        return anchor + linear + self.residual_offset_norm(x_norm, point_norm)
+
+
 class NOEMStyleMIONet(nn.Module):
     """NOEM/MIONet-style TRUE176 operator model.
 

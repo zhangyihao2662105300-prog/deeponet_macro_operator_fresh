@@ -23,6 +23,7 @@ from macro_deeponet.models import (
     FELinearResidualDeepONet,
     MacroDeepONet,
     NOEMStyleMIONet,
+    QueryFEAnchoredLinearResidualDeepONet,
     QueryFELinearResidualDeepONet,
     True176Shape4QrawDeepONet,
 )
@@ -258,6 +259,59 @@ def test_query_fe_linear_residual_model_supports_dynamic_points() -> None:
     j = ad_jacobian(model, x_norm, p_query, [0, 3, 7], create_graph=False, method="forward")
     assert j.shape == (2, len(subset), 6, 3)
     assert torch.allclose(j[:, :, :, 0], torch.full((2, len(subset), 6), 0.25), atol=1.0e-6)
+
+
+def test_query_fe_anchored_residual_zero_q_anchor() -> None:
+    shape4 = np.asarray([[1.2, 0.05, 0.10, 0.00], [1.4, 0.04, 0.08, 0.20]], dtype=np.float32)
+    q48 = np.zeros((2, 48), dtype=np.float32)
+    branch, branch_meta = build_branch_features(shape4=shape4, q48_raw=q48, mode="xkeep-qraw")
+    point, _meta = build_point_features(shape4, include_id_features=False)
+    q_start = int(branch_meta["q_start"])
+    q_dim = int(branch_meta["q_dim"])
+    q_mean = torch.linspace(-0.2, 0.2, q_dim)
+    q_std = torch.linspace(0.5, 1.5, q_dim)
+    q_zero_norm = (0.0 - q_mean) / q_std
+    le_mean = torch.tensor([0.1, -0.2, 0.05, 0.0, 0.03, -0.04])
+    le_std = torch.tensor([2.0, 1.5, 1.2, 0.8, 1.1, 0.9])
+    le_zero_norm = (0.0 - le_mean) / le_std
+    skip = torch.zeros((6, q_dim), dtype=torch.float32)
+    skip[:, 0] = 0.25
+    model = QueryFEAnchoredLinearResidualDeepONet(
+        input_dim=branch.shape[-1],
+        point_dim=point.shape[-1],
+        ip_count=128,
+        basis_dim=12,
+        hidden_dim=32,
+        branch_depth=2,
+        trunk_depth=2,
+        q_start=q_start,
+        q_dim=q_dim,
+        skip_init=skip,
+        train_skip=False,
+        residual_scale=1.0,
+        train_point_baseline=False,
+        q_zero_norm=q_zero_norm,
+        le_zero_norm=le_zero_norm,
+        q_raw_mean=q_mean,
+        q_raw_std=q_std,
+        gate_q0=0.1,
+    )
+    assert model.supports_dynamic_points
+    p_norm = torch.as_tensor(point, dtype=torch.float32)
+    x_norm = torch.zeros(2, branch.shape[-1])
+    x_zero = x_norm.clone()
+    x_zero[:, q_start : q_start + q_dim] = q_zero_norm.reshape(1, q_dim)
+    le_zero = model(x_zero, p_norm)
+    le_zero_raw = le_zero * le_std.reshape(1, 1, 6) + le_mean.reshape(1, 1, 6)
+    assert torch.max(torch.abs(le_zero_raw)).item() < 1.0e-6
+    assert torch.max(torch.abs(model.residual_offset_norm(x_zero, p_norm))).item() < 1.0e-6
+
+    x_norm[:, q_start] = q_zero_norm[0] + 2.0
+    le = model(x_norm, p_norm)
+    assert le.shape == (2, 128, 6)
+    j = ad_jacobian(model, x_norm, p_norm[:, :5, :], [0], create_graph=False, method="forward")
+    assert j.shape == (2, 5, 6, 1)
+    assert torch.isfinite(j).all()
 
 
 def test_true176_keep_node_order_matches_q48_contract() -> None:
@@ -1325,6 +1379,115 @@ def test_query_b_baseline_can_freeze_after_warmstart() -> None:
         assert counts["point_b"] == 0
         assert counts["frozen"] > 0
         assert summary["history"][0]["le_loss_weight"] == 0.0
+
+
+def test_anchored_query_training_smoke_zero_q_metrics() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        compact = tmp_path / "anchored_query_compact.npz"
+        out_dir = tmp_path / "out"
+        n = 4
+        rng = np.random.default_rng(987)
+        q48 = rng.normal(scale=0.15, size=(n, 48)).astype(np.float32)
+        ip_xi = np.zeros((128, 3), dtype=np.float32)
+        ip_xi[:, 0] = np.linspace(-1.0, 1.0, 128, dtype=np.float32)
+        b = np.zeros((n, 128, 6, 48), dtype=np.float32)
+        for ip in range(128):
+            b[:, ip, 0, 0] = 0.05 + 0.001 * float(ip)
+            b[:, ip, 1, 1] = -0.03 + 0.0005 * float(ip)
+        le = np.einsum("npaj,nj->npa", b, q48).astype(np.float32)
+        np.savez(
+            compact,
+            q48_raw=q48,
+            LE128_base=le,
+            B_LE128_forward=b,
+            X_keep=np.zeros((n, 16, 3), dtype=np.float32),
+            ip_xi=ip_xi,
+            sample_paths=np.asarray(["case001_train", "case002_val"], dtype=str),
+        )
+        args = SimpleNamespace(
+            ddp=False,
+            cuda=False,
+            ddp_backend="gloo",
+            seed=11,
+            out_dir=out_dir,
+            compact=[str(compact)],
+            compact_list="",
+            target_ips="0,1,2,3",
+            scale_mode="normalized",
+            frame_stride=1,
+            max_frames_per_compact=0,
+            val_fraction=0.0,
+            val_cases="2",
+            split_mode="case",
+            allow_overlap_val=False,
+            max_eval_frames=4,
+            branch_feature_mode="xkeep-qraw",
+            b_label_coordinate="auto",
+            point_feature_source="data",
+            include_id_features=False,
+            allow_shape4_point_feature_fallback=False,
+            allow_physical_shape4_trunk=False,
+            detj_scale_dim=3,
+            le_normalization="global-component",
+            epochs=1,
+            batch_size=2,
+            eval_batch_size=1,
+            basis_dim=8,
+            hidden_dim=16,
+            branch_depth=2,
+            trunk_depth=2,
+            activation="tanh",
+            model_style="query-fe-linear-residual-anchored",
+            mionet_product_scale="none",
+            use_q_skip=False,
+            residual_scale=1.0,
+            anchored_residual_gate_q0=0.01,
+            le_loss_weight=1.0,
+            fe_baseline_scale=1.0,
+            freeze_fe_point_baseline=False,
+            freeze_b_baseline_after_warmstart=False,
+            global_b_lr_scale=1.0,
+            point_b_lr_scale=1.0,
+            no_zero_init_residual=False,
+            baseline_jacobian_weight=0.0,
+            baseline_j_loss_mode="norm",
+            b_baseline_warmstart_steps=5,
+            b_baseline_warmstart_lr=5.0e-3,
+            b_baseline_warmstart_weight_decay=0.0,
+            b_baseline_warmstart_source="train-only",
+            jacobian_columns="0,1",
+            jacobian_columns_per_batch=1,
+            jacobian_method="forward",
+            eval_columns="0,1",
+            j_loss_mode="norm",
+            physical_j_aux_weight=0.0,
+            physical_j_abs_weight=1.0,
+            physical_j_rel_weight=0.0,
+            physical_j_action_weight=0.0,
+            physical_j_rel_eps_scale=0.02,
+            physical_j_action_directions=0,
+            initial_jacobian_weight=1.0,
+            initial_tangent_weight=0.0,
+            tangent_directions=0,
+            lr=1.0e-4,
+            lr_decay=1.0,
+            grad_clip=10.0,
+            weight_decay=0.0,
+            eval_every=1,
+            log_every=1,
+            init_checkpoint="",
+            freeze_skip=False,
+            train_point_sample_count=0,
+        )
+        train_true176_generic(args)
+        summary = json.loads((out_dir / "training_summary.json").read_text(encoding="utf-8"))
+        assert summary["best_report"]["train_zero_q_LE_pred_rms"] < 1.0e-6
+        assert summary["best_report"]["val_zero_q_LE_pred_rms"] < 1.0e-6
+        assert "train_Bprior_q_LE_rel" in summary["best_report"]
+        assert "val_model_minus_Bprior_offset_rms" in summary["best_report"]
+        assert summary["warmstart_meta"]["warmstart_enabled"] is True
+        assert summary["latest_report"]["val_AD_B_rel"] >= 0.0
 
 
 def _write_coverage_compact(path: Path, case_id: int, direction_index: int) -> None:

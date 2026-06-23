@@ -271,6 +271,61 @@ def _le_std_scale_numpy(le_std: np.ndarray, point_count: int) -> np.ndarray:
     return np.maximum(vals, np.asarray(1.0e-12, dtype=np.float32))[:, :, :, None]
 
 
+def _query_b_prior_anchor_metrics(
+    model: nn.Module,
+    xb: torch.Tensor,
+    pb: torch.Tensor,
+    le_norm: np.ndarray,
+    le_true: np.ndarray,
+    norms: dict[str, np.ndarray],
+) -> dict[str, Any]:
+    base = unwrap_model(model)
+    if not hasattr(base, "_linear_b_norm") or not hasattr(base, "q_start") or not hasattr(base, "q_dim"):
+        return {}
+    q_start = int(getattr(base, "q_start"))
+    q_dim = int(getattr(base, "q_dim"))
+    qn = xb[:, q_start : q_start + q_dim]
+    if hasattr(base, "q_zero_norm") and hasattr(base, "le_zero_norm"):
+        q0 = base.q_zero_norm.to(device=xb.device, dtype=xb.dtype).view(1, q_dim)
+        le0 = base.le_zero_norm.to(device=xb.device, dtype=xb.dtype)
+        if le0.ndim == 1:
+            anchor0 = le0.view(1, 1, int(le0.shape[0]))
+        else:
+            anchor0 = le0.view(1, int(le0.shape[0]), int(le0.shape[1]))
+    else:
+        x_mean = torch.as_tensor(norms["x_mean"].reshape(-1), dtype=xb.dtype, device=xb.device)
+        x_std = torch.as_tensor(norms["x_std"].reshape(-1), dtype=xb.dtype, device=xb.device)
+        q0 = ((0.0 - x_mean[q_start : q_start + q_dim]) / x_std[q_start : q_start + q_dim]).view(1, q_dim)
+        le_mean = torch.as_tensor(norms["le_mean"], dtype=xb.dtype, device=xb.device)
+        le_std = torch.as_tensor(norms["le_std"], dtype=xb.dtype, device=xb.device)
+        anchor0 = (0.0 - le_mean) / le_std
+    with torch.no_grad():
+        b_base = base._linear_b_norm(pb)
+        bq_norm = anchor0 + torch.einsum("bpaj,bj->bpa", b_base, qn - q0)
+        zero_x = xb.clone()
+        zero_x[:, q_start : q_start + q_dim] = q0.to(dtype=xb.dtype, device=xb.device)
+        zero_norm = base(zero_x, pb)
+        if hasattr(base, "residual_offset_norm"):
+            residual_norm = base.residual_offset_norm(zero_x, pb)
+        else:
+            residual_norm = zero_norm - bq_norm
+    le_std_np = norms["le_std"].astype(np.float32)
+    le_mean_np = norms["le_mean"].astype(np.float32)
+    bq_raw = bq_norm.detach().cpu().numpy().astype(np.float64) * le_std_np + le_mean_np
+    zero_raw = zero_norm.detach().cpu().numpy().astype(np.float64) * le_std_np + le_mean_np
+    residual_raw = residual_norm.detach().cpu().numpy().astype(np.float64) * le_std_np
+    offset = np.asarray(le_norm, dtype=np.float64) * le_std_np + le_mean_np - bq_raw
+    return {
+        "Bprior_q_LE_rel": rel_np(bq_raw, le_true),
+        "Bprior_q_LE_cos": cos_np(bq_raw, le_true),
+        "Bprior_q_pred_rms": float(np.sqrt(np.mean(bq_raw * bq_raw))) if bq_raw.size else 0.0,
+        "model_minus_Bprior_offset_rms": float(np.sqrt(np.mean(offset * offset))) if offset.size else 0.0,
+        "zero_q_LE_pred_rms": float(np.sqrt(np.mean(zero_raw * zero_raw))) if zero_raw.size else 0.0,
+        "zero_q_LE_pred_max_abs": float(np.max(np.abs(zero_raw))) if zero_raw.size else 0.0,
+        "zero_q_residual_rms": float(np.sqrt(np.mean(residual_raw * residual_raw))) if residual_raw.size else 0.0,
+    }
+
+
 def j_norm_to_b_phys(j_norm: torch.Tensor, le_std: torch.Tensor, q_std_cols: torch.Tensor) -> torch.Tensor:
     q_scale = torch.clamp(q_std_cols, min=1.0e-12).reshape(1, 1, 1, -1)
     le_scale = _le_std_scale_torch(le_std, int(j_norm.shape[1]))
@@ -335,6 +390,7 @@ def evaluate(
     le_rows: list[np.ndarray] = []
     jn_rows: list[np.ndarray] = []
     bp_rows: list[np.ndarray] = []
+    anchor_rows: list[dict[str, Any]] = []
     q_start = int(np.asarray(norms.get("q_start", 4)).reshape(-1)[0])
     q_dim = int(np.asarray(norms.get("q_dim", 48)).reshape(-1)[0])
     q_std = norms["x_std"].reshape(-1)[q_start : q_start + q_dim].astype(np.float32)
@@ -348,6 +404,9 @@ def evaluate(
         with torch.no_grad():
             le_norm = model(xb, pb).detach().cpu().numpy()
         le_rows.append(le_norm * le_std + norms["le_mean"])
+        anchor = _query_b_prior_anchor_metrics(base, xb, pb, le_norm, le_raw[sub].astype(np.float64), norms)
+        if anchor:
+            anchor_rows.append(anchor)
         with torch.enable_grad():
             jn = ad_jacobian(base, xb, pb, columns, create_graph=False, method=jacobian_method)
         jn_np = jn.detach().cpu().numpy().astype(np.float64)
@@ -369,6 +428,9 @@ def evaluate(
         f"{prefix}_AD_B_rel": rel_np(b_pred, b_true),
         f"{prefix}_AD_B_cos": cos_np(b_pred, b_true),
     }
+    if anchor_rows:
+        for key in anchor_rows[0]:
+            out[f"{prefix}_{key}"] = float(np.mean([float(row[key]) for row in anchor_rows]))
     if len(columns) > 0:
         col_rel = np.asarray(
             [rel_np(b_pred[:, :, :, local], b_true[:, :, :, local]) for local, _col in enumerate(columns)],

@@ -1224,3 +1224,67 @@ Validation boundary:
 - No old TRUE176 `LE/B` labels were used as v1.2 labels.
 - No model, loss, learning-rate, or epoch settings were changed.
 - Large generated artifacts remain outside git and must not be committed.
+
+## v1.2 follow-up - 2026-06-23 - B@q anchor oracle diagnostic
+
+Purpose:
+
+- Test whether the stable query B prior provides a better held-out LE value
+  anchor than the current learned LE head.
+- Check the data-side oracle `B_true @ q48` against `LE_true`.
+- Keep this as an evaluation-only diagnostic: no training, no model/loss/lr
+  changes, and no epoch changes.
+
+Included:
+
+- Added `scripts/diagnose_v1_2_bq_anchor_oracle.py`.
+- The script reconstructs the checkpoint preprocessing, evaluates existing
+  checkpoints on selected held-out cases, and writes:
+  `bq_anchor_case_summary.csv`, `bq_anchor_frame_summary.csv`,
+  `zero_q_anchor_summary.csv`, `residual_offset_summary.csv`, and
+  `bq_anchor_diagnostic_summary.json`.
+
+Outputs:
+
+- Split_A diagnostic:
+  `D:\IS-FEM\outputs\query_point_v1_2_training_audit\bq_anchor_oracle_diagnostic\split_A_val41_49`
+- Split_B diagnostic:
+  `D:\IS-FEM\outputs\query_point_v1_2_training_audit\bq_anchor_oracle_diagnostic\split_B_val44_46`
+
+Key results:
+
+- `B_true @ q48` reconstructs `LE_true` well:
+  `Btrue_q_LE_rel=0.0400` for `case041`, `0.0517` for `case049`,
+  `0.0380` for `case044`, and `0.0233` for `case046`.
+- `B_prior @ q48` is substantially better than the current model LE head, but
+  still worse than zero on these low-LE held-out cases:
+  `Bprior_q_LE_rel=3.4515` vs `model_LE_rel=9.1422` for `case041`;
+  `1.6303` vs `4.0235` for `case049`;
+  `1.3224` vs `9.6526` for `case044`;
+  `1.5006` vs `7.7823` for `case046`.
+- The q=0 model output is large and near the observed error scale:
+  `zero_q_pred_rms=7.81e-04` for split_A and `9.02e-04` for split_B.
+- The full-model residual/value offset remains large:
+  `current_offset_rms=7.87e-04` to `8.99e-04`, compared with
+  `true_offset_rms=2.87e-06` to `1.14e-05`.
+
+Current interpretation:
+
+- The fresh strict-pass compact `q/LE/B` contract is strong: the data-side
+  `B_true @ q48` oracle nearly reconstructs LE.
+- The learned LE value head is not using the stable query B prior as a reliable
+  value anchor.  `B_prior @ q48` beats the current LE prediction by about
+  `2.47x` to `7.30x` in relative error.
+- `B_prior @ q48` alone is not a solved LE predictor for these low-LE held-out
+  cases because it remains worse than the zero baseline.
+- The next design question is therefore a value-anchor question, not another
+  data-contract or training-schedule question: consider an anchored form such as
+  `LE_hat = B_prior @ q + residual` with explicit zero-q and low-alpha residual
+  constraints.
+
+Validation boundary:
+
+- No new model was trained for this diagnostic.
+- No old TRUE176 `LE/B` labels were used as v1.2 labels.
+- No model, loss, learning-rate, or epoch settings were changed.
+- Large generated artifacts remain outside git and must not be committed.

@@ -33,6 +33,8 @@ from torch.func import jacrev, vmap
 
 B_USEFUL_KEYS = ("B_standard_useful", "B_local_useful")
 B_PRIOR_MODES = ("global_mean", "amp_median_cluster", "amp_p75_cluster", "amp_linear_interp")
+B_LOSS_TARGET_MODES = ("full_output", "anchor_only", "residual_only", "detached_anchor_plus_residual")
+TRAINING_SCHEDULES = ("joint", "anchor_then_residual", "le_warmup_then_b")
 
 V2E_BASELINE_LATEST = {
     "train_LE_local_rel": 1.1830968856811523,
@@ -528,11 +530,20 @@ class FormalV2Prototype(nn.Module):
     def forward(self, q_norm: torch.Tensor, point_idx: torch.Tensor | None = None) -> torch.Tensor:
         return self.components(q_norm, point_idx=point_idx)[0]
 
+    def prior_forward(self, q_norm: torch.Tensor, point_idx: torch.Tensor | None = None) -> torch.Tensor:
+        if q_norm.ndim == 1:
+            q_norm = q_norm.unsqueeze(0)
+        b_prior, _ = self.b_prior(q_norm, point_idx=point_idx)
+        return torch.einsum("bpak,bk->bpa", b_prior, q_norm)
+
     def anchor_forward(self, q_norm: torch.Tensor, point_idx: torch.Tensor | None = None) -> torch.Tensor:
         if q_norm.ndim == 1:
             q_norm = q_norm.unsqueeze(0)
         b_prior = self.prior_base_for_q(q_norm, point_idx=point_idx)
         return torch.einsum("bpak,bk->bpa", b_prior, q_norm)
+
+    def residual_forward(self, q_norm: torch.Tensor, point_idx: torch.Tensor | None = None) -> torch.Tensor:
+        return self.components(q_norm, point_idx=point_idx)[2]
 
 
 def jacobian_norm(model: FormalV2Prototype, q_norm: torch.Tensor, point_idx: torch.Tensor | None = None) -> torch.Tensor:
@@ -547,6 +558,46 @@ def jacobian_anchor_norm(model: FormalV2Prototype, q_norm: torch.Tensor, point_i
         return model.anchor_forward(q_single, point_idx=point_idx)[0]
 
     return vmap(jacrev(one))(q_norm)
+
+
+def jacobian_prior_norm(model: FormalV2Prototype, q_norm: torch.Tensor, point_idx: torch.Tensor | None = None) -> torch.Tensor:
+    def one(q_single: torch.Tensor) -> torch.Tensor:
+        return model.prior_forward(q_single, point_idx=point_idx)[0]
+
+    return vmap(jacrev(one))(q_norm)
+
+
+def jacobian_residual_norm(model: FormalV2Prototype, q_norm: torch.Tensor, point_idx: torch.Tensor | None = None) -> torch.Tensor:
+    def one(q_single: torch.Tensor) -> torch.Tensor:
+        return model.residual_forward(q_single, point_idx=point_idx)[0]
+
+    return vmap(jacrev(one))(q_norm)
+
+
+def train_le_prediction(model: FormalV2Prototype, q_norm: torch.Tensor, point_idx: torch.Tensor | None, mode: str) -> torch.Tensor:
+    if mode == "detached_anchor_plus_residual":
+        return model.anchor_forward(q_norm, point_idx=point_idx).detach() + model.residual_forward(q_norm, point_idx=point_idx)
+    return model(q_norm, point_idx=point_idx)
+
+
+def b_loss_prediction_and_target(
+    model: FormalV2Prototype,
+    q_norm: torch.Tensor,
+    b_target: torch.Tensor,
+    point_idx: torch.Tensor | None,
+    mode: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if mode == "full_output":
+        return jacobian_norm(model, q_norm, point_idx=point_idx), b_target
+    if mode == "anchor_only":
+        return jacobian_prior_norm(model, q_norm, point_idx=point_idx), b_target
+    prior_ad = jacobian_prior_norm(model, q_norm, point_idx=point_idx).detach()
+    residual_ad = jacobian_residual_norm(model, q_norm, point_idx=point_idx)
+    if mode == "residual_only":
+        return residual_ad, b_target - prior_ad
+    if mode == "detached_anchor_plus_residual":
+        return prior_ad + residual_ad, b_target
+    raise ValueError(f"unknown b loss target mode {mode!r}")
 
 
 def denormalize_b(ad_b_norm: torch.Tensor, le_std: torch.Tensor, q_std: torch.Tensor) -> torch.Tensor:
@@ -859,6 +910,9 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "B_prior_amp_low_ref": b_prior_state["amp_low_ref"],
         "B_prior_amp_high_ref": b_prior_state["amp_high_ref"],
         "detach_b_prior_regime_weight": bool(args.detach_b_prior_regime_weight),
+        "b_loss_target_mode": str(args.b_loss_target_mode),
+        "training_schedule": str(args.training_schedule),
+        "warmup_steps": int(args.warmup_steps),
     }
     norm_summary_path.write_text(json.dumps(norm_summary, indent=2, ensure_ascii=False, sort_keys=True, default=json_default), encoding="utf-8")
 
@@ -883,7 +937,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         detach_b_prior_regime_weight=bool(args.detach_b_prior_regime_weight),
         gate_c=float(args.gate_c),
     ).to(device=device, dtype=dtype)
-    if bool(args.freeze_b_prior_table):
+    if bool(args.freeze_b_prior_table) or str(args.training_schedule) == "anchor_then_residual":
         for param in model.b_delta_head.parameters():
             param.requires_grad_(False)
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=float(args.lr), weight_decay=float(args.weight_decay))
@@ -982,7 +1036,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         else:
             le_idx = torch.randperm(point_count, device=device)[:le_point_batch]
             le_target = train_data["le_norm"].index_select(0, frame_idx).index_select(1, le_idx)
-        pred = model(q_batch, point_idx=le_idx)
+        le_mode = "detached_anchor_plus_residual" if str(args.training_schedule) == "anchor_then_residual" else str(args.b_loss_target_mode)
+        pred = train_le_prediction(model, q_batch, le_idx, le_mode)
         le_loss = torch.mean((pred - le_target) ** 2)
 
         if ad_point_batch == point_count:
@@ -991,11 +1046,15 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         else:
             ad_idx = torch.randperm(point_count, device=device)[:ad_point_batch]
             b_target = train_data["b_norm"].index_select(0, frame_idx).index_select(1, ad_idx)
-        ad_b = jacobian_norm(model, q_batch, point_idx=ad_idx)
-        b_loss = torch.mean((ad_b - b_target) ** 2)
+        b_mode = "detached_anchor_plus_residual" if str(args.training_schedule) == "anchor_then_residual" else str(args.b_loss_target_mode)
+        ad_b, b_loss_target = b_loss_prediction_and_target(model, q_batch, b_target, ad_idx, b_mode)
+        b_loss = torch.mean((ad_b - b_loss_target) ** 2)
         zero_pred = model(torch.zeros(1, q_batch.shape[-1], device=device, dtype=dtype))
         zero_loss = torch.mean(zero_pred * zero_pred)
-        loss = float(args.le_weight) * le_loss + float(args.b_weight) * b_loss + float(args.zero_weight) * zero_loss
+        effective_b_weight = float(args.b_weight)
+        if str(args.training_schedule) == "le_warmup_then_b" and int(step) <= int(args.warmup_steps):
+            effective_b_weight = 0.0
+        loss = float(args.le_weight) * le_loss + effective_b_weight * b_loss + float(args.zero_weight) * zero_loss
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -1009,6 +1068,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                     "loss": scalar_float(loss.detach()),
                     "le_loss": scalar_float(le_loss.detach()),
                     "b_loss": scalar_float(b_loss.detach()),
+                    "effective_b_weight": float(effective_b_weight),
                     "zero_loss": scalar_float(zero_loss.detach()),
                 },
             )
@@ -1100,6 +1160,9 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "B_prior_amp_high_ref": b_prior_state["amp_high_ref"],
         "detach_b_prior_regime_weight": bool(args.detach_b_prior_regime_weight),
         "B_prior_anchor_metrics": {**anchor_train, **anchor_val},
+        "b_loss_target_mode": str(args.b_loss_target_mode),
+        "training_schedule": str(args.training_schedule),
+        "warmup_steps": int(args.warmup_steps),
         "use_geometry_features": False,
         "freeze_b_prior_table": bool(args.freeze_b_prior_table),
         "write_per_case_history": bool(args.write_per_case_history),
@@ -1159,6 +1222,9 @@ def main() -> None:
     parser.add_argument("--b-prior-mode", choices=B_PRIOR_MODES, default="global_mean")
     parser.add_argument("--detach-b-prior-regime-weight", dest="detach_b_prior_regime_weight", action="store_true", default=True)
     parser.add_argument("--no-detach-b-prior-regime-weight", dest="detach_b_prior_regime_weight", action="store_false")
+    parser.add_argument("--b-loss-target-mode", choices=B_LOSS_TARGET_MODES, default="full_output")
+    parser.add_argument("--training-schedule", choices=TRAINING_SCHEDULES, default="joint")
+    parser.add_argument("--warmup-steps", type=int, default=500)
     parser.add_argument("--freeze-b-prior-table", action="store_true")
     parser.add_argument("--write-per-case-history", action="store_true")
     parser.add_argument("--gate-c", type=float, default=0.1)
@@ -1168,6 +1234,8 @@ def main() -> None:
         raise SystemExit("--steps must be positive")
     if int(args.eval_every) < 1:
         raise SystemExit("--eval-every must be positive")
+    if int(args.warmup_steps) < 0:
+        raise SystemExit("--warmup-steps must be non-negative")
     train(args)
 
 

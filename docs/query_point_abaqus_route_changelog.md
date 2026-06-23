@@ -3,6 +3,110 @@
 This file records the route-level history for the Abaqus real-integration-point
 DeepONet/query-point training line.  Keep it updated whenever this route changes.
 
+## v2k - 2026-06-24 - Tangent / training-schedule diagnostic
+
+Purpose:
+
+- Diagnose how AD-B should be supervised after v2j introduced a
+  state/regime-dependent p75-cluster B prior.
+- Compare full-output, anchor-only, residual-only, detached-anchor residual,
+  and LE-warmup schedules.
+- Keep this as a prototype diagnostic, not a formal model-effect claim.
+
+Included:
+
+- `scripts/diagnose_v2_tangent_schedule.py`
+- `scripts/train_v2_formal_prototype.py` options:
+  `--b-loss-target-mode`, `--training-schedule`, and `--warmup-steps`.
+- `docs/query_point_v2_tangent_schedule_audit.md`
+- Route documentation update in
+  `docs/query_point_v2_coordinate_consistent_route.md`.
+
+Fixed v2k setup:
+
+```text
+b_prior_mode = amp_p75_cluster
+detach_b_prior_regime_weight = true
+use_q_amp = true
+steps = 2000
+eval_every = 250
+seed = 20260623
+warmup_steps = 500
+```
+
+Shared anchor baseline:
+
+- `train_LE_local_rel=4.77639102935791`
+- `val_LE_local_rel=5.700374126434326`
+- `train_AD_B_local_rel=0.22865082323551178`
+- `val_AD_B_local_rel=0.10279608517885208`
+- `val_B_model_raw_projected_rel=0.10271253436803818`
+
+Diagnostic combinations:
+
+- A `full_output + joint`, best combined:
+  - step `1250`
+  - `train_LE_local_rel=4.701291084289551`
+  - `val_LE_local_rel=5.470116138458252`
+  - `train_AD_B_local_rel=0.31725096702575684`
+  - `val_AD_B_local_rel=0.11935402452945709`
+  - `val_AD_B_local_cos=0.9963414072990417`
+  - `val_B_model_raw_projected_rel=0.12048347294330597`
+- B `anchor_only + joint`, best combined:
+  - step `500`
+  - `train_LE_local_rel=4.682076454162598`
+  - `val_LE_local_rel=5.659628391265869`
+  - `train_AD_B_local_rel=0.2719678580760956`
+  - `val_AD_B_local_rel=0.11224554479122162`
+  - `val_AD_B_local_cos=0.997394323348999`
+  - `val_B_model_raw_projected_rel=0.11289863288402557`
+- C `residual_only + joint`, best combined:
+  - step `2000`
+  - `train_LE_local_rel=4.70106315612793`
+  - `val_LE_local_rel=5.620501518249512`
+  - `val_AD_B_local_rel=0.12718208134174347`
+  - `val_B_model_raw_projected_rel=0.12866534292697906`
+- D `full_output + le_warmup_then_b`, best combined:
+  - step `0`
+  - `train_LE_local_rel=4.776750564575195`
+  - `val_LE_local_rel=5.699275016784668`
+  - `val_AD_B_local_rel=0.1027916669845581`
+  - latest degrades to `val_AD_B_local_rel=0.14432035386562347`
+- E `detached_anchor_plus_residual + anchor_then_residual`, best combined:
+  - step `1750`
+  - `train_LE_local_rel=4.696530818939209`
+  - `val_LE_local_rel=5.65471887588501`
+  - `val_AD_B_local_rel=0.13117122650146484`
+  - `val_B_model_raw_projected_rel=0.13306614756584167`
+
+Current interpretation:
+
+```text
+v2k diagnostic completed.
+No tested tangent/schedule solves the LE/AD-B tradeoff.
+The p75 state-dependent anchor remains the strongest route component.
+Anchor-only B supervision is the safest current tangent/loss reference.
+Full-output supervision gives the best val LE in this audit, but costs more
+AD-B/raw-B accuracy.
+LE warmup does not help in this diagnostic.
+Model performance is not established.
+```
+
+Recommended next step:
+
+```text
+v2l should improve the state-dependent B prior itself: smoother q_amp gate,
+q-direction/q-cluster-aware prior, or richer state descriptor in the B-prior
+branch.  Do not simply widen the residual network yet.
+```
+
+Validation boundary:
+
+- No old TRUE176 `LE/B` labels were used as v2 labels.
+- No tag was moved.
+- No `.npz`, `.odb`, `.pt`, `.pth`, checkpoint, loss-history, or generated
+  output file is committed.
+
 ## v2j - 2026-06-24 - State-dependent B prior prototype audit
 
 Purpose:

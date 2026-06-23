@@ -768,6 +768,91 @@ B_prior(point, state/regime)
 should stay on the route, but its regime gate and AD-B tangent definition need
 another targeted audit before formal training claims.
 
+## v2k Tangent / Training-Schedule Diagnostic Status
+
+v2k tests how to supervise AD-B after the state-dependent p75-cluster B prior
+is introduced.  It adds:
+
+```text
+scripts/diagnose_v2_tangent_schedule.py
+docs/query_point_v2_tangent_schedule_audit.md
+```
+
+`scripts/train_v2_formal_prototype.py` now supports:
+
+```text
+--b-loss-target-mode full_output
+--b-loss-target-mode anchor_only
+--b-loss-target-mode residual_only
+--b-loss-target-mode detached_anchor_plus_residual
+--training-schedule joint
+--training-schedule anchor_then_residual
+--training-schedule le_warmup_then_b
+--warmup-steps
+```
+
+Defaults preserve prior behavior:
+
+```text
+b_loss_target_mode = full_output
+training_schedule = joint
+```
+
+All v2k runs use:
+
+```text
+b_prior_mode = amp_p75_cluster
+detach_b_prior_regime_weight = true
+```
+
+Shared anchor:
+
+```text
+train_LE_local_rel = 4.77639102935791
+val_LE_local_rel = 5.700374126434326
+train_AD_B_local_rel = 0.22865082323551178
+val_AD_B_local_rel = 0.10279608517885208
+val_B_model_raw_projected_rel = 0.10271253436803818
+```
+
+Best nonzero-step tradeoffs:
+
+```text
+A full_output + joint:
+  step = 1250
+  train_LE_local_rel = 4.701291084289551
+  val_LE_local_rel = 5.470116138458252
+  train_AD_B_local_rel = 0.31725096702575684
+  val_AD_B_local_rel = 0.11935402452945709
+  val_B_model_raw_projected_rel = 0.12048347294330597
+
+B anchor_only + joint:
+  step = 500
+  train_LE_local_rel = 4.682076454162598
+  val_LE_local_rel = 5.659628391265869
+  train_AD_B_local_rel = 0.2719678580760956
+  val_AD_B_local_rel = 0.11224554479122162
+  val_B_model_raw_projected_rel = 0.11289863288402557
+```
+
+Current v2k interpretation:
+
+```text
+No tested tangent/schedule closes the LE/AD-B tradeoff.
+The p75 state-dependent anchor remains the strongest route component.
+Anchor-only B supervision is the safest current tangent/loss reference.
+Full-output supervision gives the best val LE in this audit, but with larger
+AD-B/raw-B degradation.
+LE warmup does not improve the selected metric.
+```
+
+This reinforces the next route direction:
+
+```text
+v2l should refine the state-dependent B prior itself, rather than simply
+widening the residual network or relying on training schedule tweaks.
+```
+
 ## Reusable Existing Pieces
 
 The current repository already has useful pieces:

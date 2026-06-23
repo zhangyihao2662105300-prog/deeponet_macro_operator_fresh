@@ -237,6 +237,48 @@ case and verify only the coordinate chain:
 
 Only after this chain-rule audit passes should v2 training start.
 
+## v2c One-Case Oracle / Tiny Smoke Status
+
+The one-case `case050` v2c smoke extends the v2b local-strain pilot with two
+small checks:
+
+```text
+1. oracle: LE_local_Bq = B_local_useful @ q_useful
+2. tiny training: q_useful + ip_xi -> LE_local_jacobian_frame
+```
+
+The oracle chain-rule return remains numerical-zero in projected raw B space:
+
+```text
+B_raw_hat_projected_rel = 4.573742799247327e-16
+B_raw_hat_raw_rel = 0.00014709789545713997
+```
+
+The finite-path linear oracle has:
+
+```text
+LE_local_Bq_rel = 0.04432110494813806
+LE_local_Bq_cos = 0.9990565149944766
+```
+
+The tiny script-local anchored model, using `q_useful` as branch input and
+`ip_xi` as trunk input, reached:
+
+```text
+best_step = 1800
+train_LE_local_rel = 0.0070029981434345245
+train_AD_B_local_rel = 0.004019410815089941
+train_AD_B_local_cos = 0.9999919533729553
+zero_q_LE_local_rms = 0.0
+B_model_raw_projected_rel = 0.004044899716973305
+B_model_raw_rel = 0.004047574009746313
+```
+
+This means the v2 coordinate contract is executable by a network and autograd
+for one case.  It is not formal training, not a multi-case generalization
+result, and still uses `local_jacobian_frame` tensor components rather than a
+complete covariant standard-coordinate strain formulation.
+
 ## Reusable Existing Pieces
 
 The current repository already has useful pieces:

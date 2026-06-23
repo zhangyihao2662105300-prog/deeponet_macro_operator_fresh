@@ -1675,6 +1675,78 @@ Validation boundary:
 - No tag was moved.
 - Large generated artifacts remain outside git and must not be committed.
 
+## v2 coordinate audit - 2026-06-23 - One-case oracle / tiny training smoke
+
+Purpose:
+
+- Extend the `case050` v2b local-strain pilot into a minimal v2c smoke.
+- Check whether the v2 coordinate contract can be read by a script-local
+  network, differentiated with respect to `q_useful`, and mapped back to raw
+  Abaqus B.
+- Keep this as a one-case smoke, not formal training and not a multi-case
+  generalization result.
+
+Inputs:
+
+- v2b compact:
+  `D:\IS-FEM\outputs\query_point_v2_coordinate_pilot\case050\complete_case050_v2b_local_strain_pilot.npz`
+- Oracle output:
+  `D:\IS-FEM\outputs\query_point_v2_tiny_smoke\case050_oracle\oracle_summary.json`
+- Tiny-train output:
+  `D:\IS-FEM\outputs\query_point_v2_tiny_smoke\case050_tiny_train\tiny_train_summary.json`
+- Documentation:
+  `docs/query_point_v2_one_case_tiny_smoke.md`
+
+Oracle result:
+
+- `LE_local_Bq_rel=0.04432110494813806`
+- `LE_local_Bq_cos=0.9990565149944766`
+- `B_raw_hat_projected_rel=4.573742799247327e-16`
+- `B_raw_hat_raw_rel=0.00014709789545713997`
+- `B_rigid_residual_rel=0.00014709789545713607`
+- `zero_q_local_LE_rms_by_oracle=0.0`
+
+Tiny model:
+
+- Branch input: `q_useful`.
+- Trunk input: `ip_xi`.
+- Output: `LE_local_jacobian_frame`.
+- AD target: `B_standard_useful`, whose actual coordinate is
+  `local_jacobian_frame`.
+- Raw back-projection:
+  `B_raw_hat_model = T_eps_to_abq @ AD_B_local_hat @ T_q_raw_to_useful`.
+- Model form:
+  `LE_hat = B_prior_table(point) @ q_useful + R(q_useful,ip_xi) - R(0,ip_xi)`.
+- `B_prior_table(point)` is initialized from one-case mean `B_standard_useful`.
+  This is a smoke-test choice, not a formal architecture decision.
+
+Tiny training result:
+
+- `best_step=1800`
+- `train_LE_local_rel=0.0070029981434345245`
+- `train_AD_B_local_rel=0.004019410815089941`
+- `train_AD_B_local_cos=0.9999919533729553`
+- `zero_q_LE_local_rms=0.0`
+- `B_model_raw_projected_rel=0.004044899716973305`
+- `B_model_raw_rel=0.004047574009746313`
+
+Current interpretation:
+
+- The v2c one-case chain is executable:
+  `q_useful + ip_xi -> LE_local_jacobian_frame -> AD_B_local_useful -> B_raw_hat_model`.
+- The tiny model can overfit `case050` in local strain coordinates and keep a
+  low AD-B/raw-backprojection error.
+- This does not prove formal v2 performance, multi-case generalization, or a
+  full covariant standard-coordinate strain formulation.
+
+Validation boundary:
+
+- No formal model training was performed.
+- No v1.3/v2 production model, loss, learning-rate, epoch policy, split policy,
+  or tag was changed.
+- No old TRUE176 `LE/B` labels were used as v2 labels.
+- No `.npz`, `.odb`, `.pt`, `.pth`, checkpoint, or output artifact is committed.
+
 ## v2 planning - 2026-06-23 - Coordinate-consistent route contract
 
 Purpose:

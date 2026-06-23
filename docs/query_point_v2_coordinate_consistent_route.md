@@ -279,6 +279,52 @@ for one case.  It is not formal training, not a multi-case generalization
 result, and still uses `local_jacobian_frame` tensor components rather than a
 complete covariant standard-coordinate strain formulation.
 
+## v2d Multi-Case Compact Generation Status
+
+The v2d step extends the v2b local-strain compact contract to the current
+10-case strict fresh pool:
+
+```text
+[19, 25, 31, 41, 43, 44, 45, 46, 49, 50]
+```
+
+Source manifest:
+
+```text
+D:\IS-FEM\outputs\query_point_v1_2_training_audit\pool_v1_2_min10_manifest\compact_list.txt
+```
+
+Generated v2b compact list:
+
+```text
+D:\IS-FEM\outputs\query_point_v2_coordinate_pilot\multi_case_v2b_min10\v2b_compact_list.txt
+```
+
+Generation status:
+
+```text
+compact_count = 10
+pass_count = 10
+fail_count = 0
+```
+
+Key audit ranges:
+
+```text
+q_useful_removed_rigid_rel:        0.18971368414698137 .. 0.7451366595918001
+B_rigid_residual_rel:              0.0001096826385160804 .. 0.0012638931647260521
+B_local_chain_rule_projected_rel:  max 4.619812329621079e-16
+LE_local_roundtrip_rel:            max 3.0740682511657065e-16
+```
+
+Every generated compact passed strict-v2 coordinate audit.  The large
+`q_useful_removed_rigid_rel` in some cases means the raw q48 samples can contain
+substantial rigid-mode content; this is an audit observation for later training,
+not a compact failure.
+
+This step prepares the next possible v2 formal tiny multi-case training smoke.
+It does not train a model and does not prove v2 generalization.
+
 ## Reusable Existing Pieces
 
 The current repository already has useful pieces:

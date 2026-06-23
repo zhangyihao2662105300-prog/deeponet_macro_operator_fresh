@@ -1747,6 +1747,76 @@ Validation boundary:
 - No old TRUE176 `LE/B` labels were used as v2 labels.
 - No `.npz`, `.odb`, `.pt`, `.pth`, checkpoint, or output artifact is committed.
 
+## v2 coordinate audit - 2026-06-23 - Multi-case v2b compact generation
+
+Purpose:
+
+- Move from one-case v2c smoke to multi-case v2 compact generation planning and
+  execution.
+- Convert the current 10-case strict fresh pool into v2b local-strain compacts.
+- Verify every generated compact with strict-v2 coordinate audit before any
+  formal v2 multi-case training.
+
+Inputs:
+
+- Source manifest:
+  `D:\IS-FEM\outputs\query_point_v1_2_training_audit\pool_v1_2_min10_manifest\compact_list.txt`
+- Cases:
+  `[19,25,31,41,43,44,45,46,49,50]`
+- Output root:
+  `D:\IS-FEM\outputs\query_point_v2_coordinate_pilot\multi_case_v2b_min10`
+- Audit root:
+  `D:\IS-FEM\outputs\query_point_v2_coordinate_contract_audit\multi_case_v2b_min10`
+- Documentation:
+  `docs/query_point_v2_multi_case_compact_generation_plan.md`
+
+Implementation:
+
+- Added `scripts/build_v2_multi_case_compacts.py`.
+- Added `scripts/summarize_v2_multi_case_contract.py`.
+- The builder reuses the one-case v2a and v2b payload builders instead of
+  changing the formal training code.
+- `X_keep_ref` is required for q48 control-node coordinates.  Missing
+  `X_keep_ref` fails the case; q48 node order is not guessed.
+
+Result:
+
+- Dry-run passed:
+  `compact_count=10`, `fail_count=0`.
+- Actual generation passed:
+  `compact_count=10`, `pass_count=10`, `fail_count=0`.
+- v2b compact list:
+  `D:\IS-FEM\outputs\query_point_v2_coordinate_pilot\multi_case_v2b_min10\v2b_compact_list.txt`
+- Multi-case summary:
+  `D:\IS-FEM\outputs\query_point_v2_coordinate_pilot\multi_case_v2b_min10\v2b_multi_case_summary.json`
+
+Key metric ranges:
+
+- `q_useful_removed_rigid_rel`: `0.18971368414698137 .. 0.7451366595918001`
+- `B_rigid_residual_rel`: `0.0001096826385160804 .. 0.0012638931647260521`
+- `B_local_chain_rule_projected_rel`: max `4.619812329621079e-16`
+- `LE_local_roundtrip_rel`: max `3.0740682511657065e-16`
+
+Current interpretation:
+
+- The 10-case v2b compact generation route is established.
+- The strict coordinate chain passes for every case:
+  `q48_raw -> q_useful`, `LE_Abaqus_global <-> LE_local_jacobian_frame`, and
+  `B_local_useful -> B_raw_hat`.
+- Some cases have large removed rigid content in q48, especially `case041`
+  (`q_useful_removed_rigid_rel=0.7451`).  This is not a strict-v2 failure, but
+  should be tracked in future v2 training interpretation.
+- This prepares v2 formal tiny multi-case training smoke; it does not prove v2
+  model performance or generalization.
+
+Validation boundary:
+
+- No model training was performed.
+- No formal model, loss, learning-rate, epoch, split policy, or tag was changed.
+- No old TRUE176 `LE/B` labels were used as v2 labels.
+- Generated `.npz` compacts and audit outputs remain under `D:\IS-FEM\outputs`
+  and are not committed.
+
 ## v2 planning - 2026-06-23 - Coordinate-consistent route contract
 
 Purpose:

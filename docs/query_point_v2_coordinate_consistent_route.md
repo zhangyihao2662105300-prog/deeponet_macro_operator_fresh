@@ -141,6 +141,7 @@ Optionally, a compact may also store transformed labels:
 
 ```text
 LE128_standard:       [N,128,6]
+B_useful_abq:         [N,128,6,K]   # v2a pilot, output still Abaqus global
 B_standard_useful:    [N,128,6,K]
 ```
 

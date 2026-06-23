@@ -1674,3 +1674,88 @@ Validation boundary:
 - No old TRUE176 `LE/B` labels were used as v1.2/v1.3 labels.
 - No tag was moved.
 - Large generated artifacts remain outside git and must not be committed.
+
+## v1.3 audit - 2026-06-23 - Anchored LOO case050
+
+Purpose:
+
+- Run the second risk-prioritized LOO audit after `LOO_case031`.
+- Hold out `case050`, a mixed / larger fresh direction, to test mixed-direction
+  held-out generalization.
+- Keep the fixed v1.3 strategy unchanged.
+
+Inputs:
+
+- Compact pool:
+  `D:\IS-FEM\outputs\query_point_v1_2_training_audit\pool_v1_2_min10_manifest\compact_list.txt`
+- Validation split:
+  `train_cases=[19,25,31,41,43,44,45,46,49]`,
+  `val_cases=[50]`.
+- `validation_is_overlapping=false`, `train_frames=90`, `val_frames=10`.
+
+Outputs:
+
+- Training:
+  `D:\IS-FEM\outputs\query_point_v1_3_training_audit\anchored_LOO_case050`
+- Case attribution:
+  `D:\IS-FEM\outputs\query_point_v1_3_training_audit\anchored_LOO_case050_case_attribution`
+- B@q diagnostic:
+  `D:\IS-FEM\outputs\query_point_v1_3_training_audit\anchored_LOO_case050_bq_anchor_oracle\LOO_case050_best`
+- Comparison:
+  `D:\IS-FEM\outputs\query_point_v1_3_training_audit\anchored_LOO_case050_comparison`
+- Documentation:
+  `docs/query_point_v1_3_anchored_LOO_case050_audit.md`
+
+Key result:
+
+- Best checkpoint, epoch 1:
+  `val_LE_rel=1.5294014338724993`,
+  `train_LE_rel=1.6161069592630004`,
+  `val_AD_B_rel=0.517000373997325`,
+  `val_AD_B_cos=0.8751722384624953`,
+  `b_prior_current_val_evalcols_B_rel=0.5169978402891399`,
+  `val_zero_q_LE_pred_rms=1.1676963344145722e-11`,
+  `val_Bprior_q_LE_rel=1.5326505786455733`,
+  `val_model_minus_Bprior_offset_rms=3.92915279653482e-06`.
+- Latest checkpoint, epoch 50:
+  `val_LE_rel=1.7229821122212494`,
+  `val_AD_B_rel=0.5145903038519773`,
+  `b_prior_current_val_evalcols_B_rel=0.5137761146056249`,
+  `val_zero_q_LE_pred_rms=1.1676963344145722e-11`.
+- Per-case attribution for `case050`:
+  `LE_rel=1.5294014338724993`,
+  `AD_B_rel=0.517000373997325`,
+  `B_prior_rel=0.5169978402891399`,
+  `zero_q_LE_pred_rms=1.1676963344145722e-11`,
+  `Bprior_q_LE_rel=1.5326505786455733`,
+  `model_minus_Bprior_offset_rms=3.92915279653482e-06`.
+- B@q diagnostic:
+  `Btrue_q_LE_rel=0.06644355125974967`,
+  `Bprior_q_LE_rel=1.5310648298695695`,
+  `model_LE_rel=1.5294014338724993`,
+  `zero_q_pred_rms=0.0`,
+  `current_offset_rms=4.327757044449705e-06`,
+  `true_offset_rms=1.843403091453214e-05`.
+
+Current interpretation:
+
+- `LOO_case050` does not collapse on the held-out mixed / larger fresh direction.
+- The zero-q ghost remains structurally removed.
+- AD-B and the query B prior remain stable and close to split_B:
+  `val_AD_B_rel=0.5170`, `b_prior_current_val_evalcols_B_rel=0.5170`.
+- `val_LE_rel=1.5294` is comparable to split_B and better than split_A, but it
+  is still above 1.0, so mixed-direction value generalization is not solved.
+- `Btrue @ q` is strong on `case050` (`Btrue_q_LE_rel=0.0664`), so the data-side
+  q/LE/B contract is not the bottleneck; the remaining issue is value-field
+  generalization.
+- Best is early (epoch 1) and latest is worse, so epoch sensitivity remains
+  visible.
+- Recommended next audit: run `LOO_case043` or `LOO_case045` before full LOO.
+
+Validation boundary:
+
+- No model, loss, learning-rate, epoch, split-policy, or data-pool changes were
+  made.
+- No old TRUE176 `LE/B` labels were used as v1.2/v1.3 labels.
+- No tag was moved.
+- Large generated artifacts remain outside git and must not be committed.

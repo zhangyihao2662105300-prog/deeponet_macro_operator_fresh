@@ -450,6 +450,82 @@ The next step should be v2g formal prototype implementation with train-only
 normalization artifacts and explicit amplitude descriptors, not more tuning of
 the v2e smoke script.
 
+## v2g Formal Prototype Audit Status
+
+v2g implements the v2f recommendation as a script-local formal prototype:
+
+```text
+script = scripts/train_v2_formal_prototype.py
+compact_list = D:\IS-FEM\outputs\query_point_v2_coordinate_pilot\multi_case_v2b_min10\v2b_compact_list.txt
+train_cases = [19,25,31,41,43,45,49,50]
+val_cases = [44,46]
+validation_is_overlapping = false
+use_q_amp = true
+use_q_dir = false
+use_geometry_features = false
+```
+
+Outputs:
+
+```text
+D:\IS-FEM\outputs\query_point_v2_formal_prototype\split_B_min10\training_summary.json
+D:\IS-FEM\outputs\query_point_v2_formal_prototype\split_B_min10\normalization_summary.json
+D:\IS-FEM\outputs\query_point_v2_formal_prototype\split_B_min10\per_case_attribution.csv
+docs/query_point_v2_formal_prototype_audit.md
+```
+
+Train-only normalization was used:
+
+```text
+q_std_ratio_before_floor = 214.35575102954596
+q_std_floored_count = 0
+LE_std = [0.006498310714960098, 0.0038321511819958687,
+          0.0040618302300572395, 0.004930346272885799,
+          0.003132438752800226, 0.003945972304791212]
+LE_std_floored_count = 0
+q_amp_rms = 0.08326140530721668
+```
+
+Best combined checkpoint-equivalent metric:
+
+```text
+step = 250
+val_LE_local_rel = 10.357998847961426
+val_LE_local_rmse = 0.0011231731623411179
+val_LE_target_rms = 0.000108435342554003
+val_AD_B_local_rel = 0.24915096163749695
+val_AD_B_local_cos = 0.9772958159446716
+val_B_model_raw_projected_rel = 0.25252825021743774
+zero_q_LE_local_rms = 0.0
+```
+
+Latest metric:
+
+```text
+step = 5000
+train_LE_local_rel = 28.909543991088867
+val_LE_local_rel = 13.804399490356445
+train_AD_B_local_rel = 0.41042250394821167
+val_AD_B_local_rel = 0.29874974489212036
+val_B_model_raw_projected_rel = 0.3056311309337616
+zero_q_LE_local_rms = 0.0
+```
+
+Conservative interpretation:
+
+```text
+v2g formal prototype audit executes.
+The train-only normalization, q_amp descriptor, anchored zero-q structure,
+AD-B local metrics, and raw-B backprojection metrics are now auditable.
+Model effect is not established.
+```
+
+Compared with v2e latest, v2g best reduces held-out LE relative error, but train
+LE relative error remains high and AD-B/raw-projected metrics degrade relative
+to the v2e latest baseline.  This means the v2 coordinate contract and formal
+prototype machinery are in place, while low-amplitude value-field learning
+remains unsolved.
+
 ## Reusable Existing Pieces
 
 The current repository already has useful pieces:

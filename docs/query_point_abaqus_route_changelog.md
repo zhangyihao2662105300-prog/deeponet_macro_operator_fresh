@@ -3,6 +3,104 @@
 This file records the route-level history for the Abaqus real-integration-point
 DeepONet/query-point training line.  Keep it updated whenever this route changes.
 
+## v2g - 2026-06-23 - Formal v2 prototype audit
+
+Commit:
+
+- This section is introduced by the `Add v2 formal prototype audit` commit.
+
+Purpose:
+
+- Implement the v2f formal normalization/model design as a script-local
+  prototype audit.
+- Keep the same 10-case v2b pool and split as v2e:
+  `train_cases=[19,25,31,41,43,45,49,50]`,
+  `val_cases=[44,46]`, `validation_is_overlapping=false`.
+- Add train-only normalization artifacts, explicit `q_amp`, anchored zero-q,
+  AD-B local evaluation, and raw-B backprojection evaluation.
+
+Included:
+
+- `scripts/train_v2_formal_prototype.py`
+- `docs/query_point_v2_formal_prototype_audit.md`
+- Route documentation update in
+  `docs/query_point_v2_coordinate_consistent_route.md`.
+
+Run:
+
+```powershell
+py -3 scripts\train_v2_formal_prototype.py `
+  --compact-list D:\IS-FEM\outputs\query_point_v2_coordinate_pilot\multi_case_v2b_min10\v2b_compact_list.txt `
+  --out-root D:\IS-FEM\outputs\query_point_v2_formal_prototype\split_B_min10 `
+  --val-cases 44,46 `
+  --steps 5000 `
+  --seed 20260623 `
+  --eval-every 250 `
+  --use-q-amp
+```
+
+Key normalization facts:
+
+- `normalization_train_only=true`
+- `q_std_ratio_before_floor=214.35575102954596`
+- `q_std_floored_count=0`
+- `LE_std=[0.006498310714960098, 0.0038321511819958687,
+  0.0040618302300572395, 0.004930346272885799,
+  0.003132438752800226, 0.003945972304791212]`
+- `LE_std_floored_count=0`
+- `q_amp_rms=0.08326140530721668`
+- `use_q_amp=true`
+- `use_q_dir=false`
+
+Best combined result:
+
+- Step: `250`
+- `train_LE_local_rel=28.91905975341797`
+- `val_LE_local_rel=10.357998847961426`
+- `val_LE_local_rmse=0.0011231731623411179`
+- `val_LE_target_rms=0.000108435342554003`
+- `train_AD_B_local_rel=0.3983873128890991`
+- `val_AD_B_local_rel=0.24915096163749695`
+- `val_AD_B_local_cos=0.9772958159446716`
+- `val_B_model_raw_projected_rel=0.25252825021743774`
+- `zero_q_LE_local_rms=0.0`
+
+Latest result:
+
+- Step: `5000`
+- `train_LE_local_rel=28.909543991088867`
+- `val_LE_local_rel=13.804399490356445`
+- `train_AD_B_local_rel=0.41042250394821167`
+- `val_AD_B_local_rel=0.29874974489212036`
+- `val_AD_B_local_cos=0.9589686989784241`
+- `val_B_model_raw_projected_rel=0.3056311309337616`
+- `zero_q_LE_local_rms=0.0`
+
+Current interpretation:
+
+- The v2g formal prototype execution chain is now auditable:
+  train-only normalization, `q_amp`, anchored zero-q, AD-B local metrics, and
+  raw-B backprojection all run on the 10-case v2b pool.
+- This is not evidence that model performance is established.
+- Relative to v2e latest, best v2g reduces held-out LE relative error, but the
+  train LE relative error remains high and AD-B/raw-projected B metrics degrade
+  relative to v2e latest.
+- The conservative conclusion is:
+
+```text
+v2g formal prototype audit executes;
+model effect is not established.
+```
+
+Validation boundary:
+
+- No old TRUE176 `LE/B` labels were used as v2 labels.
+- No tag was moved.
+- No `.npz`, `.odb`, `.pt`, `.pth`, checkpoint, loss-history, or generated
+  output file is committed.
+- Generated metrics remain under:
+  `D:\IS-FEM\outputs\query_point_v2_formal_prototype\split_B_min10`.
+
 ## v1 - 2026-06-22 - First query-point Abaqus route baseline
 
 Planned marker:

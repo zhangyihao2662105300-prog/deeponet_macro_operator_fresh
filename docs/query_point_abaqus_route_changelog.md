@@ -1925,6 +1925,116 @@ Validation boundary:
 - No old TRUE176 `LE/B` labels were used as v2 labels.
 - Generated metrics remain under `D:\IS-FEM\outputs` and are not committed.
 
+## v2 design audit - 2026-06-23 - Formal normalization and model design
+
+Purpose:
+
+- Analyze the 10-case v2b compact pool after v2e showed the engineering chain
+  passes but tiny no-case-id generalization is not established.
+- Identify q/LE/B scale mismatches before implementing a formal v2 model.
+- Define the recommended normalization, architecture, and checkpoint scheme.
+
+Inputs:
+
+- v2b compact list:
+  `D:\IS-FEM\outputs\query_point_v2_coordinate_pilot\multi_case_v2b_min10\v2b_compact_list.txt`
+- Stats output:
+  `D:\IS-FEM\outputs\query_point_v2_design_audit\multi_case_min10_stats\stats_summary.json`
+- Documentation:
+  `docs/query_point_v2_formal_model_normalization_design.md`
+
+Key q statistics:
+
+- `q_useful_rms=0.011491464788205397`
+- `q_norm_mean=0.024060026482276273`
+- `q_norm_max=0.3783465445747462`
+- `q component std ratio=214.9691629443162`
+- `q covariance rank estimate=10`
+- `q covariance condition estimate=3705605606.4196844`
+- `train q_norm_mean / val q_norm_mean=27.98834726646046`
+
+Key LE statistics:
+
+- `LE_local_rms=0.004063454592726386`
+- `LE component scale ratio=2.0776393847256514`
+- `train LE_local_rms / val LE_local_rms=41.8936927649456`
+
+Key B statistics:
+
+- `B_local_rms=8.95431355354351`
+- `B component scale ratio=5.914964821491512`
+- `B q-column scale ratio=9.299907348162048`
+- `train B_local_rms / val B_local_rms=0.8704529505657129`
+
+B@q oracle:
+
+- `global LE_local_Bq_rel=0.6406777204317293`
+- `global LE_local_Bq_cos=0.9222083945148773`
+- `case044 LE_local_Bq_rel=0.049291182462898236`
+- `case046 LE_local_Bq_rel=0.02763180576935294`
+- `case031 LE_local_Bq_rel=0.6423729454305975`
+- `Bq_rel_vs_q_norm_mean=0.9981798243696219`
+- `Bq_rel_vs_LE_local_rms=0.9984726534079255`
+
+Current interpretation:
+
+- v2e validation cases are much lower amplitude than the training distribution:
+  train/val q scale differs by about 28x and LE scale by about 42x.
+- B scale is similar between train and val, and train-mean B prior is reasonably
+  close to val B (`~0.196` relative), so val LE failure is not primarily a B
+  coordinate-contract failure.
+- The 42-dimensional `q_useful` space is under-covered by the current 10 cases:
+  covariance rank estimate is 10.
+- B@q oracle is strong on low-amplitude cases and weak on high-amplitude
+  `case031`, indicating amplitude/nonlinearity effects.
+
+Recommended normalization:
+
+- Use a minimal A+C hybrid:
+  q component standardization, LE six-component standardization, induced B
+  normalization `B_norm[a,k] = B_local[a,k] * q_std[k] / LE_std[a]`, and an
+  explicit `q_amp` descriptor.
+- Optionally add `q_dir` with a zero-q guard.
+- Do not rely only on pure case-amplitude normalization; keep amplitude
+  available to the model.
+
+Recommended architecture:
+
+- Branch: `q_useful_normed + q_amp (+ optional q_dir)`.
+- Trunk: `ip_xi (+ optional ip_detJ / ip_J / local-frame geometry descriptors)`.
+- Output: `LE_local_jacobian_frame`.
+- Structure:
+  `LE_hat = B_prior_local(point,geom) @ q_useful + gate(q_amp) * (R(q,point,geom)-R(0,point,geom))`.
+- Preserve `q_useful=0 => LE_local=0`.
+- Evaluate AD-B-local and raw-B backprojection as before.
+
+Recommended checkpoint score:
+
+```text
+score =
+  1.0 * val_LE_local_rel
++ 1.0 * val_AD_B_local_rel
++ 0.5 * val_B_model_raw_projected_rel
++ 10.0 * zero_q_rms_norm
+```
+
+Also record `best_LE`, `best_B`, `best_raw_projected`, `best_combined`, and
+`latest`.
+
+Next step:
+
+- v2g formal prototype implementation:
+  train-only normalization artifact, explicit `q_amp`, anchored zero-q model,
+  normalized LE/B losses, and raw-B backprojection evaluation.
+
+Validation boundary:
+
+- No formal model training was performed.
+- No v1.3/v2 production model, loss, learning-rate, epoch, split policy, or tag
+  was changed.
+- No old TRUE176 `LE/B` labels were used as v2 labels.
+- Generated stats remain under `D:\IS-FEM\outputs` and are not committed.
+
 ## v2 planning - 2026-06-23 - Coordinate-consistent route contract
 
 Purpose:

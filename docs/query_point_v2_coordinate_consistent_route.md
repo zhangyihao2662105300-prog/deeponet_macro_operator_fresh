@@ -391,6 +391,65 @@ back to raw B.  It does not prove v2 generalization.  In fact, this no-case-id
 tiny model reduces train LE but worsens validation LE, so the next step should
 be formal v2 model/normalization design rather than ad hoc tuning of the smoke.
 
+## v2f Formal Normalization / Model Design Status
+
+v2f analyzes the 10-case v2b compact pool before implementing a formal v2
+model.  No formal model training is performed.
+
+Stats output:
+
+```text
+D:\IS-FEM\outputs\query_point_v2_design_audit\multi_case_min10_stats\stats_summary.json
+```
+
+Key findings:
+
+```text
+train q_norm_mean / val q_norm_mean = 27.98834726646046
+train LE_local_rms / val LE_local_rms = 41.8936927649456
+train B_local_rms / val B_local_rms = 0.8704529505657129
+q component std ratio = 214.9691629443162
+q covariance rank estimate = 10
+B q-column scale ratio = 9.299907348162048
+```
+
+The v2e validation cases are low-amplitude cases.  Their B@q oracle is good:
+
+```text
+case044 B@q rel = 0.049291182462898236
+case046 B@q rel = 0.02763180576935294
+```
+
+The global B@q error is dominated by high-amplitude `case031`:
+
+```text
+case031 B@q rel = 0.6423729454305975
+```
+
+Recommended normalization is a minimal A+C hybrid:
+
+```text
+q_useful component std normalization
+LE_local six-component normalization
+B_local induced normalization B_norm[a,k] = B_local[a,k] * q_std[k] / LE_std[a]
+explicit q_amp descriptor
+optional q_dir descriptor with zero-q guard
+```
+
+Recommended formal v2 model:
+
+```text
+branch = q_useful_normed + q_amp (+ optional q_dir)
+trunk = ip_xi (+ optional geometry/Jacobian descriptors)
+output = LE_local_jacobian_frame
+anchored zero-q structure
+AD_B_local and raw-B backprojection retained for evaluation
+```
+
+The next step should be v2g formal prototype implementation with train-only
+normalization artifacts and explicit amplitude descriptors, not more tuning of
+the v2e smoke script.
+
 ## Reusable Existing Pieces
 
 The current repository already has useful pieces:

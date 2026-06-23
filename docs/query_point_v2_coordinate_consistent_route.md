@@ -118,7 +118,7 @@ why.
 New v2 strain-coordinate side:
 
 ```text
-strain_output_coordinate:  standard_macro, local_material, or abaqus_global
+strain_output_coordinate:  standard_macro, local_jacobian_frame, local_material, or abaqus_global
 T_eps_to_abq:              [6,6], [128,6,6], or [N,128,6,6]
 T_eps_from_abq:            optional inverse/audit transform
 strain_transform_note:     small-strain tensor rule or LE/log-strain caveat
@@ -142,11 +142,35 @@ Optionally, a compact may also store transformed labels:
 ```text
 LE128_standard:       [N,128,6]
 B_useful_abq:         [N,128,6,K]   # v2a pilot, output still Abaqus global
+B_local_useful:       [N,128,6,K]   # v2b pilot, local Jacobian frame
 B_standard_useful:    [N,128,6,K]
 ```
 
 If those are stored, they must be derived from the raw labels and transforms
 with an audit trail.
+
+## v2a/v2b Pilot Status
+
+The first two one-case pilots use `case050`:
+
+```text
+v2a: q48_raw -> q_useful, output strain remains Abaqus global
+v2b: Abaqus global LE/B -> local_jacobian_frame LE/B
+```
+
+The v2b local frame is built from `ip_J` using Gram-Schmidt.  The current
+exporter stores `ip_J` rows as physical derivatives with respect to local
+natural coordinates, so the v2b pilot records:
+
+```text
+local_frame_source = ip_J_gram_schmidt
+local_frame_ip_J_axis_convention = rows
+strain_voigt_order = LE11_LE22_LE33_LE12_LE13_LE23
+strain_shear_convention = tensor_shear_not_engineering_gamma
+```
+
+This is still a local Jacobian-frame tensor-component pilot.  It is not yet a
+full covariant standard-coordinate strain formulation.
 
 ## Rigid-Body Cleanup
 

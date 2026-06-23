@@ -52,8 +52,9 @@ T_EPS_KEYS = (
     "T_LE_local_to_global",
 )
 B_USEFUL_KEYS = (
-    "B_useful_abq",
     "B_standard_useful",
+    "B_local_useful",
+    "B_useful_abq",
     "B_std_useful",
     "B_LE_useful",
     "B_LE128_useful",

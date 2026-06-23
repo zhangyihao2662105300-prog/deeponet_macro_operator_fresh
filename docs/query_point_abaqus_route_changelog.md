@@ -1856,6 +1856,105 @@ Validation boundary:
   q-coordinate pilot only.
 - Generated `.npz` output remains under `outputs` and was not committed.
 
+## v2b pilot - 2026-06-23 - One-case local strain coordinate
+
+Purpose:
+
+- Extend the v2a `case050` q-coordinate pilot with a local strain coordinate.
+- Verify `LE_Abaqus_global <-> LE_local` and
+  `B_local_useful -> B_raw_hat` roundtrips.
+- Keep the scope to one case and do no training.
+
+Input:
+
+- v2a compact:
+  `D:\IS-FEM\outputs\query_point_v2_coordinate_pilot\case050\complete_case050_v2a_q_useful_pilot.npz`
+
+Generated output, not committed:
+
+- `D:\IS-FEM\outputs\query_point_v2_coordinate_pilot\case050\complete_case050_v2b_local_strain_pilot.npz`
+- `D:\IS-FEM\outputs\query_point_v2_coordinate_pilot\case050\complete_case050_v2b_local_strain_pilot.summary.json`
+
+Added:
+
+- `scripts/build_v2_local_strain_pilot_compact.py`
+- `docs/query_point_v2_one_case_local_strain_pilot.md`
+- v2 route wording for `local_jacobian_frame`.
+- The v2 audit now recognizes `B_standard_useful` / `B_local_useful` before
+  `B_useful_abq`, so v2b manifests report the local useful-B field.
+
+Method:
+
+```text
+local_frame_Q from ip_J Gram-Schmidt
+local_frame_ip_J_axis_convention = rows
+strain_voigt_order = LE11_LE22_LE33_LE12_LE13_LE23
+strain_shear_convention = tensor_shear_not_engineering_gamma
+
+E_local = Q.T @ E_abq @ Q
+E_abq   = Q @ E_local @ Q.T
+
+B_local_useful = T_eps_from_abq @ B_useful_abq
+B_raw_hat = T_eps_to_abq @ B_local_useful @ T_q_raw_to_useful
+```
+
+Key result:
+
+- `local_frame_Q_shape=[128,3,3]`
+- `local_frame_orthonormal_max=2.220446049250313e-16`
+- `local_frame_det_min=0.9999999999999999`
+- `local_frame_det_max=1.0000000000000002`
+- `local_frame_orientation_min=0.9995424705243147`
+- `local_frame_orientation_max=0.9995425972270762`
+- `T_eps_to_abq_shape=[128,6,6]`
+- `T_eps_from_abq_shape=[128,6,6]`
+- `T_eps_roundtrip_local_rel=5.874317750795854e-15`
+- `T_eps_roundtrip_abq_rel=6.1175772104987605e-15`
+- `LE_local_roundtrip_rel=1.7341868077270364e-16`
+- `LE_local_roundtrip_max_abs=4.336808689942018e-19`
+- `B_local_chain_rule_projected_rel=4.573742799247327e-16`
+- `B_local_chain_rule_projected_max_abs=1.5631940186722204e-13`
+- `B_local_chain_rule_raw_rel=0.00014709789545713997`
+- `B_local_chain_rule_raw_max_abs=0.01915484967056802`
+
+Strict v2 audit:
+
+```powershell
+py -3 scripts\audit_v2_coordinate_consistent_contract.py `
+  --compact D:\IS-FEM\outputs\query_point_v2_coordinate_pilot\case050\complete_case050_v2b_local_strain_pilot.npz `
+  --out-root D:\IS-FEM\outputs\query_point_v2_coordinate_contract_audit\case050_v2b_local_strain_pilot `
+  --strict-v2
+```
+
+Result:
+
+- `strict_v2_coordinate_pass=true`
+- `strict_v2_coordinate_pass_count=1`
+- `failure_counts={}`
+- Manifest useful-B field:
+  `B_standard_useful [10,128,6,42]`
+- `B_label_q_coordinate=q_useful`
+- `B_label_output_coordinate=local_jacobian_frame`
+
+Current interpretation:
+
+- The v2b local strain coordinate chain closes for `case050`.
+- `LE_Abaqus_global <-> LE_local_jacobian_frame` is lossless to numerical
+  precision.
+- `B_local_useful` maps back to projected raw Abaqus B to numerical precision.
+- The remaining raw-space B difference is the same rigid-direction residual
+  already measured in v2a.
+- This is still a local Jacobian-frame tensor-component pilot, not yet a full
+  covariant standard-coordinate strain formulation.
+- Next step: v2c one-case tiny oracle or tiny training smoke, still before any
+  formal v2 training pool.
+
+Validation boundary:
+
+- No model, loss, learning-rate, epoch, split-policy, or tag changes were made.
+- No old TRUE176 `LE/B` labels were used as v2 labels.
+- Generated `.npz` output remains under `outputs` and was not committed.
+
 ## v1.3 audit - 2026-06-23 - Anchored LOO case043
 
 Purpose:

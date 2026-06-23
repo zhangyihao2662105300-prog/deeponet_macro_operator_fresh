@@ -252,7 +252,7 @@ def build_payload(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, A
             "B_label_output_coordinate": np.asarray("abaqus_global", dtype=object),
             "B_chain_rule": np.asarray(chain_rule, dtype=object),
             "B_chain_rule_metadata": np.asarray(json.dumps(b_meta, sort_keys=True), dtype=object),
-            "B_useful_abq": b_useful.astype(np.float32),
+            "B_useful_abq": b_useful.astype(np.float64),
             "B_chain_rule_raw_rel": np.asarray(b_chain_rule_raw_rel, dtype=np.float64),
             "B_chain_rule_projected_rel": np.asarray(b_chain_rule_projected_rel, dtype=np.float64),
             "B_rigid_residual_rel": np.asarray(b_rigid_residual_rel, dtype=np.float64),

@@ -1327,3 +1327,92 @@ Validation boundary:
 - No old TRUE176 `LE/B` labels were used as v1.2/v1.3 labels.
 - No tag was moved.
 - Large generated artifacts remain outside git and must not be committed.
+
+## v1.3 audit - 2026-06-23 - Anchored LE head split_A
+
+Purpose:
+
+- Run the first fixed-strategy formal audit of the v1.3 anchored LE head.
+- Compare directly against the v1.2 split_A baseline.
+- Keep the only intended change as:
+  `model_style=query-fe-linear-residual-anchored`.
+- Do not change loss, learning rate, epoch count, split, or training data.
+
+Inputs:
+
+- Compact pool:
+  `D:\IS-FEM\outputs\query_point_v1_2_training_audit\pool_v1_2_min10_manifest\compact_list.txt`
+- Cases:
+  `case019`, `case025`, `case031`, `case041`, `case043`,
+  `case044`, `case045`, `case046`, `case049`, `case050`.
+- Validation split:
+  `train_cases=[19,25,31,43,44,45,46,50]`,
+  `val_cases=[41,49]`.
+- `validation_is_overlapping=false`, `train_frames=80`, `val_frames=20`.
+
+Outputs:
+
+- Training:
+  `D:\IS-FEM\outputs\query_point_v1_3_training_audit\anchored_split_A_val41_49`
+- Case attribution:
+  `D:\IS-FEM\outputs\query_point_v1_3_training_audit\anchored_split_A_val41_49_case_attribution`
+- B@q diagnostic:
+  `D:\IS-FEM\outputs\query_point_v1_3_training_audit\anchored_split_A_bq_anchor_oracle\split_A_val41_49_best`
+- Comparison:
+  `D:\IS-FEM\outputs\query_point_v1_3_training_audit\anchored_split_A_comparison`
+- Documentation:
+  `docs/query_point_v1_3_anchored_split_A_audit.md`
+
+Key split_A comparison:
+
+- v1.2 split_A best/latest:
+  `val_LE_rel=5.137640845816213`,
+  `val_AD_B_rel=0.5317644562295766`,
+  `b_prior_current_val_evalcols_B_rel=0.5306775207214273`,
+  prior zero-q diagnostic `zero_q_pred_rms ~= 7.81e-04`.
+- v1.3 anchored best checkpoint, epoch 10:
+  `val_LE_rel=2.1796218548207182`,
+  `val_AD_B_rel=0.5322959397919018`,
+  `val_AD_B_cos=0.8718914233087541`,
+  `b_prior_current_val_evalcols_B_rel=0.532185230457769`,
+  `val_zero_q_LE_pred_rms=1.1484941768098402e-11`,
+  `val_model_minus_Bprior_offset_rms=0.00010172704191546938`.
+- v1.3 anchored latest checkpoint, epoch 50:
+  `val_LE_rel=3.0012689077205144`,
+  `val_AD_B_rel=0.5329800420018063`,
+  `val_zero_q_LE_pred_rms=1.1484941768098402e-11`,
+  `val_model_minus_Bprior_offset_rms=0.0003313721329316278`.
+
+Per-case best attribution:
+
+- `case041`: `LE_rel=3.609960155721904`,
+  `AD_B_rel=0.5321915350416156`,
+  `B_prior_rel=0.5321483814179929`,
+  `zero_q_LE_pred_rms=1.1484941768098398e-11`,
+  `Bprior_q_LE_rel=3.8535600056709796`,
+  `model_minus_Bprior_offset_rms=0.00010339966315563473`.
+- `case049`: `LE_rel=1.8090445751604918`,
+  `AD_B_rel=0.5324002526523295`,
+  `B_prior_rel=0.532222051735648`,
+  `zero_q_LE_pred_rms=1.1484941768098398e-11`,
+  `Bprior_q_LE_rel=1.8501516802362072`,
+  `model_minus_Bprior_offset_rms=0.00010005442067530404`.
+
+Current interpretation:
+
+- The zero-q ghost LE field is structurally removed in split_A.
+- The best split_A `val_LE_rel` improves materially relative to v1.2, while
+  AD-B remains stable.
+- The latest checkpoint is worse than the best checkpoint, so the result is
+  still epoch-sensitive and should be judged by best checkpoint for this audit.
+- This is enough evidence to run split_B next with the same fixed strategy.
+- It is not yet evidence that v1.3 broadly solves LE generalization; split_B
+  and LOO remain required.
+
+Validation boundary:
+
+- No model, loss, learning-rate, epoch, or split changes were made beyond the
+  already committed opt-in anchored model style.
+- No old TRUE176 `LE/B` labels were used as v1.2/v1.3 labels.
+- No tag was moved.
+- Large generated artifacts remain outside git and must not be committed.

@@ -60,6 +60,13 @@ def _metric_subset(metrics: dict[str, Any], prefix: str) -> dict[str, Any]:
         "rand_dir_B_rel",
         "AD_B_abs_rel_train_rms",
         "AD_B_rel_eps_rms",
+        "zero_q_LE_pred_rms",
+        "zero_q_LE_pred_max_abs",
+        "zero_q_residual_rms",
+        "Bprior_q_LE_rel",
+        "Bprior_q_LE_cos",
+        "Bprior_q_pred_rms",
+        "model_minus_Bprior_offset_rms",
     ]
     return {key: metrics.get(f"{prefix}_{key}") for key in keys}
 

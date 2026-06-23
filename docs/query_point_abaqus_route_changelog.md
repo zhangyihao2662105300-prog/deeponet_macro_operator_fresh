@@ -1817,6 +1817,114 @@ Validation boundary:
 - Generated `.npz` compacts and audit outputs remain under `D:\IS-FEM\outputs`
   and are not committed.
 
+## v2 coordinate audit - 2026-06-23 - Multi-case tiny training smoke
+
+Purpose:
+
+- Run a lightweight v2e smoke on the 10-case v2b compact pool.
+- Verify multi-case v2 compact loading, case split, local LE supervision,
+  AD-B-local supervision, raw-B backprojection metrics, and per-case attribution.
+- Keep this as a script-local smoke, not formal v2 training.
+
+Inputs:
+
+- v2b compact list:
+  `D:\IS-FEM\outputs\query_point_v2_coordinate_pilot\multi_case_v2b_min10\v2b_compact_list.txt`
+- Output:
+  `D:\IS-FEM\outputs\query_point_v2_tiny_smoke\multi_case_min10_smoke`
+- Documentation:
+  `docs/query_point_v2_multi_case_tiny_smoke.md`
+
+Split:
+
+- `train_cases=[19,25,31,41,43,45,49,50]`
+- `val_cases=[44,46]`
+- `validation_is_overlapping=false`
+
+Tiny model:
+
+- Branch input: `q_useful`.
+- Trunk input: `ip_xi`.
+- Output: `LE_local_jacobian_frame`.
+- AD target: `d(LE_local_jacobian_frame)/d(q_useful)`.
+- Raw backprojection:
+  `B_raw_hat_model = T_eps_to_abq @ AD_B_local_hat @ T_q_raw_to_useful`.
+- `case_id` is not used as input.
+- `B_prior_table(point)` is initialized from train-case mean `B_standard_useful`.
+  This is a smoke-test choice, not a formal architecture decision.
+
+Best metrics:
+
+- `best_step=0`
+- `train_LE_local_rel=29.468563079833984`
+- `val_LE_local_rel=10.836355209350586`
+- `train_AD_B_local_rel=0.29527074098587036`
+- `val_AD_B_local_rel=0.1957888901233673`
+- `train_AD_B_local_cos=0.9554136395454407`
+- `val_AD_B_local_cos=0.9939731955528259`
+- `train_B_model_raw_projected_rel=0.2953280210494995`
+- `val_B_model_raw_projected_rel=0.1954159140586853`
+- `zero_q_LE_local_rms=0.0`
+
+Latest metrics:
+
+- `latest_step=3000`
+- `train_LE_local_rel=1.1830968856811523`
+- `val_LE_local_rel=18.03921890258789`
+- `train_AD_B_local_rel=0.3041848838329315`
+- `val_AD_B_local_rel=0.2089325487613678`
+- `train_AD_B_local_cos=0.9526196718215942`
+- `val_AD_B_local_cos=0.9906823635101318`
+- `train_B_model_raw_projected_rel=0.30487608909606934`
+- `val_B_model_raw_projected_rel=0.2097579836845398`
+- `train_B_model_raw_rel=0.30487629771232605`
+- `val_B_model_raw_rel=0.209757998585701`
+- `zero_q_LE_local_rms=0.0`
+
+Per-case attribution at latest step:
+
+- Val `case044`:
+  `LE_local_rel=16.429887771606445`,
+  `AD_B_local_rel=0.20892377197742462`,
+  `AD_B_local_cos=0.9906876087188721`,
+  `B_model_raw_projected_rel=0.20974159240722656`.
+- Val `case046`:
+  `LE_local_rel=18.913543701171875`,
+  `AD_B_local_rel=0.20894134044647217`,
+  `AD_B_local_cos=0.9906772375106812`,
+  `B_model_raw_projected_rel=0.20977436006069183`.
+
+Current interpretation:
+
+- The v2e execution chain passes:
+  multi-case v2b compact list -> non-overlapping case split ->
+  `q_useful + ip_xi -> LE_local_jacobian_frame` -> AD-B-local -> raw-B
+  backprojection -> per-case attribution.
+- The tiny no-case-id model reduces train LE strongly:
+  `train_LE_local_rel: 29.47 -> 1.18`.
+- Validation LE worsens:
+  `val_LE_local_rel: 10.84 -> 18.04`.
+- Full AD-B metrics remain computable but do not improve:
+  `train_AD_B_local_rel: 0.295 -> 0.304`,
+  `val_AD_B_local_rel: 0.196 -> 0.209`.
+- Therefore v2e proves execution readiness, not v2 performance or
+  generalization.
+
+Recommended next step:
+
+- Move to formal v2 model and normalization design:
+  `q_useful/LE_local/B_local` normalization, architecture choice, possible
+  geometry/load descriptors, and objective/checkpoint design.
+- Do not treat this smoke as a reason for ad hoc hyperparameter tuning.
+
+Validation boundary:
+
+- No formal model training was performed.
+- No v1.3/v2 production model, loss, learning-rate, epoch, split policy, or tag
+  was changed.
+- No old TRUE176 `LE/B` labels were used as v2 labels.
+- Generated metrics remain under `D:\IS-FEM\outputs` and are not committed.
+
 ## v2 planning - 2026-06-23 - Coordinate-consistent route contract
 
 Purpose:

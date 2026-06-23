@@ -325,6 +325,72 @@ not a compact failure.
 This step prepares the next possible v2 formal tiny multi-case training smoke.
 It does not train a model and does not prove v2 generalization.
 
+## v2e Multi-Case Tiny Training Smoke Status
+
+The v2e smoke uses the 10-case v2b compact list:
+
+```text
+D:\IS-FEM\outputs\query_point_v2_coordinate_pilot\multi_case_v2b_min10\v2b_compact_list.txt
+```
+
+Split:
+
+```text
+train_cases = [19,25,31,41,43,45,49,50]
+val_cases = [44,46]
+validation_is_overlapping = false
+```
+
+The script-local tiny model uses:
+
+```text
+branch input = q_useful
+trunk input = ip_xi
+output = LE_local_jacobian_frame
+AD target = d(LE_local_jacobian_frame)/d(q_useful)
+raw backprojection = T_eps_to_abq @ AD_B_local_hat @ T_q_raw_to_useful
+```
+
+No `case_id` is used as input.
+
+The execution chain completed and wrote:
+
+```text
+D:\IS-FEM\outputs\query_point_v2_tiny_smoke\multi_case_min10_smoke\training_summary.json
+D:\IS-FEM\outputs\query_point_v2_tiny_smoke\multi_case_min10_smoke\per_case_attribution.csv
+```
+
+Best by smoke selection score was initialization:
+
+```text
+best_step = 0
+train_LE_local_rel = 29.468563079833984
+val_LE_local_rel = 10.836355209350586
+train_AD_B_local_rel = 0.29527074098587036
+val_AD_B_local_rel = 0.1957888901233673
+train_AD_B_local_cos = 0.9554136395454407
+val_AD_B_local_cos = 0.9939731955528259
+```
+
+Latest step:
+
+```text
+latest_step = 3000
+train_LE_local_rel = 1.1830968856811523
+val_LE_local_rel = 18.03921890258789
+train_AD_B_local_rel = 0.3041848838329315
+val_AD_B_local_rel = 0.2089325487613678
+train_AD_B_local_cos = 0.9526196718215942
+val_AD_B_local_cos = 0.9906823635101318
+zero_q_LE_local_rms = 0.0
+```
+
+This proves the multi-case v2b pool can be loaded, split, trained through a
+tiny script-local network, differentiated with respect to `q_useful`, and mapped
+back to raw B.  It does not prove v2 generalization.  In fact, this no-case-id
+tiny model reduces train LE but worsens validation LE, so the next step should
+be formal v2 model/normalization design rather than ad hoc tuning of the smoke.
+
 ## Reusable Existing Pieces
 
 The current repository already has useful pieces:

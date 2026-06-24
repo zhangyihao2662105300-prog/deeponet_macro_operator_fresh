@@ -3,6 +3,122 @@
 This file records the route-level history for the Abaqus real-integration-point
 DeepONet/query-point training line.  Keep it updated whenever this route changes.
 
+## v3 CSS8 hybrid-cubic anchor prototype - 2026-06-24 - Value and tangent close together
+
+Purpose:
+
+- Combine the value accuracy of `affine-quadratic` with the derivative accuracy
+  of `tangent-cubic`.
+- Verify, on the current 10-case training pool, whether a single differentiable
+  anchor can keep both `LE_local_stack` and `AD-B` low.
+- Keep this as a training-pool objective gate only: no held-out split, no
+  checkpoint, and no generalization claim.
+
+Added / changed:
+
+- Added read-only hybrid oracle:
+  `scripts/audit_v3_hybrid_anchor_oracle.py`
+- Extended `scripts/train_v3_css8_formal_objective_prototype.py` with:
+  `--anchor-mode hybrid-cubic`
+
+Hybrid anchor:
+
+```text
+s = <q_useful_hat - q_mean(case), q_dir(case)>
+q_perp = q_useful_hat - q_mean(case) - s * q_dir(case)
+
+V(s) = affine-quadratic value path
+B(s) = tangent-cubic tangent path
+
+LE_hybrid(q) = V(s) + B(s) @ q_perp
+```
+
+Important implementation detail:
+
+```text
+V(s) must depend only on scalar s, not on full q.
+Otherwise autograd adds an extra transverse B_mean term and AD-B is wrong.
+```
+
+Oracle command:
+
+```powershell
+py -3 scripts\audit_v3_hybrid_anchor_oracle.py `
+  --compact-list D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\multi_case_min10\v3_css8_standard_operator_compact_list.txt `
+  --focus-case 31 `
+  --tangent-degree 3 `
+  --out-root D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\hybrid_anchor_oracle_10case
+```
+
+Oracle result:
+
+```text
+pooled affine-quadratic LE_rel = 0.0098883569
+pooled tangent-poly AD_B_rel = 0.0021637615
+pooled hybrid LE_rel = 0.0098883781
+pooled hybrid AD_B_rel = 0.0021643945
+
+case031:
+  hybrid LE_rel = 0.0099147606
+  hybrid AD_B_rel = 0.0103414782
+  hybrid AD_B_cos = 0.9999465255
+```
+
+Autograd prototype command:
+
+```powershell
+py -3 scripts\train_v3_css8_formal_objective_prototype.py `
+  --compact-list D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\multi_case_min10\v3_css8_standard_operator_compact_list.txt `
+  --out-root D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\formal_objective_prototype_10case_hybrid_cubic `
+  --steps 1600 `
+  --eval-every 400 `
+  --hidden 128 `
+  --lr 1e-5 `
+  --case-batch 4 `
+  --frame-batch 10 `
+  --le-point-batch 128 `
+  --ad-point-batch 8 `
+  --eval-point-batch 16 `
+  --anchor-mode hybrid-cubic `
+  --tangent-anchor-degree 3
+```
+
+Prototype result:
+
+```text
+train_LE_local_stack_rel = 0.0098776286
+train_AD_B_local_useful_hat_rel = 0.0021653324
+train_AD_B_local_useful_hat_cos = 0.9999976754
+B_model_raw_rel = 0.0022233343
+
+case031:
+  LE_rel = 0.0099039581
+  AD_B_rel = 0.0103416536
+  B_model_raw_rel = 0.0104684727
+
+non-case031 latest:
+  LE_rel roughly 0.000091 to 0.001091
+  AD_B_rel roughly 0.000077 to 0.000203
+```
+
+Interpretation:
+
+- The v3 training-pool objective gate now closes both value and tangent on the
+  current 10-case pool.
+- `case031` is no longer a value or AD-B outlier under the hybrid anchor:
+  it remains the hardest case, but its metrics are now in the intended range.
+- This validates the coordinate-consistent v3 contract plus scalar-path
+  amplitude/tangent anchor design on the training pool.
+
+Boundary:
+
+- The hybrid coefficients are still fitted per case from the current training
+  pool.  This is not a held-out generalization result.
+- The next step is to replace these per-case closed-form coefficients with a
+  model-predictable / geometry-and-direction-conditioned anchor, or run a very
+  cautious leave-one-case diagnostic that explicitly acknowledges this
+  per-case-oracle limitation.
+
 ## v3 CSS8 tangent-amplitude oracle - 2026-06-24 - B(s) explains case031 tangent
 
 Purpose:

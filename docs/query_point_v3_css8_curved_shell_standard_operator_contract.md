@@ -978,3 +978,74 @@ This confirms that `case031` needs amplitude-aware tangent modeling.  It also
 shows that the next objective should combine the value accuracy of
 affine-quadratic with the tangent accuracy of tangent-cubic, instead of treating
 either anchor as the final formal objective.
+
+## Hybrid-Cubic Value + Tangent Anchor
+
+The hybrid gate adds:
+
+```text
+scripts/audit_v3_hybrid_anchor_oracle.py
+```
+
+and the formal objective prototype now supports:
+
+```text
+--anchor-mode hybrid-cubic
+```
+
+The anchor is:
+
+```text
+s = <q_useful_hat - q_mean(case), q_dir(case)>
+q_perp = q_useful_hat - q_mean(case) - s * q_dir(case)
+
+V(s) = affine-quadratic value path
+B(s) = tangent-cubic tangent path
+
+LE_hybrid(q) = V(s) + B(s) @ q_perp
+```
+
+This construction keeps the accurate scalar value path while using the
+amplitude-dependent tangent for transverse derivatives.  In implementation,
+`V(s)` must depend only on scalar `s`; using full `q` in the affine part gives
+the right value on scalar-path samples but the wrong autograd derivative.
+
+Oracle result:
+
+```text
+pooled hybrid LE_rel = 0.0098883781
+pooled hybrid AD_B_rel = 0.0021643945
+
+case031:
+  hybrid LE_rel = 0.0099147606
+  hybrid AD_B_rel = 0.0103414782
+  hybrid AD_B_cos = 0.9999465255
+```
+
+Autograd prototype result after 1600 steps:
+
+```text
+train_LE_local_stack_rel = 0.0098776286
+train_AD_B_local_useful_hat_rel = 0.0021653324
+train_AD_B_local_useful_hat_cos = 0.9999976754
+B_model_raw_rel = 0.0022233343
+
+case031:
+  LE_rel = 0.0099039581
+  AD_B_rel = 0.0103416536
+  B_model_raw_rel = 0.0104684727
+```
+
+This is the first v3 training-pool objective gate where value and tangent close
+together on the current 10-case pool.
+
+Boundary:
+
+```text
+The coefficients are still fitted per case from the current pool.
+This is not a held-out or deployable generalization result.
+```
+
+The next model-design step is to make the hybrid anchor coefficients
+predictable from geometry/load-direction features, or to run a cautious
+leave-one-case diagnostic with the limitation explicitly stated.

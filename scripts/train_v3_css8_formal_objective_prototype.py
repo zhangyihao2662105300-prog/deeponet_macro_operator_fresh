@@ -23,6 +23,10 @@ next objective design before any held-out split:
       B_anchor(s) = B0 + B1*s + B2*s^2 + B3*s^3
       dLE_anchor/dq = B_anchor(s) on the scalar path
 
+  or a hybrid value+tangent anchor:
+
+      LE_hybrid(q) = V_affine_quadratic(s) + B_cubic(s) @ q_perp
+
 * residual correction with q=0 anchoring
 * AD-B supervision with respect to q_useful_hat
 
@@ -363,7 +367,7 @@ class V3FormalObjectivePrototype(nn.Module):
         else:
             b_prior = self.b_case_mean[case_index].index_select(0, point_idx)
             le_mean = self.le_case_mean[case_index].index_select(0, point_idx)
-        if self.anchor_mode == "tangent-cubic":
+        if self.anchor_mode in {"tangent-cubic", "hybrid-cubic"}:
             q_base = q_raw - self.q_case_mean[case_index].reshape(1, -1)
             q_dir = self.q_case_dir[case_index].reshape(1, -1)
             signed_amp = torch.sum(q_base * q_dir, dim=1)
@@ -371,11 +375,23 @@ class V3FormalObjectivePrototype(nn.Module):
             if point_idx is None:
                 coeff = self.tangent_b_coeff[case_index]
                 const = self.tangent_le_const[case_index]
+                quad_coeff = self.quadratic_case_coeff[case_index]
+                b_prior = self.b_case_mean[case_index]
+                le_mean_full = self.le_case_mean[case_index]
             else:
                 coeff = self.tangent_b_coeff[case_index].index_select(1, point_idx)
                 const = self.tangent_le_const[case_index].index_select(0, point_idx)
+                quad_coeff = self.quadratic_case_coeff[case_index].index_select(1, point_idx)
+                b_prior = self.b_case_mean[case_index].index_select(0, point_idx)
+                le_mean_full = self.le_case_mean[case_index].index_select(0, point_idx)
             powers = torch.stack([signed_amp**power for power in range(int(coeff.shape[0]))], dim=1)
             b_poly = torch.einsum("nm,mpak->npak", powers, coeff)
+            if self.anchor_mode == "hybrid-cubic":
+                q_path = signed_amp.reshape(-1, 1) * self.q_case_dir[case_index].reshape(1, -1)
+                affine = le_mean_full.reshape(1, le_mean_full.shape[0], 6) + torch.einsum("pak,nk->npa", b_prior, q_path)
+                quad_powers = torch.stack([torch.ones_like(signed_amp), signed_amp, signed_amp * signed_amp], dim=1)
+                value_path = affine + torch.einsum("nm,mpa->npa", quad_powers, quad_coeff)
+                return value_path + torch.einsum("npak,nk->npa", b_poly, q_perp)
             integ = torch.zeros(
                 (q_raw.shape[0], coeff.shape[1], coeff.shape[2]),
                 dtype=q_raw.dtype,
@@ -672,8 +688,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "trunk_features_hat_dim": int(data["trunk_norm"].shape[2]),
         "anchor_mode": str(args.anchor_mode),
         "quadratic_anchor_coeff_source": "closed-form train-pool per case" if str(args.anchor_mode) == "affine-quadratic" else None,
-        "tangent_anchor_coeff_source": "closed-form train-pool per case" if str(args.anchor_mode) == "tangent-cubic" else None,
-        "tangent_anchor_degree": int(data_np.get("tangent_anchor_degree", -1)) if str(args.anchor_mode) == "tangent-cubic" else None,
+        "tangent_anchor_coeff_source": "closed-form train-pool per case" if str(args.anchor_mode) in {"tangent-cubic", "hybrid-cubic"} else None,
+        "tangent_anchor_degree": int(data_np.get("tangent_anchor_degree", -1)) if str(args.anchor_mode) in {"tangent-cubic", "hybrid-cubic"} else None,
         "b_anchor_trainable": bool(model.b_case_mean.requires_grad),
         "loss_scale_mode": "per-case",
         "model_inputs": ["q_useful_hat", "geometry_global_hat", "trunk_features_hat"],
@@ -718,7 +734,7 @@ def main() -> None:
     parser.add_argument("--eval-point-batch", type=int, default=16)
     parser.add_argument("--eval-every", type=int, default=300)
     parser.add_argument("--grad-clip", type=float, default=10.0)
-    parser.add_argument("--anchor-mode", choices=["linear", "affine", "affine-quadratic", "tangent-cubic"], default="affine")
+    parser.add_argument("--anchor-mode", choices=["linear", "affine", "affine-quadratic", "tangent-cubic", "hybrid-cubic"], default="affine")
     parser.add_argument("--tangent-anchor-degree", type=int, default=3)
     parser.add_argument("--freeze-b-anchor", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()

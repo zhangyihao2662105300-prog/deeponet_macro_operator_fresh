@@ -1219,3 +1219,63 @@ Because B_hat_direct_rel approximately equals AD_B_rel, the main issue is not
 raw-B projection or autograd bookkeeping.  The next v3 model step should focus
 on a stronger tangent/B representation.
 ```
+
+### B-Head-Only Capacity Diagnosis
+
+The next gate turns off the coupled value/autograd objectives and trains only
+the explicit tangent head:
+
+```text
+--le-weight 0
+--b-weight 0
+--direct-b-head-weight 1.0
+--radial-weight 0
+```
+
+This does not redefine `B`.  The target remains:
+
+```text
+B_local_useful_stack_hat = dLE_local_stack / dq_useful_hat
+```
+
+The gate only asks whether the network function
+`B_hat(q_useful_hat, geometry_global_hat, trunk_features_hat)` can directly fit
+that derivative label before coupling it back to an `LE_hat` value field.
+
+Results:
+
+```text
+one frame:
+  case031 frame09
+  sample_count = 1
+  B_hat_direct_rel = 0.1303068548
+  B_hat_direct_cos = 0.9916398525
+  AD_B_rel = 0.1303039491
+  B_model_raw_rel = 0.1310344338
+
+one case:
+  case031, 10 frames
+  sample_count = 10
+  B_hat_direct_rel = 0.1692510098
+  B_hat_direct_cos = 0.9856898189
+  AD_B_rel = 0.1692342162
+  B_model_raw_rel = 0.1698791385
+
+10-case pool:
+  sample_count = 100
+  B_hat_direct_rel = 0.1821686924
+  B_hat_direct_cos = 0.9841534495
+  AD_B_rel = 0.1818507612
+  B_model_raw_rel = 0.1842970997
+```
+
+Interpretation:
+
+```text
+B_hat capacity alone: plausible.
+Coupled LE/V + B + AD/radial objective: not solved.
+```
+
+So the next design step should not simply enlarge the B-head.  It should define
+a coupling strategy that preserves the directly learnable tangent field while
+also producing a consistent `LE_hat` value field.

@@ -3,6 +3,116 @@
 This file records the route-level history for the Abaqus real-integration-point
 DeepONet/query-point training line.  Keep it updated whenever this route changes.
 
+## v3 B-head-only capacity diagnosis - 2026-06-24 - Direct B is learnable
+
+Purpose:
+
+- Follow up the radial tangent-head diagnosis by turning off every coupled
+  objective except the explicit tangent head.
+- Ask only whether the current inputs can directly fit
+  `B_local_useful_stack_hat`:
+
+```text
+input:
+  q_useful_hat
+  geometry_global_hat
+  trunk_features_hat / query point
+
+loss:
+  ||B_hat(s, d, geometry, point) - B_local_useful_stack_hat||^2
+```
+
+- Keep this as a capacity diagnostic only.  `B_local_useful_stack_hat` is still
+  the derivative label from Abaqus/exported v3 compact; this gate simply does
+  not require `LE_hat` and `AD(LE_hat, q)` to be consistent.
+
+Implementation:
+
+- `scripts/train_v3_single_frame_radial_operator_smoke.py` now skips disabled
+  losses instead of computing them with zero weight.
+- The B-only runs used:
+
+```text
+--le-weight 0
+--b-weight 0
+--direct-b-head-weight 1.0
+--radial-weight 0
+```
+
+One-frame B-only result:
+
+```text
+case031 frame09
+steps = 3000
+hidden = 256
+sample_count = 1
+
+B_hat_direct_rel = 0.1303068548
+B_hat_direct_cos = 0.9916398525
+AD_B_rel = 0.1303039491
+B_model_raw_rel = 0.1310344338
+```
+
+One-case B-only result:
+
+```text
+case031, all 10 frames
+steps = 3000
+hidden = 256
+sample_count = 10
+
+B_hat_direct_rel = 0.1692510098
+B_hat_direct_cos = 0.9856898189
+AD_B_rel = 0.1692342162
+B_model_raw_rel = 0.1698791385
+```
+
+10-case training-pool B-only result:
+
+```text
+cases = [19,25,31,41,43,44,45,46,49,50]
+steps = 3000
+hidden = 256
+sample_count = 100
+
+B_hat_direct_rel = 0.1821686924
+B_hat_direct_cos = 0.9841534495
+AD_B_rel = 0.1818507612
+B_model_raw_rel = 0.1842970997
+
+case031:
+  B_hat_direct_rel = 0.2065032274
+  AD_B_rel = 0.2063035220
+  B_model_raw_rel = 0.2076769918
+```
+
+Interpretation:
+
+- The direct tangent head is learnable under direct supervision.  It can fit
+  one frame, one case, and the 10-case training pool to about `0.13-0.18`
+  relative error with high cosine.
+- This rules out the strongest version of "the B-head cannot represent the
+  tangent from the current inputs."
+- The earlier coupled radial run failed because the joint `LE/V`, `B_hat`,
+  AD-B, and radial consistency objective did not preserve this direct B
+  capacity.
+
+Updated next-step hypothesis:
+
+```text
+The problem is not B-head capacity by itself.
+The next blocker is V/B coupling:
+  how to make LE_hat values and B_hat tangents consistent
+  without destroying the directly learnable tangent field.
+```
+
+Boundary:
+
+- This is not a final model and not a held-out generalization result.
+- `LE_hat` is intentionally not trained in this diagnostic, so `LE_rel` is not
+  meaningful here.
+- No checkpoint or large data artifact is committed.
+
 ## v3 single-frame radial learning diagnosis - 2026-06-24 - B-head is the bottleneck
 
 Purpose:

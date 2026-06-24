@@ -589,6 +589,12 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     sample_batch = min(int(args.sample_batch), sample_count)
     le_point_batch = min(int(args.le_point_batch), point_count)
     ad_point_batch = min(int(args.ad_point_batch), point_count)
+    use_le_loss = float(args.le_weight) != 0.0
+    use_ad_loss = float(args.b_weight) != 0.0
+    use_direct_b_head_loss = float(args.direct_b_head_weight) != 0.0
+    use_radial_loss = float(args.radial_weight) != 0.0
+    if not (use_le_loss or use_ad_loss or use_direct_b_head_loss or use_radial_loss):
+        raise SystemExit("At least one loss weight must be non-zero")
     le_scale_case = torch.zeros(len(case_ids), device=device)
     b_scale_case = torch.zeros(len(case_ids), device=device)
     for idx, case_id in enumerate(case_ids):
@@ -620,27 +626,32 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             q_norm = data["q_norm"][sample_index]
             geom = data["geom_norm"][sample_index].reshape(1, -1)
             trunk = data["trunk_norm_by_case"][case_pos]
-            le_idx = torch.randperm(point_count, device=device)[:le_point_batch]
-            pred = forward_sample(model, q_norm, geom, trunk, data["q_mean"], data["q_std"], point_idx=le_idx)[0]
-            le_target = data["le"][sample_index].index_select(0, le_idx)
-            le_loss = torch.mean(((pred - le_target) / le_scale_case[case_pos]) ** 2)
-            ad_idx = torch.randperm(point_count, device=device)[:ad_point_batch]
-            ad_b = jacobian_sample(model, q_norm, geom, trunk, data["q_mean"], data["q_std"], point_idx=ad_idx)
-            b_hat_direct = direct_b_head(model, q_raw, geom, trunk, point_idx=ad_idx)[0]
-            b_target = data["b"][sample_index].index_select(0, ad_idx)
-            b_loss = torch.mean(((ad_b - b_target) / b_scale_case[case_pos]) ** 2)
-            direct_b_head_loss = torch.mean(((b_hat_direct - b_target) / b_scale_case[case_pos]) ** 2)
-            radial_loss = radial_consistency_loss(model, q_raw, geom, trunk, ad_idx) / (b_scale_case[case_pos] ** 2)
-            losses.append(
-                float(args.le_weight) * le_loss
-                + float(args.b_weight) * b_loss
-                + float(args.direct_b_head_weight) * direct_b_head_loss
-                + float(args.radial_weight) * radial_loss
-            )
-            le_terms.append(le_loss.detach())
-            b_terms.append(b_loss.detach())
-            direct_b_head_terms.append(direct_b_head_loss.detach())
-            radial_terms.append(radial_loss.detach())
+            sample_loss = torch.zeros((), device=device)
+            if use_le_loss:
+                le_idx = torch.randperm(point_count, device=device)[:le_point_batch]
+                pred = forward_sample(model, q_norm, geom, trunk, data["q_mean"], data["q_std"], point_idx=le_idx)[0]
+                le_target = data["le"][sample_index].index_select(0, le_idx)
+                le_loss = torch.mean(((pred - le_target) / le_scale_case[case_pos]) ** 2)
+                sample_loss = sample_loss + float(args.le_weight) * le_loss
+                le_terms.append(le_loss.detach())
+            if use_ad_loss or use_direct_b_head_loss or use_radial_loss:
+                ad_idx = torch.randperm(point_count, device=device)[:ad_point_batch]
+                b_target = data["b"][sample_index].index_select(0, ad_idx)
+            if use_ad_loss:
+                ad_b = jacobian_sample(model, q_norm, geom, trunk, data["q_mean"], data["q_std"], point_idx=ad_idx)
+                b_loss = torch.mean(((ad_b - b_target) / b_scale_case[case_pos]) ** 2)
+                sample_loss = sample_loss + float(args.b_weight) * b_loss
+                b_terms.append(b_loss.detach())
+            if use_direct_b_head_loss:
+                b_hat_direct = direct_b_head(model, q_raw, geom, trunk, point_idx=ad_idx)[0]
+                direct_b_head_loss = torch.mean(((b_hat_direct - b_target) / b_scale_case[case_pos]) ** 2)
+                sample_loss = sample_loss + float(args.direct_b_head_weight) * direct_b_head_loss
+                direct_b_head_terms.append(direct_b_head_loss.detach())
+            if use_radial_loss:
+                radial_loss = radial_consistency_loss(model, q_raw, geom, trunk, ad_idx) / (b_scale_case[case_pos] ** 2)
+                sample_loss = sample_loss + float(args.radial_weight) * radial_loss
+                radial_terms.append(radial_loss.detach())
+            losses.append(sample_loss)
         loss = torch.stack(losses).mean()
         opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -651,10 +662,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             row = {
                 "step": int(step),
                 "loss": scalar_float(loss.detach()),
-                "le_loss": scalar_float(torch.stack(le_terms).mean()),
-                "b_loss": scalar_float(torch.stack(b_terms).mean()),
-                "direct_b_head_loss": scalar_float(torch.stack(direct_b_head_terms).mean()),
-                "radial_loss": scalar_float(torch.stack(radial_terms).mean()),
+                "le_loss": scalar_float(torch.stack(le_terms).mean()) if le_terms else None,
+                "b_loss": scalar_float(torch.stack(b_terms).mean()) if b_terms else None,
+                "direct_b_head_loss": scalar_float(torch.stack(direct_b_head_terms).mean()) if direct_b_head_terms else None,
+                "radial_loss": scalar_float(torch.stack(radial_terms).mean()) if radial_terms else None,
                 **metrics,
             }
             history.append(row)
@@ -693,6 +704,12 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             "b_weight": float(args.b_weight),
             "direct_b_head_weight": float(args.direct_b_head_weight),
             "radial_weight": float(args.radial_weight),
+        },
+        "active_losses": {
+            "le_loss": use_le_loss,
+            "ad_b_loss": use_ad_loss,
+            "direct_b_head_loss": use_direct_b_head_loss,
+            "radial_loss": use_radial_loss,
         },
         "filter_case": data_np["filter_case"],
         "filter_frame": data_np["filter_frame"],

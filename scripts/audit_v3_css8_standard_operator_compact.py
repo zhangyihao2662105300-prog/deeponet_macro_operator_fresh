@@ -24,6 +24,8 @@ from v3_css8_standard_operator_common import (
     collect_paths,
     json_default,
     project_raw_b_to_useful_subspace,
+    q_raw_to_useful_times_l_ref,
+    q_useful_hat_to_raw_projected_map,
     rel_norm,
     scalar_bool,
     scalar_text,
@@ -83,6 +85,16 @@ def audit_one(path: Path, *, strict: bool, tol: float) -> dict[str, Any]:
         ip_detj = load_required(z, "ip_detJ", failures)
         ip_detj_hat = load_required(z, "ip_detJ_hat", failures)
         l_ref_arr = load_required(z, "L_ref", failures)
+        t_q_useful_hat_to_raw_projected = (
+            np.asarray(z["T_q_useful_hat_to_raw_projected"], dtype=np.float64)
+            if "T_q_useful_hat_to_raw_projected" in keys
+            else None
+        )
+        t_q_raw_to_useful_times_l_ref = (
+            np.asarray(z["T_q_raw_to_useful_times_L_ref"], dtype=np.float64)
+            if "T_q_raw_to_useful_times_L_ref" in keys
+            else None
+        )
 
         if failures:
             return {
@@ -133,6 +145,8 @@ def audit_one(path: Path, *, strict: bool, tol: float) -> dict[str, Any]:
         ip_detj = np.asarray(ip_detj, dtype=np.float64).reshape(-1)
         ip_detj_hat = np.asarray(ip_detj_hat, dtype=np.float64).reshape(-1)
         l_ref = float(np.asarray(l_ref_arr, dtype=np.float64).reshape(-1)[0])
+        expected_t_q_useful_hat_to_raw_projected = q_useful_hat_to_raw_projected_map(t_q, l_ref)
+        expected_t_q_raw_to_useful_times_l_ref = q_raw_to_useful_times_l_ref(t_q, l_ref)
 
         frame_count = int(q48_raw.shape[0]) if q48_raw.ndim == 2 else None
         point_count = int(ip_macro_xi.shape[0]) if ip_macro_xi.ndim == 2 else None
@@ -160,6 +174,30 @@ def audit_one(path: Path, *, strict: bool, tol: float) -> dict[str, Any]:
         if trunk_features_hat.ndim != 2 or trunk_features_hat.shape[0] != point_count:
             shape_failures.append(f"trunk_features_hat_shape_{trunk_features_hat.shape}")
         failures.extend(shape_failures)
+        t_q_reverse_rel: float | None = None
+        t_q_reverse_max_abs: float | None = None
+        if t_q_useful_hat_to_raw_projected is not None:
+            if t_q_useful_hat_to_raw_projected.shape == expected_t_q_useful_hat_to_raw_projected.shape:
+                diff = t_q_useful_hat_to_raw_projected - expected_t_q_useful_hat_to_raw_projected
+                t_q_reverse_rel = rel_norm(diff, expected_t_q_useful_hat_to_raw_projected)
+                t_q_reverse_max_abs = max_abs(diff)
+            elif strict:
+                failures.append(
+                    "T_q_useful_hat_to_raw_projected_shape_"
+                    f"{t_q_useful_hat_to_raw_projected.shape}_expected_{expected_t_q_useful_hat_to_raw_projected.shape}"
+                )
+        t_q_forward_scaled_rel: float | None = None
+        t_q_forward_scaled_max_abs: float | None = None
+        if t_q_raw_to_useful_times_l_ref is not None:
+            if t_q_raw_to_useful_times_l_ref.shape == expected_t_q_raw_to_useful_times_l_ref.shape:
+                diff = t_q_raw_to_useful_times_l_ref - expected_t_q_raw_to_useful_times_l_ref
+                t_q_forward_scaled_rel = rel_norm(diff, expected_t_q_raw_to_useful_times_l_ref)
+                t_q_forward_scaled_max_abs = max_abs(diff)
+            elif strict:
+                failures.append(
+                    "T_q_raw_to_useful_times_L_ref_shape_"
+                    f"{t_q_raw_to_useful_times_l_ref.shape}_expected_{expected_t_q_raw_to_useful_times_l_ref.shape}"
+                )
 
         q_check = apply_t_q(q48_raw, t_q_hat)
         q_diff = q_check - q_useful_hat
@@ -199,6 +237,10 @@ def audit_one(path: Path, *, strict: bool, tol: float) -> dict[str, Any]:
             "ip_invJ_hat_scaling_rel": rel_norm(ip_invj_hat - ip_invj * l_ref, ip_invj * l_ref),
             "ip_detJ_hat_scaling_rel": rel_norm(ip_detj_hat - ip_detj / (l_ref**3), ip_detj / (l_ref**3)),
             "ip_detJ_vs_det_ip_J_rel": rel_norm(det_from_j - ip_detj, ip_detj),
+            "T_q_useful_hat_to_raw_projected_rel": t_q_reverse_rel,
+            "T_q_useful_hat_to_raw_projected_max_abs": t_q_reverse_max_abs,
+            "T_q_raw_to_useful_times_L_ref_rel": t_q_forward_scaled_rel,
+            "T_q_raw_to_useful_times_L_ref_max_abs": t_q_forward_scaled_max_abs,
         }
 
         if strict:
@@ -216,6 +258,15 @@ def audit_one(path: Path, *, strict: bool, tol: float) -> dict[str, Any]:
             for key, limit in strict_rules.items():
                 if not np.isfinite(metrics[key]) or metrics[key] >= float(limit):
                     failures.append(f"{key}_ge_{limit:g}")
+            optional_q_rules = {
+                "T_q_useful_hat_to_raw_projected_rel": t_q_useful_hat_to_raw_projected,
+                "T_q_raw_to_useful_times_L_ref_rel": t_q_raw_to_useful_times_l_ref,
+            }
+            for key, present in optional_q_rules.items():
+                if present is not None and (
+                    metrics[key] is None or not np.isfinite(float(metrics[key])) or float(metrics[key]) >= float(tol)
+                ):
+                    failures.append(f"{key}_ge_{tol:g}")
             if metrics["Q_stack_orthonormal_max"] >= 5.0e-12:
                 failures.append("Q_stack_not_orthonormal")
             if metrics["Q_stack_det_min"] < 1.0 - 5.0e-12:
@@ -250,6 +301,8 @@ def audit_one(path: Path, *, strict: bool, tol: float) -> dict[str, Any]:
             "trunk_features_hat": shape_list(trunk_features_hat),
             "LE_local_stack": shape_list(le_local_stack),
             "B_local_useful_stack_hat": shape_list(b_local_useful_stack_hat),
+            "T_q_useful_hat_to_raw_projected": shape_list(t_q_useful_hat_to_raw_projected),
+            "T_q_raw_to_useful_times_L_ref": shape_list(t_q_raw_to_useful_times_l_ref),
         },
         **metrics,
         "B_rigid_residual_strict_failure": False,

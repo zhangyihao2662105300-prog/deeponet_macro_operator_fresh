@@ -203,6 +203,7 @@ class GeometryMap:
     The map owns the single normalization convention for reference geometry and
     builds both point-level trunk features and global geometry features from
     ``X_hat``.  It does not depend on the current displacement state ``q``.
+    ``detJ_hat`` is the full 3D Jacobian determinant ``det(J_hat)``.
     """
 
     def __init__(
@@ -227,6 +228,11 @@ class GeometryMap:
             raise ValueError("cell_type must be HEX8, CSS8, or shell-like")
         if self.conn.shape[1] != 8:
             raise ValueError(f"{self.cell_type} expects 8-node cells, got {self.conn.shape[1]}")
+        if int(detj_scale_dim) != 3:
+            raise ValueError(
+                "Current GeometryMap detJ_hat is det(J_hat) for a full 3D HEX8/CSS8 Jacobian; "
+                "detj_scale_dim must be 3. Add a separate areaJ_hat field for shell-area Jacobians."
+            )
         self.X_hat, self.L_ref, self.center, self.span = scale_reference_geometry(
             self.X_ref,
             center=center,
@@ -255,6 +261,7 @@ class GeometryMap:
         invj_hat = np.linalg.inv(j_hat)
         detj_hat = float(np.linalg.det(j_hat))
         q_ref = reference_frame_from_j(j_hat, mode=self.frame_mode)
+        # Row-vector convention: metric_ab = dx_hat/dxi_a dot dx_hat/dxi_b.
         metric = np.einsum("ij,kj->ik", j_hat, j_hat)
         thickness_hat = 2.0 * float(np.linalg.norm(j_hat[2]))
         return {
@@ -365,6 +372,8 @@ AUDIT_POSTPROCESS_FIELDS = (
     "q_useful",
     "T_q_raw_to_useful",
     "T_q_raw_to_useful_hat",
+    "T_q_useful_hat_to_raw_projected",
+    "T_q_raw_to_useful_times_L_ref",
     "LE_abq",
     "B_LE128_forward",
     "Q_stack",
@@ -598,6 +607,29 @@ def project_raw_b_to_useful_subspace(b_raw: np.ndarray, t_q: np.ndarray) -> np.n
     raise ValueError(f"T_q_raw_to_useful must be [42,48] or [N,42,48], got {t.shape}")
 
 
+def q_useful_hat_to_raw_projected_map(t_q: np.ndarray, l_ref: float) -> np.ndarray:
+    """Return the projected reverse q map, q_raw_projected = T @ q_useful_hat."""
+
+    t = np.asarray(t_q, dtype=np.float64)
+    scale = float(l_ref)
+    if t.shape == (42, 48):
+        return t.T * scale
+    if t.ndim == 3 and t.shape[1:] == (42, 48):
+        return np.swapaxes(t, -1, -2) * scale
+    raise ValueError(f"T_q_raw_to_useful must be [42,48] or [N,42,48], got {t.shape}")
+
+
+def q_raw_to_useful_times_l_ref(t_q: np.ndarray, l_ref: float) -> np.ndarray:
+    """Return the explicitly named scaled forward q map, L_ref*T_q_raw_to_useful."""
+
+    t = np.asarray(t_q, dtype=np.float64)
+    if t.shape == (42, 48):
+        return t * float(l_ref)
+    if t.ndim == 3 and t.shape[1:] == (42, 48):
+        return t * float(l_ref)
+    raise ValueError(f"T_q_raw_to_useful must be [42,48] or [N,42,48], got {t.shape}")
+
+
 def local_geometry_features(
     *,
     ip_macro_xi: np.ndarray,
@@ -609,6 +641,7 @@ def local_geometry_features(
     ip_detj_hat: np.ndarray,
 ) -> tuple[np.ndarray, list[str], np.ndarray, list[str]]:
     j = np.asarray(ip_j_hat, dtype=np.float64)
+    # Row-vector convention: metric_ab = dx_hat/dxi_a dot dx_hat/dxi_b.
     metric = np.einsum("pij,pkj->pik", j, j)
     thickness_hat = 2.0 * np.linalg.norm(j[:, 2, :], axis=1)
     det_hat = np.asarray(ip_detj_hat, dtype=np.float64).reshape(-1)

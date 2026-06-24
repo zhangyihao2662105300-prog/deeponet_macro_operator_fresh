@@ -19,6 +19,8 @@ from v3_css8_standard_operator_common import (  # noqa: E402
     GeometryMap,
     css8_connectivity_zero_based,
     css8_point_table,
+    q_raw_to_useful_times_l_ref,
+    q_useful_hat_to_raw_projected_map,
     rel_norm,
 )
 
@@ -33,6 +35,23 @@ def main() -> int:
         cell_type="CSS8",
         frame_mode="shell-normal",
     )
+    detj_guard_passed = False
+    try:
+        GeometryMap(
+            x_ref,
+            css8_connectivity_zero_based(nx=4, ny=4),
+            cell_type="CSS8",
+            detj_scale_dim=2,
+            frame_mode="shell-normal",
+        )
+    except ValueError as exc:
+        detj_guard_passed = "detj_scale_dim must be 3" in str(exc)
+
+    t_q = np.zeros((42, 48), dtype=np.float64)
+    t_q[:, :42] = np.eye(42, dtype=np.float64)
+    reverse_q_map = q_useful_hat_to_raw_projected_map(t_q, 2.5)
+    forward_scaled_alias = q_raw_to_useful_times_l_ref(t_q, 2.5)
+
     local, local_names, trunk, trunk_names, fields = geom.build_trunk_features(point_table)
     phys = geom.physical_point_fields(fields)
 
@@ -48,6 +67,11 @@ def main() -> int:
         "trunk_feature_dim": int(trunk.shape[1]),
         "local_name_count": int(len(local_names)),
         "trunk_name_count": int(len(trunk_names)),
+        "detj_scale_dim_guard_passed": bool(detj_guard_passed),
+        "T_q_useful_hat_to_raw_projected_shape": list(reverse_q_map.shape),
+        "T_q_raw_to_useful_times_L_ref_shape": list(forward_scaled_alias.shape),
+        "T_q_reverse_formula_rel": rel_norm(reverse_q_map - t_q.T * 2.5, t_q.T * 2.5),
+        "T_q_forward_scaled_alias_formula_rel": rel_norm(forward_scaled_alias - t_q * 2.5, t_q * 2.5),
         "X_phys_roundtrip_rel": rel_norm(phys["ip_xyz"] - (fields["x_hat"] * geom.L_ref + geom.center.reshape(1, 3)), phys["ip_xyz"]),
         "J_phys_roundtrip_rel": rel_norm(phys["ip_J"] - fields["J_hat"] * geom.L_ref, phys["ip_J"]),
         "invJ_phys_roundtrip_rel": rel_norm(phys["ip_invJ"] - fields["invJ_hat"] / geom.L_ref, phys["ip_invJ"]),
@@ -61,12 +85,17 @@ def main() -> int:
         "J_phys_roundtrip_rel": 1.0e-14,
         "invJ_phys_roundtrip_rel": 1.0e-14,
         "detJ_phys_roundtrip_rel": 1.0e-14,
+        "T_q_reverse_formula_rel": 1.0e-14,
+        "T_q_forward_scaled_alias_formula_rel": 1.0e-14,
         "Q_orthonormal_max": 1.0e-12,
         "Q_e3_dot_reference_normal_min": 1.0 - 1.0e-12,
     }
     report["passed"] = (
         report["local_feature_dim"] == len(local_names)
         and report["trunk_feature_dim"] == len(trunk_names)
+        and report["detj_scale_dim_guard_passed"]
+        and report["T_q_useful_hat_to_raw_projected_shape"] == [48, 42]
+        and report["T_q_raw_to_useful_times_L_ref_shape"] == [42, 48]
         and all(float(report[key]) <= limit for key, limit in tolerances.items() if key != "Q_e3_dot_reference_normal_min")
         and float(report["Q_e3_dot_reference_normal_min"]) >= tolerances["Q_e3_dot_reference_normal_min"]
         and float(report["Q_det_min"]) >= 1.0 - 1.0e-12

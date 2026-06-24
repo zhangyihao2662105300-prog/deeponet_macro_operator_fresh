@@ -38,6 +38,8 @@ from v3_css8_standard_operator_common import (
     json_default,
     parse_case_id,
     project_raw_b_to_useful_subspace,
+    q_raw_to_useful_times_l_ref,
+    q_useful_hat_to_raw_projected_map,
     rel_norm,
     right_multiply_t_q_transpose,
     scalar_bool,
@@ -182,7 +184,16 @@ def audit_arrays(
     }
 
 
-def build_one(path: Path, out_root: Path, *, strict: bool, tol: float, nx: int, ny: int) -> dict[str, Any]:
+def build_one(
+    path: Path,
+    out_root: Path,
+    *,
+    strict: bool,
+    tol: float,
+    source_geometry_tol: float,
+    nx: int,
+    ny: int,
+) -> dict[str, Any]:
     with np.load(str(path), allow_pickle=True) as z:
         files = list(z.files)
         required = {
@@ -259,7 +270,8 @@ def build_one(path: Path, out_root: Path, *, strict: bool, tol: float, nx: int, 
     q_useful = apply_t_q(q48_raw, t_q)
     q_useful_hat = q_useful / float(l_ref)
     t_q_hat = t_q / float(l_ref)
-    t_q_useful_hat_to_raw_projected = t_q * float(l_ref)
+    t_q_useful_hat_to_raw_projected = q_useful_hat_to_raw_projected_map(t_q, float(l_ref))
+    t_q_raw_to_useful_times_l_ref = q_raw_to_useful_times_l_ref(t_q, float(l_ref))
 
     le_local_stack = apply_t_eps_to_strain(t_eps_from_abq_stack, le_abq)
     b_local_raw = apply_t_eps_to_b(t_eps_from_abq_stack, b_raw)
@@ -297,6 +309,11 @@ def build_one(path: Path, out_root: Path, *, strict: bool, tol: float, nx: int, 
         strict=strict,
         tol=tol,
     )
+    if strict:
+        for key, value in source_geometry_diffs.items():
+            if not np.isfinite(float(value)) or float(value) > float(source_geometry_tol):
+                audit["strict_failures"].append(f"{key}_gt_{source_geometry_tol:g}")
+        audit["strict_pass"] = len(audit["strict_failures"]) == 0
 
     metadata = {
         "standard_operator_contract_version": CONTRACT_VERSION,
@@ -309,9 +326,14 @@ def build_one(path: Path, out_root: Path, *, strict: bool, tol: float, nx: int, 
         "ad_target": "dLE_local_stack/dq_useful_hat",
         "raw_backprojection": "B_raw_hat = T_eps_to_abq_stack @ B_local_useful_stack_hat @ (T_q_raw_to_useful / L_ref)",
         "preprocess_B": "B_local_useful_stack_hat = L_ref * T_eps_from_abq_stack @ B_raw @ T_q_raw_to_useful.T",
+        "q_backprojection_map": "T_q_useful_hat_to_raw_projected = T_q_raw_to_useful.T * L_ref maps q_useful_hat to projected q48_raw",
+        "q_forward_scaled_alias": "T_q_raw_to_useful_times_L_ref = T_q_raw_to_useful * L_ref is a named audit alias, not the reverse map",
         "geometry_feature_source": "GeometryMap(X_ref=X_macro, conn=CSS8, point_table=[cell_id,rst,xi_macro])",
+        "source_geometry_tolerance": float(source_geometry_tol),
         "L_ref_definition": "GeometryMap max axis-aligned span of X_ref",
         "Q_stack_definition": "reference shell-normal frame: e1=normalize(dX_hat/dr), e3=normalize(dX_hat/dr x dX_hat/ds), e2=e3 x e1",
+        "metric_hat_definition": "covariant parent-coordinate metric metric_ab=dx_hat/dxi_a dot dx_hat/dxi_b under row-vector J convention",
+        "detJ_hat_definition": "full 3D det(J_hat); detj_scale_dim is fixed at 3",
         "geometry_scaling": "X_hat=(X_ref-X_center)/L_ref, q_hat=q/L_ref, J_hat=J/L_ref, invJ_hat=L_ref*invJ, detJ_hat=detJ/L_ref^3, B_hat=L_ref*B_phys",
         "model_visible_fields": list(MODEL_VISIBLE_FIELDS),
         "audit_postprocess_only_fields": list(AUDIT_POSTPROCESS_FIELDS),
@@ -343,6 +365,7 @@ def build_one(path: Path, out_root: Path, *, strict: bool, tol: float, nx: int, 
         "T_q_raw_to_useful": t_q.astype(np.float64),
         "T_q_raw_to_useful_hat": t_q_hat.astype(np.float64),
         "T_q_useful_hat_to_raw_projected": t_q_useful_hat_to_raw_projected.astype(np.float64),
+        "T_q_raw_to_useful_times_L_ref": t_q_raw_to_useful_times_l_ref.astype(np.float64),
         "Q_stack": q_stack.astype(np.float64),
         "T_eps_to_abq_stack": t_eps_to_abq_stack.astype(np.float64),
         "T_eps_from_abq_stack": t_eps_from_abq_stack.astype(np.float64),
@@ -374,7 +397,11 @@ def build_one(path: Path, out_root: Path, *, strict: bool, tol: float, nx: int, 
         "model_derivative": np.asarray("dLE_local_stack/dq_useful_hat", dtype=object),
         "raw_backprojection": np.asarray(metadata["raw_backprojection"], dtype=object),
         "preprocess_B_formula": np.asarray(metadata["preprocess_B"], dtype=object),
+        "q_backprojection_map": np.asarray(metadata["q_backprojection_map"], dtype=object),
+        "q_forward_scaled_alias": np.asarray(metadata["q_forward_scaled_alias"], dtype=object),
         "geometry_feature_source": np.asarray(metadata["geometry_feature_source"], dtype=object),
+        "metric_hat_definition": np.asarray(metadata["metric_hat_definition"], dtype=object),
+        "detJ_hat_definition": np.asarray(metadata["detJ_hat_definition"], dtype=object),
         "geometry_scaling": np.asarray(metadata["geometry_scaling"], dtype=object),
         "L_ref_definition": np.asarray(metadata["L_ref_definition"], dtype=object),
         "Q_stack_definition": np.asarray(metadata["Q_stack_definition"], dtype=object),
@@ -408,6 +435,7 @@ def build_one(path: Path, out_root: Path, *, strict: bool, tol: float, nx: int, 
         "model_visible_fields": list(MODEL_VISIBLE_FIELDS),
         "audit_postprocess_only_fields": list(AUDIT_POSTPROCESS_FIELDS),
         "strict_requested": bool(strict),
+        "source_geometry_tolerance": float(source_geometry_tol),
         **source_geometry_diffs,
         **audit,
         "trained_model": False,
@@ -427,14 +455,33 @@ def main() -> int:
     parser.add_argument("--ny", type=int, default=4)
     parser.add_argument("--strict", action="store_true")
     parser.add_argument("--tol", type=float, default=1.0e-10)
+    parser.add_argument(
+        "--source-geometry-tol",
+        type=float,
+        default=1.0e-7,
+        help="Strict source-vs-GeometryMap relative tolerance; default allows float32 source compact roundoff.",
+    )
     args = parser.parse_args()
+    if float(args.source_geometry_tol) < float(args.tol):
+        raise SystemExit("--source-geometry-tol must be >= --tol")
 
     paths = collect_paths(args.compact, args.compact_list, case_limit=args.case_limit)
     if not paths:
         raise SystemExit("no compact inputs provided")
     args.out_root.mkdir(parents=True, exist_ok=True)
 
-    rows = [build_one(path, args.out_root, strict=args.strict, tol=float(args.tol), nx=args.nx, ny=args.ny) for path in paths]
+    rows = [
+        build_one(
+            path,
+            args.out_root,
+            strict=args.strict,
+            tol=float(args.tol),
+            source_geometry_tol=float(args.source_geometry_tol),
+            nx=args.nx,
+            ny=args.ny,
+        )
+        for path in paths
+    ]
     list_path = args.out_root / "v3_css8_standard_operator_compact_list.txt"
     list_path.write_text("\n".join(str(row["v3_standard_compact"]) for row in rows) + "\n", encoding="utf-8")
 
@@ -444,6 +491,7 @@ def main() -> int:
         "macro_shape": f"piecewise_{args.nx}x{args.ny}_css8_parent_domain_not_single_hex8",
         "compact_count": len(rows),
         "strict_requested": bool(args.strict),
+        "source_geometry_tolerance": float(args.source_geometry_tol),
         "strict_pass_count": int(pass_count),
         "strict_fail_count": int(len(rows) - pass_count),
         "v3_standard_operator_compact_list": str(list_path),

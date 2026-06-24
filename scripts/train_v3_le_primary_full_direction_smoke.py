@@ -597,6 +597,7 @@ def make_component_scales(
     case_ids: list[int],
     *,
     eps: float = 1.0e-12,
+    b_floor_frac: float = 1.0e-4,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     device = data["q"].device
     le_scales: list[torch.Tensor] = []
@@ -605,6 +606,9 @@ def make_component_scales(
         mask = data["sample_case_ids"] == int(case_id)
         le_scale = torch.sqrt(torch.mean(data["le"][mask] * data["le"][mask], dim=(0, 1)))
         b_scale = torch.sqrt(torch.mean(data["b"][mask] * data["b"][mask], dim=(0, 1)))
+        b_global_rms = torch.sqrt(torch.mean(data["b"][mask] * data["b"][mask]))
+        b_floor = torch.clamp(float(b_floor_frac) * b_global_rms, min=float(eps))
+        b_scale = torch.maximum(b_scale, b_floor)
         le_scales.append(torch.clamp(le_scale, min=float(eps)).reshape(1, 6))
         b_scales.append(torch.clamp(b_scale, min=float(eps)).reshape(1, 6, 42))
     return torch.stack(le_scales, dim=0).to(device), torch.stack(b_scales, dim=0).to(device)
@@ -657,7 +661,12 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     use_ad_loss = float(args.b_weight) != 0.0
     if not (use_le_loss or use_ad_loss):
         raise SystemExit("At least one of --le-weight or --b-weight must be non-zero")
-    le_scale_case, b_scale_case = make_component_scales(data, case_ids)
+    le_scale_case, b_scale_case = make_component_scales(
+        data,
+        case_ids,
+        eps=float(args.scale_eps),
+        b_floor_frac=float(args.b_scale_floor_frac),
+    )
     case_to_index = {int(case_id): idx for idx, case_id in enumerate(case_ids)}
     history: list[dict[str, Any]] = []
     case_history: list[dict[str, Any]] = []
@@ -761,7 +770,9 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             "le_scale_case_shape": [len(case_ids), 1, 6],
             "b_scale_case_shape": [len(case_ids), 1, 6, 42],
             "le_scale": "per case and strain component RMS",
-            "b_scale": "per case, strain component, and q direction RMS",
+            "b_scale": "max(per case/component/q-direction RMS, b_scale_floor_frac * case global B RMS)",
+            "scale_eps": float(args.scale_eps),
+            "b_scale_floor_frac": float(args.b_scale_floor_frac),
         },
         "active_losses": {
             "le_loss": use_le_loss,
@@ -827,6 +838,8 @@ def main() -> None:
     parser.add_argument("--eval-point-batch", type=int, default=None)
     parser.add_argument("--eval-every", type=int, default=None)
     parser.add_argument("--grad-clip", type=float, default=None)
+    parser.add_argument("--scale-eps", type=float, default=1.0e-12)
+    parser.add_argument("--b-scale-floor-frac", type=float, default=1.0e-4)
     args = apply_preset_defaults(parser.parse_args())
     if int(args.steps) < 0:
         raise SystemExit("--steps must be non-negative")
@@ -838,6 +851,10 @@ def main() -> None:
         raise SystemExit("--le-pretrain-steps must be non-negative")
     if int(args.b_ramp_steps) < 0:
         raise SystemExit("--b-ramp-steps must be non-negative")
+    if float(args.scale_eps) <= 0.0:
+        raise SystemExit("--scale-eps must be positive")
+    if float(args.b_scale_floor_frac) < 0.0:
+        raise SystemExit("--b-scale-floor-frac must be non-negative")
     train(args)
 
 

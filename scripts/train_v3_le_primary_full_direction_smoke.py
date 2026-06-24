@@ -466,11 +466,12 @@ class FELinearResidualLEOperator(nn.Module):
     The model keeps the v3 output in unnormalized local LE coordinates but
     writes the dominant q-dependence as
 
-        LE_local = B_base_hat(point_features) @ (q_useful_hat - mean_q) + residual.
+        LE_local = B_base_hat(point_features) @ q_useful_hat + residual.
 
     ``B_base_hat`` is kept directly in the v3 physical/hat derivative scale.
-    The forward pass multiplies q_norm by q_std internally, so AD-B evaluation
-    still reports dLE/dq_useful_hat after dividing dLE/dq_norm by q_std.
+    The forward pass reconstructs q_useful_hat from q_norm internally, so AD-B
+    evaluation still reports dLE/dq_useful_hat after dividing dLE/dq_norm by
+    q_std.  The residual branch still sees centered q_delta_hat.
     """
 
     def __init__(
@@ -483,6 +484,7 @@ class FELinearResidualLEOperator(nn.Module):
         hidden: int = 256,
         basis: int = 96,
         depth: int = 4,
+        q_mean: torch.Tensor,
         q_std: torch.Tensor,
         static_b_hat_init: torch.Tensor | None = None,
         residual_scale: float = 1.0,
@@ -503,6 +505,7 @@ class FELinearResidualLEOperator(nn.Module):
         self.baseline_scale = float(baseline_scale)
         self.train_point_baseline = bool(train_point_baseline)
         self.zero_init_residual = bool(zero_init_residual)
+        self.register_buffer("q_mean", torch.as_tensor(q_mean, dtype=torch.float32).reshape(self.q_dim))
         self.register_buffer("q_std", torch.as_tensor(q_std, dtype=torch.float32).reshape(self.q_dim))
         out_dim = self.strain_dim * self.basis
         self.branch = MLP(
@@ -563,9 +566,10 @@ class FELinearResidualLEOperator(nn.Module):
             geom_norm = geom_norm.expand(batch, -1)
         geom_flat = geom_norm.reshape(batch, -1)
         q_delta_hat = q_norm * self.q_std.reshape(1, -1)
+        q_hat = q_delta_hat + self.q_mean.reshape(1, -1)
         branch_in = torch.cat([q_delta_hat, geom_flat], dim=-1)
         b_base = self.linear_b_hat(trunk_norm, point_idx=point_idx)
-        linear = torch.einsum("pak,nk->npa", b_base, q_delta_hat)
+        linear = torch.einsum("pak,nk->npa", b_base, q_hat)
         b = self.branch(branch_in).reshape(batch, self.strain_dim, self.basis)
         t = self.trunk(trunk_norm).reshape(int(trunk_norm.shape[0]), self.strain_dim, self.basis)
         residual = torch.einsum("nak,pak->npa", b, t) / (self.basis ** 0.5)
@@ -924,6 +928,7 @@ def build_model(args: argparse.Namespace, data: dict[str, torch.Tensor]) -> nn.M
         return FELinearResidualLEOperator(
             **common,
             point_count=int(data["le"].shape[1]),
+            q_mean=data["q_mean"],
             q_std=data["q_std"],
             static_b_hat_init=static_b_hat_init(data),
             residual_scale=float(args.residual_scale),
@@ -1145,12 +1150,12 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "ad_target": "dLE_local_stack/dq_useful_hat",
         "model_style": str(args.model_style),
         "operator_form": (
-            "LE = B_base_hat(point_features) @ (q_norm * q_std) + DeepONet residual"
+            "LE = B_base_hat(point_features) @ q_useful_hat + DeepONet residual(q_delta_hat, geometry, point)"
             if isinstance(model, FELinearResidualLEOperator)
             else "DeepONet branch(q_norm,geometry_norm) dot trunk(point_norm)"
         ),
         "linear_baseline_relation": (
-            "B_base_hat = dLE_local_stack/dq_useful_hat; forward uses B_base_hat @ (q_norm * q_std)"
+            "B_base_hat = dLE_local_stack/dq_useful_hat; forward reconstructs q_useful_hat = q_norm * q_std + q_mean"
             if isinstance(model, FELinearResidualLEOperator)
             else None
         ),

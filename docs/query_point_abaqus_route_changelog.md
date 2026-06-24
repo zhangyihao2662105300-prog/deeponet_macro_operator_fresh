@@ -3,6 +3,108 @@
 This file records the route-level history for the Abaqus real-integration-point
 DeepONet/query-point training line.  Keep it updated whenever this route changes.
 
+## v3 CSS8 case031 nonlinearity audit - 2026-06-24 - Amplitude path isolated
+
+Purpose:
+
+- Pause before held-out splits or data expansion.
+- Audit why `case031` remains difficult after the v3 formal objective
+  prototype.
+- Determine whether the remaining `case031` error is a compact/label issue,
+  q-direction abnormality, large-amplitude nonlinear path, or value-anchor
+  design issue.
+- Keep this as a read-only data/objective diagnostic: no training, no split,
+  no checkpoint, and no model-performance claim.
+
+Added:
+
+- `scripts/audit_v3_case031_nonlinearity.py`
+
+Command:
+
+```powershell
+py -3 scripts\audit_v3_case031_nonlinearity.py `
+  --compact-list D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\multi_case_min10\v3_css8_standard_operator_compact_list.txt `
+  --focus-case 31 `
+  --out-root D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\case031_nonlinearity_audit
+```
+
+Outputs:
+
+```text
+D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\case031_nonlinearity_audit\v3_case031_nonlinearity_summary.json
+D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\case031_nonlinearity_audit\v3_case031_nonlinearity_case_summary.csv
+D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\case031_nonlinearity_audit\v3_case031_nonlinearity_frame_manifest.csv
+```
+
+Key result:
+
+```text
+case_count = 10
+focus_case = 31
+
+case031 ranks:
+  q_norm_mean_desc = 1
+  LE_rms_mean_desc = 1
+  Bmean_at_q_LE_rel_desc = 1
+  affine_Bmean_LE_rel_desc = 1
+
+case031 q_norm_mean = 0.2080905983
+pool q_norm_mean_median = 0.0025180054
+case031 q_norm_mean / pool median = 82.6410454331
+
+case031 LE_rms_mean = 0.0128052995
+pool LE_rms_mean_median = 0.0001958019
+case031 LE_rms_mean / pool median = 65.3992597910
+
+case_internal_q_direction_cos_min = 0.9999999999999998
+case_internal_q_direction_cos_mean = 1.0
+
+B_mean(case,point) @ q:
+  case031 LE_rel = 0.2938258832
+
+LE_mean + B_mean @ (q - q_mean):
+  case031 LE_rel = 0.0976020099
+
+quadratic amplitude correction over affine:
+  case031 LE_rel = 0.0099147393
+
+secant_Bmean_rel_mean = 0.3333519672
+secant_Bmean_rel_max = 0.7711158134
+```
+
+Interpretation:
+
+- `case031` is not merely a random hard case.  It is the largest-amplitude and
+  largest-LE case in the 10-case v3 pool by a large margin.
+- Its q path is essentially a scalar amplitude path:
+  all frames share the same direction, with varying amplitude.
+- The affine anchor already removes a large offset error
+  (`0.2938 -> 0.0976`), but a scalar quadratic correction reduces the same
+  value reconstruction problem to about `0.0099`.
+- This isolates the remaining issue as amplitude-dependent value-map
+  nonlinearity / anchor design, not v3 compact contract failure, not old
+  TRUE176 label leakage, and not q-direction inconsistency.
+
+Next recommended gate:
+
+- Prototype a conservative amplitude-aware value anchor before held-out split
+  claims, for example a case-local scalar correction along the case q direction:
+
+```text
+s = <q_useful_hat - q_mean, q_dir_case>
+LE_hat =
+  LE_mean(case,point)
+  + B_mean(case,point) @ (q_useful_hat - q_mean(case))
+  + C2(case,point) * s^2
+  + residual(q, geometry, trunk)
+  - residual(q_mean or zero anchor)
+```
+
+- Keep per-case/relative LE and B scaling and explicit AD-B supervision.
+- Do not expand the dataset or judge held-out generalization until the current
+  10-case training pool is stable with this stronger value anchor.
+
 ## v3 CSS8 formal objective prototype - 2026-06-24 - Affine anchor and per-case scaling
 
 Purpose:

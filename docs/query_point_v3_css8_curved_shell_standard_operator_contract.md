@@ -724,3 +724,77 @@ explicit AD-B supervision
 
 but `case031` still needs a stronger q-dependent/nonlinear value anchor or a
 focused amplitude-path audit before held-out split results should be trusted.
+
+## Case031 Amplitude / Nonlinearity Audit
+
+The focused read-only audit script is:
+
+```text
+scripts/audit_v3_case031_nonlinearity.py
+```
+
+Command:
+
+```powershell
+py -3 scripts\audit_v3_case031_nonlinearity.py `
+  --compact-list D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\multi_case_min10\v3_css8_standard_operator_compact_list.txt `
+  --focus-case 31 `
+  --out-root D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\case031_nonlinearity_audit
+```
+
+Outputs:
+
+```text
+D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\case031_nonlinearity_audit\v3_case031_nonlinearity_summary.json
+D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\case031_nonlinearity_audit\v3_case031_nonlinearity_case_summary.csv
+D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\case031_nonlinearity_audit\v3_case031_nonlinearity_frame_manifest.csv
+```
+
+Result:
+
+```text
+case_count = 10
+focus_case = 31
+
+case031 q_norm_mean = 0.2080905983
+pool q_norm_mean_median = 0.0025180054
+case031 q_norm_mean / pool median = 82.6410454331
+
+case031 LE_rms_mean = 0.0128052995
+pool LE_rms_mean_median = 0.0001958019
+case031 LE_rms_mean / pool median = 65.3992597910
+
+case_internal_q_direction_cos_min = 0.9999999999999998
+case_internal_q_direction_cos_mean = 1.0
+
+B_mean(case,point) @ q LE_rel = 0.2938258832
+affine B_mean anchor LE_rel = 0.0976020099
+quadratic correction over affine LE_rel = 0.0099147393
+
+secant_Bmean_rel_mean = 0.3333519672
+secant_Bmean_rel_max = 0.7711158134
+```
+
+Interpretation:
+
+```text
+case031 is a high-amplitude scalar path, not a q-direction-inconsistent case.
+The v3 compact contract is not the blocker.
+The simple affine value anchor is still underpowered for case031.
+A scalar quadratic amplitude correction almost closes the value reconstruction
+gap on this path.
+```
+
+This is not a training result.  It is a gate that updates the formal-objective
+design requirement:
+
+```text
+v3 formal objective should keep:
+  per-case / relative LE scaling
+  affine value anchor
+  explicit AD-B supervision
+
+and should next test:
+  amplitude-aware or q-dependent value anchor
+  before held-out generalization claims
+```

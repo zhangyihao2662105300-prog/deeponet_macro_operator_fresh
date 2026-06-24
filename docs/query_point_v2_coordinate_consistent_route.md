@@ -136,6 +136,77 @@ no old TRUE176 LE/B labels used as v2 labels
 no large generated artifacts committed
 ```
 
+## v3 CSS8 Curved-Shell Contract Clarification
+
+The actual element route uses CSS8 continuum-shell / solid-shell subelements.
+This requires one more precision step beyond the v2 standard-operator wording:
+
+```text
+The standard domain is a piecewise 4x4 CSS8 parent domain,
+not one single flattened HEX8 block.
+```
+
+New contract document:
+
+```text
+docs/query_point_v3_css8_curved_shell_standard_operator_contract.md
+```
+
+Audit script:
+
+```text
+scripts/audit_css8_curved_shell_standard_operator_contract.py
+```
+
+Audit result:
+
+```text
+compact_count = 10
+strict_css8_geometry_pass_count = 10
+strict_css8_geometry_fail_count = 0
+```
+
+Key decisions:
+
+```text
+current ip_xi = local CSS8 parent r,s,t
+current ip_xi is not enough to identify the 4x4 macro-patch location
+final trunk must add ip_macro_xi or equivalent subcell_id + local r,s,t
+CSS8 geometry is exactly x(r,s,t)=x_mid(r,s)+0.5*t*director(r,s)
+final local strain frame should be Q_stack with local-3 parallel to g_t=dX/dt
+current v2 local frame is close but is not the final CSS8 stack-director frame
+```
+
+Current measured gap:
+
+```text
+current_Q_rel_to_stack_Q_min = 0.015430432383667826
+current_Q_rel_to_stack_Q_max = 0.024697166064443367
+```
+
+Interpretation:
+
+```text
+The CSS8 geometry contract is now clear and audited.
+The current v2 standard compacts are useful diagnostics, but they are not the
+final CSS8 standard-operator compact because they lack ip_macro_xi and use the
+older surface-normal local frame.
+```
+
+For CSS8, the standard-domain answer is now fixed:
+
+```text
+Use a 4x4 piecewise CSS8 parent patch:
+  macro coordinate: (xi_macro, eta_macro, zeta_macro)
+  local coordinate: (r, s, t) per CSS8 subelement
+```
+
+Do not collapse the curved shell macro element into one flattened HEX8.  A
+curved CSS8 patch has an integration-point-dependent stack direction.  The
+final local strain coordinate must therefore be `Q_stack(point)`, with local-3
+parallel to `dX/dt`, and the final trunk coordinate must include
+`ip_macro_xi` or an equivalent `subcell_id + local r,s,t` representation.
+
 ## Current v1.3 Boundary
 
 The current v1.3 route learns approximately:

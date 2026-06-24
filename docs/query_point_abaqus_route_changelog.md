@@ -3,6 +3,78 @@
 This file records the route-level history for the Abaqus real-integration-point
 DeepONet/query-point training line.  Keep it updated whenever this route changes.
 
+## v3 CSS8 contract clarification - 2026-06-24 - Curved-shell standard domain
+
+Purpose:
+
+- Clarify the standard-operator domain for the actual CSS8 continuum-shell /
+  solid-shell route.
+- Remove ambiguity around whether a curved macro element should be interpreted
+  as one flattened HEX8 block.
+- Add an audit for CSS8 midsurface/director geometry, stack-direction local
+  frame, and macro-patch trunk coordinates.
+
+Added:
+
+- `scripts/audit_css8_curved_shell_standard_operator_contract.py`
+- `docs/query_point_v3_css8_curved_shell_standard_operator_contract.md`
+- Route documentation update in
+  `docs/query_point_v2_coordinate_consistent_route.md`.
+
+Command:
+
+```powershell
+py -3 scripts\audit_css8_curved_shell_standard_operator_contract.py `
+  --compact-list D:\IS-FEM\outputs\query_point_v2_coordinate_pilot\multi_case_v2b_min10\v2b_compact_list.txt `
+  --out D:\IS-FEM\outputs\query_point_v2_standard_operator\css8_curved_shell_standard_operator_contract.json `
+  --strict
+```
+
+Result:
+
+```text
+compact_count = 10
+strict_css8_geometry_pass_count = 10
+strict_css8_geometry_fail_count = 0
+all_strict_css8_geometry_pass = true
+```
+
+Key decisions:
+
+```text
+macro_shape = piecewise_4x4_css8_parent_domain_not_single_hex8
+current_ip_xi_role = local_css8_parent_r_s_t
+required_trunk_coordinate = ip_macro_xi_or_equivalent_subcell_id_plus_local_r_s_t
+final_local_frame = stack_director_frame_with_local_3_parallel_to_g_t
+network_output_coordinate = LE_local_in_css8_stack_director_frame
+```
+
+Direct answer to the CSS8 mapping question:
+
+```text
+The macro element maps to a 4x4 piecewise CSS8 parent patch.
+It does not map to one globally flattened HEX8.
+For a curved solid-shell patch, each integration point carries its own
+Q_stack(point), with local-3 aligned to dX/dt.
+```
+
+Measured contract gap:
+
+```text
+ip_macro_xi_not_stored_in_current_v2_standard_compacts = true
+current_v2_local_frame_is_surface_normal_not_exact_stack_director = true
+current_Q_rel_to_stack_Q_min = 0.015430432383667826
+current_Q_rel_to_stack_Q_max = 0.024697166064443367
+```
+
+Interpretation:
+
+- The CSS8 geometry interpretation is now explicit and audited.
+- The current v2 compacts remain valid diagnostics.
+- They are not the final CSS8 standard-operator compact because they lack
+  `ip_macro_xi` and use the older surface-normal local frame.
+- No training was run and no model-performance claim is made.
+
 ## v2l - 2026-06-24 - Standard-operator preprocessing contract
 
 Purpose:

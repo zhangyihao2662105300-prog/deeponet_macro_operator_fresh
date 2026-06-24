@@ -16,6 +16,7 @@ MODEL_STYLE="${MODEL_STYLE:-fe-state-linear-residual}"
 STATE_BASELINE_RANK="${STATE_BASELINE_RANK:-}"
 RESIDUAL_JACOBIAN_WEIGHT="${RESIDUAL_JACOBIAN_WEIGHT:-}"
 EVAL_EVERY="${EVAL_EVERY:-}"
+NPROC="${NPROC:-3}"
 EXTRA_ARGS=("$@")
 
 if [[ ! -f "$COMPACT_LIST" ]]; then
@@ -29,9 +30,22 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 mkdir -p "$OUT_DIR"
 cd "$CODE"
 
-CMD=(
-  python3
-  scripts/train_v3_le_primary_full_direction_smoke.py
+if [[ "$NPROC" -gt 1 ]]; then
+  CMD=(
+    python3 -m torch.distributed.run
+    --nproc_per_node "$NPROC"
+    --standalone
+    scripts/train_v3_le_primary_full_direction_smoke.py
+    --ddp
+  )
+else
+  CMD=(
+    python3
+    scripts/train_v3_le_primary_full_direction_smoke.py
+  )
+fi
+
+CMD+=(
   --compact-list "$COMPACT_LIST"
   --out-root "$OUT_DIR"
   --preset "$PRESET"
@@ -81,6 +95,7 @@ printf "\n" >> "$OUT_DIR/command.txt"
   echo "STATE_BASELINE_RANK=$STATE_BASELINE_RANK"
   echo "RESIDUAL_JACOBIAN_WEIGHT=$RESIDUAL_JACOBIAN_WEIGHT"
   echo "EVAL_EVERY=$EVAL_EVERY"
+  echo "NPROC=$NPROC"
   echo "DEVICE=$DEVICE"
   echo "SEED=$SEED"
   echo "OMP_NUM_THREADS=$OMP_NUM_THREADS"

@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
 import random
 from pathlib import Path
@@ -35,6 +36,7 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from torch import nn
 from torch.func import jacrev
 
@@ -141,6 +143,87 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def init_distributed(args: argparse.Namespace) -> dict[str, Any]:
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    enabled = bool(args.ddp or world_size > 1)
+    if enabled:
+        if world_size < 2:
+            raise SystemExit("--ddp requires torchrun with WORLD_SIZE > 1")
+        if not dist.is_available():
+            raise SystemExit("torch.distributed is not available")
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+            backend = "nccl"
+        else:
+            backend = "gloo"
+        if not dist.is_initialized():
+            dist.init_process_group(backend=backend)
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+    return {
+        "enabled": enabled,
+        "rank": rank,
+        "local_rank": local_rank,
+        "world_size": world_size,
+        "is_main": rank == 0,
+    }
+
+
+def cleanup_distributed(ctx: dict[str, Any]) -> None:
+    if bool(ctx.get("enabled")) and dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def distributed_barrier(ctx: dict[str, Any]) -> None:
+    if not bool(ctx.get("enabled")):
+        return
+    if torch.cuda.is_available():
+        dist.barrier(device_ids=[int(ctx["local_rank"])])
+    else:
+        dist.barrier()
+
+
+def distributed_mean_gradients(model: nn.Module, ctx: dict[str, Any]) -> None:
+    if not bool(ctx.get("enabled")):
+        return
+    world_size = int(ctx["world_size"])
+    for param in model.parameters():
+        if param.grad is None:
+            continue
+        dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
+        param.grad.div_(float(world_size))
+
+
+def broadcast_model_state(model: nn.Module, ctx: dict[str, Any]) -> None:
+    if not bool(ctx.get("enabled")):
+        return
+    for tensor in model.state_dict().values():
+        dist.broadcast(tensor, src=0)
+
+
+def distributed_indices(total: int, count: int, *, device: torch.device, ctx: dict[str, Any]) -> torch.Tensor:
+    if int(count) < 1:
+        raise ValueError("count must be positive")
+    if int(total) < 1:
+        raise ValueError("total must be positive")
+    if not bool(ctx.get("enabled")):
+        return torch.randperm(total, device=device)[: min(int(count), int(total))]
+    rank = int(ctx["rank"])
+    world_size = int(ctx["world_size"])
+    local_count = min(int(count), int(total))
+    draw_count = min(int(total), local_count * world_size)
+    perm = torch.randperm(total, device=device)[:draw_count]
+    if int(perm.numel()) < world_size:
+        perm = torch.arange(total, device=device)
+    chunks = torch.chunk(perm, world_size)
+    chunk = chunks[rank] if rank < len(chunks) else perm[:0]
+    if int(chunk.numel()) == 0:
+        chunk = perm[rank % int(perm.numel())].reshape(1)
+    return chunk[:local_count]
 
 
 def scalar_text(value: Any, default: str = "unknown") -> str:
@@ -1313,18 +1396,61 @@ def apply_preset_defaults(args: argparse.Namespace) -> argparse.Namespace:
 
 
 def train(args: argparse.Namespace) -> dict[str, Any]:
+    ddp_ctx = init_distributed(args)
     out_root = Path(args.out_root).resolve()
-    out_root.mkdir(parents=True, exist_ok=True)
-    set_seed(int(args.seed))
-    data_np = load_pool(args)
-    device = torch.device(args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu"))
-    data = make_tensors(data_np, device=device)
-    case_ids = list(data_np["case_ids"])
-    model = build_model(args, data).to(device=device, dtype=torch.float32)
-    opt = torch.optim.AdamW(model.parameters(), lr=float(args.lr), weight_decay=float(args.weight_decay))
-    checkpoint_enabled = bool(args.save_checkpoints or str(args.preset) == "formal-long")
-    latest_checkpoint_path = out_root / "latest.pt"
-    best_checkpoint_path = out_root / "best.pt"
+    try:
+        if bool(ddp_ctx["is_main"]):
+            out_root.mkdir(parents=True, exist_ok=True)
+        distributed_barrier(ddp_ctx)
+        set_seed(int(args.seed) + int(ddp_ctx["rank"]))
+        data_np = load_pool(args)
+        if str(args.device) != "auto":
+            device = torch.device(args.device)
+        elif torch.cuda.is_available():
+            device = torch.device(f"cuda:{int(ddp_ctx['local_rank'])}" if bool(ddp_ctx["enabled"]) else "cuda")
+        else:
+            device = torch.device("cpu")
+        data = make_tensors(data_np, device=device)
+        case_ids = list(data_np["case_ids"])
+        model = build_model(args, data).to(device=device, dtype=torch.float32)
+        broadcast_model_state(model, ddp_ctx)
+        opt = torch.optim.AdamW(model.parameters(), lr=float(args.lr), weight_decay=float(args.weight_decay))
+        checkpoint_enabled = bool(args.save_checkpoints or str(args.preset) == "formal-long")
+        latest_checkpoint_path = out_root / "latest.pt"
+        best_checkpoint_path = out_root / "best.pt"
+        summary = _train_impl(
+            args,
+            out_root,
+            data_np,
+            data,
+            case_ids,
+            model,
+            opt,
+            checkpoint_enabled,
+            latest_checkpoint_path,
+            best_checkpoint_path,
+            ddp_ctx,
+            device,
+        )
+    finally:
+        cleanup_distributed(ddp_ctx)
+    return summary
+
+
+def _train_impl(
+    args: argparse.Namespace,
+    out_root: Path,
+    data_np: dict[str, Any],
+    data: dict[str, torch.Tensor],
+    case_ids: list[int],
+    model: nn.Module,
+    opt: torch.optim.Optimizer,
+    checkpoint_enabled: bool,
+    latest_checkpoint_path: Path,
+    best_checkpoint_path: Path,
+    ddp_ctx: dict[str, Any],
+    device: torch.device,
+) -> dict[str, Any]:
     sample_count = int(data["q"].shape[0])
     le_value_sample_count = int(data["le_value"].shape[0])
     point_count = int(data["le"].shape[1])
@@ -1353,21 +1479,27 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     case_to_index = {int(case_id): idx for idx, case_id in enumerate(case_ids)}
     history: list[dict[str, Any]] = []
     case_history: list[dict[str, Any]] = []
-    initial, initial_cases = evaluate(model, data, case_ids, point_chunk=int(args.eval_point_batch))
-    best = {"step": 0, "b_weight_eff": 0.0, "residual_jacobian_weight_eff": 0.0, **initial}
+    if bool(ddp_ctx["is_main"]):
+        initial, initial_cases = evaluate(model, data, case_ids, point_chunk=int(args.eval_point_batch))
+        best = {"step": 0, "b_weight_eff": 0.0, "residual_jacobian_weight_eff": 0.0, **initial}
+    else:
+        initial = {}
+        initial_cases = []
+        best = {"step": 0, "b_weight_eff": 0.0, "residual_jacobian_weight_eff": 0.0, "selection_score": math.inf}
     best_state: dict[str, torch.Tensor] | None = None
-    if checkpoint_enabled:
+    if checkpoint_enabled and bool(ddp_ctx["is_main"]):
         best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
-    history.append(best)
-    for row in initial_cases:
-        case_history.append({"step": 0, **row})
+    if bool(ddp_ctx["is_main"]):
+        history.append(best)
+        for row in initial_cases:
+            case_history.append({"step": 0, **row})
     eval_steps = set(range(0, int(args.steps) + 1, int(args.eval_every)))
     eval_steps.add(int(args.steps))
     for step in range(1, int(args.steps) + 1):
         model.train()
         b_weight_eff = b_weight_for_step(step, args)
         residual_jacobian_weight_eff = residual_jacobian_weight_for_step(step, args)
-        sample_idx = torch.randperm(sample_count, device=device)[:sample_batch]
+        sample_idx = distributed_indices(sample_count, sample_batch, device=device, ctx=ddp_ctx)
         le_loss_terms: list[torch.Tensor] = []
         sample_loss_terms: list[torch.Tensor] = []
         le_terms: list[torch.Tensor] = []
@@ -1384,7 +1516,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         baseline_b_component_terms: list[torch.Tensor] = []
         baseline_b_physical_terms: list[torch.Tensor] = []
         if use_le_loss:
-            le_value_idx = torch.randperm(le_value_sample_count, device=device)[:le_value_batch]
+            le_value_idx = distributed_indices(le_value_sample_count, le_value_batch, device=device, ctx=ddp_ctx)
             for le_sample_index in le_value_idx.tolist():
                 case_id = int(data["le_sample_case_ids"][le_sample_index].detach().cpu().item())
                 case_pos = int(case_to_index[case_id])
@@ -1501,46 +1633,52 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             raise SystemExit("The effective loss has no gradient; check --le-weight, --b-weight, and pretrain settings")
         opt.zero_grad(set_to_none=True)
         loss.backward()
+        distributed_mean_gradients(model, ddp_ctx)
         torch.nn.utils.clip_grad_norm_(model.parameters(), float(args.grad_clip))
         opt.step()
         if step in eval_steps:
-            metrics, case_rows = evaluate(model, data, case_ids, point_chunk=int(args.eval_point_batch))
-            row = {
-                "step": int(step),
-                "loss": scalar_float(loss.detach()),
-                "le_loss": scalar_float(torch.stack(le_terms).mean()) if le_terms else None,
-                "b_loss": scalar_float(torch.stack(b_terms).mean()) if b_terms else None,
-                "b_loss_component_scaled_mse": scalar_float(torch.stack(b_component_terms).mean()) if b_component_terms else None,
-                "b_loss_physical_objective": scalar_float(torch.stack(b_physical_terms).mean()) if b_physical_terms else None,
-                "b_loss_abs_normed_mse": scalar_float(torch.stack(b_abs_terms).mean()) if b_abs_terms else None,
-                "b_loss_rel_eps_mse": scalar_float(torch.stack(b_rel_terms).mean()) if b_rel_terms else None,
-                "b_loss_action_mse": scalar_float(torch.stack(b_action_terms).mean()) if b_action_terms else None,
-                "residual_b_loss": scalar_float(torch.stack(residual_b_terms).mean()) if residual_b_terms else None,
-                "residual_b_loss_component_scaled_mse": (
-                    scalar_float(torch.stack(residual_b_component_terms).mean()) if residual_b_component_terms else None
-                ),
-                "residual_b_loss_physical_objective": (
-                    scalar_float(torch.stack(residual_b_physical_terms).mean()) if residual_b_physical_terms else None
-                ),
-                "baseline_b_loss": scalar_float(torch.stack(baseline_b_terms).mean()) if baseline_b_terms else None,
-                "baseline_b_loss_component_scaled_mse": (
-                    scalar_float(torch.stack(baseline_b_component_terms).mean()) if baseline_b_component_terms else None
-                ),
-                "baseline_b_loss_physical_objective": (
-                    scalar_float(torch.stack(baseline_b_physical_terms).mean()) if baseline_b_physical_terms else None
-                ),
-                "b_weight_eff": float(b_weight_eff),
-                "residual_jacobian_weight_eff": float(residual_jacobian_weight_eff),
-                **metrics,
-            }
-            history.append(row)
-            for case_row in case_rows:
-                case_history.append({"step": int(step), **case_row})
-            if float(row["selection_score"]) < float(best["selection_score"]):
-                best = dict(row)
-                if checkpoint_enabled:
-                    best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
-            print(json.dumps(row, sort_keys=True), flush=True)
+            distributed_barrier(ddp_ctx)
+            if bool(ddp_ctx["is_main"]):
+                metrics, case_rows = evaluate(model, data, case_ids, point_chunk=int(args.eval_point_batch))
+                row = {
+                    "step": int(step),
+                    "loss": scalar_float(loss.detach()),
+                    "le_loss": scalar_float(torch.stack(le_terms).mean()) if le_terms else None,
+                    "b_loss": scalar_float(torch.stack(b_terms).mean()) if b_terms else None,
+                    "b_loss_component_scaled_mse": scalar_float(torch.stack(b_component_terms).mean()) if b_component_terms else None,
+                    "b_loss_physical_objective": scalar_float(torch.stack(b_physical_terms).mean()) if b_physical_terms else None,
+                    "b_loss_abs_normed_mse": scalar_float(torch.stack(b_abs_terms).mean()) if b_abs_terms else None,
+                    "b_loss_rel_eps_mse": scalar_float(torch.stack(b_rel_terms).mean()) if b_rel_terms else None,
+                    "b_loss_action_mse": scalar_float(torch.stack(b_action_terms).mean()) if b_action_terms else None,
+                    "residual_b_loss": scalar_float(torch.stack(residual_b_terms).mean()) if residual_b_terms else None,
+                    "residual_b_loss_component_scaled_mse": (
+                        scalar_float(torch.stack(residual_b_component_terms).mean()) if residual_b_component_terms else None
+                    ),
+                    "residual_b_loss_physical_objective": (
+                        scalar_float(torch.stack(residual_b_physical_terms).mean()) if residual_b_physical_terms else None
+                    ),
+                    "baseline_b_loss": scalar_float(torch.stack(baseline_b_terms).mean()) if baseline_b_terms else None,
+                    "baseline_b_loss_component_scaled_mse": (
+                        scalar_float(torch.stack(baseline_b_component_terms).mean()) if baseline_b_component_terms else None
+                    ),
+                    "baseline_b_loss_physical_objective": (
+                        scalar_float(torch.stack(baseline_b_physical_terms).mean()) if baseline_b_physical_terms else None
+                    ),
+                    "b_weight_eff": float(b_weight_eff),
+                    "residual_jacobian_weight_eff": float(residual_jacobian_weight_eff),
+                    **metrics,
+                }
+                history.append(row)
+                for case_row in case_rows:
+                    case_history.append({"step": int(step), **case_row})
+                if float(row["selection_score"]) < float(best["selection_score"]):
+                    best = dict(row)
+                    if checkpoint_enabled:
+                        best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+                print(json.dumps(row, sort_keys=True), flush=True)
+            distributed_barrier(ddp_ctx)
+    if not bool(ddp_ctx["is_main"]):
+        return {}
     if checkpoint_enabled:
         latest_payload = {
             "model_state_dict": model.state_dict(),
@@ -1573,6 +1711,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "out_root": str(out_root),
         "device": str(device),
         "seed": int(args.seed),
+        "ddp": bool(ddp_ctx["enabled"]),
+        "ddp_world_size": int(ddp_ctx["world_size"]),
         "preset": str(args.preset),
         "steps": int(args.steps),
         "case_ids": case_ids,
@@ -1717,6 +1857,7 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--seed", type=int, default=20260624)
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--ddp", action="store_true", help="Enable torchrun multi-process gradient averaging.")
     parser.add_argument("--hidden", type=int, default=None)
     parser.add_argument("--basis", type=int, default=None)
     parser.add_argument("--depth", type=int, default=4)

@@ -227,6 +227,17 @@ def build_one(
         ip_invj = as_float64(z, "ip_invJ")
         ip_detj = as_float64(z, "ip_detJ").reshape(-1)
         ip_xyz = as_float64(z, "ip_xyz")
+        le_plus_abq = as_float64(z, "LE128_plus") if "LE128_plus" in files else None
+        perturb_directions = (
+            np.asarray(z["perturb_directions"], dtype=np.int64).reshape(-1)
+            if "perturb_directions" in files
+            else None
+        )
+        delta_raw = (
+            float(np.asarray(z["delta"], dtype=np.float64).reshape(-1)[0])
+            if "delta" in files
+            else None
+        )
         shape4 = normalize_shape4_for_global_geometry(
             as_float64(z, "shape4") if "shape4" in files else None,
             frame_count=int(q48_raw.shape[0]),
@@ -246,6 +257,20 @@ def build_one(
         raise ValueError(f"{path}: LE must be [N,{point_count},6], got {le_abq.shape}")
     if b_raw.shape != (n_frames, point_count, 6, 48):
         raise ValueError(f"{path}: B_LE128_forward must be [N,{point_count},6,48], got {b_raw.shape}")
+    if le_plus_abq is not None:
+        if perturb_directions is None or delta_raw is None:
+            raise ValueError(f"{path}: LE128_plus requires perturb_directions and delta")
+        if le_plus_abq.ndim != 4 or le_plus_abq.shape[0] != n_frames or le_plus_abq.shape[2:] != (point_count, 6):
+            raise ValueError(f"{path}: LE128_plus must be [N,D,{point_count},6], got {le_plus_abq.shape}")
+        if perturb_directions.shape[0] != le_plus_abq.shape[1]:
+            raise ValueError(
+                f"{path}: perturb_directions length {perturb_directions.shape[0]} "
+                f"does not match LE128_plus directions {le_plus_abq.shape[1]}"
+            )
+        if np.min(perturb_directions) < 0 or np.max(perturb_directions) >= 48:
+            raise ValueError(f"{path}: perturb_directions must be raw q columns in [0,48)")
+        if not np.isfinite(float(delta_raw)) or float(delta_raw) == 0.0:
+            raise ValueError(f"{path}: delta must be finite and nonzero, got {delta_raw}")
 
     geom_map = GeometryMap(
         x_macro,
@@ -276,6 +301,24 @@ def build_one(
     le_local_stack = apply_t_eps_to_strain(t_eps_from_abq_stack, le_abq)
     b_local_raw = apply_t_eps_to_b(t_eps_from_abq_stack, b_raw)
     b_local_useful_stack_hat = float(l_ref) * right_multiply_t_q_transpose(b_local_raw, t_q)
+    q_plus_useful_hat = None
+    le_plus_local_stack = None
+    plus_fd_vs_b_raw_rel = None
+    plus_fd_vs_b_raw_max_abs = None
+    if le_plus_abq is not None:
+        assert perturb_directions is not None
+        assert delta_raw is not None
+        direction_count = int(le_plus_abq.shape[1])
+        q_plus_raw = np.repeat(q48_raw[:, None, :], direction_count, axis=1)
+        for dir_pos, raw_col in enumerate(perturb_directions.tolist()):
+            q_plus_raw[:, dir_pos, int(raw_col)] += float(delta_raw)
+        q_plus_useful_hat = apply_t_q(q_plus_raw.reshape(-1, 48), t_q_hat).reshape(n_frames, direction_count, 42)
+        le_plus_local_stack = np.einsum("pab,ndpb->ndpa", t_eps_from_abq_stack, le_plus_abq)
+        fd_raw = np.moveaxis((le_plus_abq - le_abq[:, None, :, :]) / float(delta_raw), 1, -1)
+        b_raw_dirs = b_raw[..., perturb_directions]
+        plus_fd_diff = fd_raw - b_raw_dirs
+        plus_fd_vs_b_raw_rel = rel_norm(plus_fd_diff, b_raw_dirs)
+        plus_fd_vs_b_raw_max_abs = float(np.max(np.abs(plus_fd_diff))) if plus_fd_diff.size else 0.0
 
     geometry_global_hat, geometry_global_names = geom_map.build_global_features(
         shape_params=shape4,
@@ -326,6 +369,7 @@ def build_one(
         "ad_target": "dLE_local_stack/dq_useful_hat",
         "raw_backprojection": "B_raw_hat = T_eps_to_abq_stack @ B_local_useful_stack_hat @ (T_q_raw_to_useful / L_ref)",
         "preprocess_B": "B_local_useful_stack_hat = L_ref * T_eps_from_abq_stack @ B_raw @ T_q_raw_to_useful.T",
+        "plus_value_supervision": "optional q_plus_useful_hat and LE_plus_local_stack from LE128_plus finite perturbation responses",
         "q_backprojection_map": "T_q_useful_hat_to_raw_projected = T_q_raw_to_useful.T * L_ref maps q_useful_hat to projected q48_raw",
         "q_forward_scaled_alias": "T_q_raw_to_useful_times_L_ref = T_q_raw_to_useful * L_ref is a named audit alias, not the reverse map",
         "geometry_feature_source": "GeometryMap(X_ref=X_macro, conn=CSS8, point_table=[cell_id,rst,xi_macro])",
@@ -410,6 +454,12 @@ def build_one(
         "trained_model": np.asarray(False),
         "uses_old_true176_labels_as_v3_labels": np.asarray(False),
     }
+    if q_plus_useful_hat is not None and le_plus_local_stack is not None:
+        arrays["q_plus_useful_hat"] = q_plus_useful_hat.astype(np.float64)
+        arrays["LE_plus_local_stack"] = le_plus_local_stack.astype(np.float64)
+        arrays["plus_perturb_directions"] = perturb_directions.astype(np.int64)
+        arrays["plus_delta_raw"] = np.asarray(float(delta_raw), dtype=np.float64)
+        arrays["plus_value_supervision"] = np.asarray(metadata["plus_value_supervision"], dtype=object)
     if shape4 is not None:
         arrays["shape4"] = shape4.astype(np.float32)
 
@@ -432,6 +482,12 @@ def build_one(
         "trunk_features_hat_shape": list(trunk.shape),
         "LE_local_stack_shape": list(le_local_stack.shape),
         "B_local_useful_stack_hat_shape": list(b_local_useful_stack_hat.shape),
+        "q_plus_useful_hat_shape": None if q_plus_useful_hat is None else list(q_plus_useful_hat.shape),
+        "LE_plus_local_stack_shape": None if le_plus_local_stack is None else list(le_plus_local_stack.shape),
+        "plus_delta_raw": None if delta_raw is None else float(delta_raw),
+        "plus_perturb_direction_count": 0 if perturb_directions is None else int(perturb_directions.shape[0]),
+        "plus_fd_vs_B_LE128_forward_rel": plus_fd_vs_b_raw_rel,
+        "plus_fd_vs_B_LE128_forward_max_abs": plus_fd_vs_b_raw_max_abs,
         "model_visible_fields": list(MODEL_VISIBLE_FIELDS),
         "audit_postprocess_only_fields": list(AUDIT_POSTPROCESS_FIELDS),
         "strict_requested": bool(strict),

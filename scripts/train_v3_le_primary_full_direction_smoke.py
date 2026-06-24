@@ -216,6 +216,8 @@ def load_one(path: Path) -> dict[str, Any]:
         t_eps = np.asarray(z["T_eps_to_abq_stack"], dtype=np.float64)
         t_q_hat = np.asarray(z["T_q_raw_to_useful_hat"], dtype=np.float64)
         b_raw = np.asarray(z["B_LE128_forward"], dtype=np.float64)
+        q_plus = np.asarray(z["q_plus_useful_hat"], dtype=np.float64) if "q_plus_useful_hat" in z.files else None
+        le_plus = np.asarray(z["LE_plus_local_stack"], dtype=np.float64) if "LE_plus_local_stack" in z.files else None
         case_id = int(np.asarray(z["case_id"]).reshape(-1)[0])
     if q.shape[1] != 42:
         raise ValueError(f"{path}: q_useful_hat must have 42 columns, got {q.shape}")
@@ -223,6 +225,13 @@ def load_one(path: Path) -> dict[str, Any]:
         raise ValueError(f"{path}: LE_local_stack shape mismatch, got {le.shape}")
     if b.shape != (q.shape[0], trunk.shape[0], 6, 42):
         raise ValueError(f"{path}: B_local_useful_stack_hat shape mismatch, got {b.shape}")
+    if (q_plus is None) != (le_plus is None):
+        raise ValueError(f"{path}: q_plus_useful_hat and LE_plus_local_stack must be present together")
+    if q_plus is not None:
+        if q_plus.ndim != 3 or q_plus.shape[0] != q.shape[0] or q_plus.shape[2] != 42:
+            raise ValueError(f"{path}: q_plus_useful_hat must be [N,D,42], got {q_plus.shape}")
+        if le_plus.shape != (q.shape[0], q_plus.shape[1], trunk.shape[0], 6):
+            raise ValueError(f"{path}: LE_plus_local_stack shape mismatch, got {le_plus.shape}")
     return {
         "path": str(path),
         "case_id": case_id,
@@ -234,6 +243,8 @@ def load_one(path: Path) -> dict[str, Any]:
         "t_eps": t_eps,
         "t_q_hat": t_q_hat,
         "b_raw": b_raw,
+        "q_plus": q_plus,
+        "le_plus": le_plus,
     }
 
 
@@ -256,6 +267,9 @@ def load_pool(args: argparse.Namespace) -> dict[str, Any]:
     sample_q: list[np.ndarray] = []
     sample_geom: list[np.ndarray] = []
     sample_le: list[np.ndarray] = []
+    sample_le_q: list[np.ndarray] = []
+    sample_le_target: list[np.ndarray] = []
+    sample_le_case_ids: list[int] = []
     sample_b: list[np.ndarray] = []
     sample_t_eps: list[np.ndarray] = []
     sample_t_q_hat: list[np.ndarray] = []
@@ -271,6 +285,16 @@ def load_pool(args: argparse.Namespace) -> dict[str, Any]:
             sample_q.append(row["q"][frame])
             sample_geom.append(row["geom"])
             sample_le.append(row["le"][frame])
+            sample_le_q.append(row["q"][frame])
+            sample_le_target.append(row["le"][frame])
+            sample_le_case_ids.append(int(row["case_id"]))
+            if bool(args.use_plus_samples):
+                if row["q_plus"] is None or row["le_plus"] is None:
+                    raise SystemExit(f"{row['path']}: --use-plus-samples requires q_plus_useful_hat and LE_plus_local_stack")
+                for direction in range(int(row["q_plus"].shape[1])):
+                    sample_le_q.append(row["q_plus"][frame, direction])
+                    sample_le_target.append(row["le_plus"][frame, direction])
+                    sample_le_case_ids.append(int(row["case_id"]))
             sample_b.append(row["b"][frame])
             sample_t_eps.append(row["t_eps"])
             sample_t_q_hat.append(row["t_q_hat"])
@@ -282,15 +306,22 @@ def load_pool(args: argparse.Namespace) -> dict[str, Any]:
         raise SystemExit("No frames matched the selected --filter-frame values")
 
     q = np.stack(sample_q, axis=0)
+    le_q = np.stack(sample_le_q, axis=0)
     geom = np.stack(sample_geom, axis=0)
     trunk = np.stack([row["trunk"] for row in rows], axis=0)
     le = np.stack(sample_le, axis=0)
+    le_value = np.stack(sample_le_target, axis=0)
     b = np.stack(sample_b, axis=0)
     t_eps = np.stack(sample_t_eps, axis=0)
     t_q_hat = np.stack(sample_t_q_hat, axis=0)
     b_raw = np.stack(sample_b_raw, axis=0)
-    q_normed, q_mean, q_std = standardize_np(q, axis=0)
+    q_for_stats = le_q if bool(args.use_plus_samples) else q
+    _q_normed_all, q_mean, q_std = standardize_np(q_for_stats, axis=0)
+    q_normed = (q - q_mean.reshape(1, -1)) / q_std.reshape(1, -1)
+    le_q_normed = (le_q - q_mean.reshape(1, -1)) / q_std.reshape(1, -1)
     geom_norm, geom_mean, geom_std = standardize_np(geom, axis=0)
+    geom_by_case = np.stack([row["geom"] for row in rows], axis=0)
+    geom_norm_by_case = (geom_by_case - geom_mean.reshape(1, -1)) / geom_std.reshape(1, -1)
     trunk_norm, trunk_mean, trunk_std = standardize_np(trunk, axis=(0, 1))
     return {
         "case_ids": [int(row["case_id"]) for row in rows],
@@ -302,9 +333,14 @@ def load_pool(args: argparse.Namespace) -> dict[str, Any]:
         "sample_compact_paths": sample_compact_paths,
         "q": q.astype(np.float32),
         "q_norm": q_normed.astype(np.float32),
+        "le_q": le_q.astype(np.float32),
+        "le_q_norm": le_q_normed.astype(np.float32),
+        "le_value": le_value.astype(np.float32),
+        "le_sample_case_ids": np.asarray(sample_le_case_ids, dtype=np.int64),
         "q_mean": q_mean.astype(np.float64),
         "q_std": q_std.astype(np.float64),
         "geom_norm": geom_norm.astype(np.float32),
+        "geom_norm_by_case": geom_norm_by_case.astype(np.float32),
         "geom_mean": geom_mean.astype(np.float64),
         "geom_std": geom_std.astype(np.float64),
         "trunk_norm_by_case": trunk_norm.astype(np.float32),
@@ -316,6 +352,10 @@ def load_pool(args: argparse.Namespace) -> dict[str, Any]:
         "t_eps": t_eps.astype(np.float32),
         "t_q_hat": t_q_hat.astype(np.float32),
         "b_raw": b_raw.astype(np.float32),
+        "use_plus_samples": bool(args.use_plus_samples),
+        "base_sample_count": int(q.shape[0]),
+        "le_value_sample_count": int(le_value.shape[0]),
+        "plus_value_sample_count": int(max(0, le_value.shape[0] - q.shape[0])),
     }
 
 
@@ -324,9 +364,13 @@ def make_tensors(data_np: dict[str, Any], *, device: torch.device) -> dict[str, 
     return {
         "q": torch.as_tensor(data_np["q"], dtype=dtype, device=device),
         "q_norm": torch.as_tensor(data_np["q_norm"], dtype=dtype, device=device),
+        "le_q": torch.as_tensor(data_np["le_q"], dtype=dtype, device=device),
+        "le_q_norm": torch.as_tensor(data_np["le_q_norm"], dtype=dtype, device=device),
+        "le_value": torch.as_tensor(data_np["le_value"], dtype=dtype, device=device),
         "q_mean": torch.as_tensor(data_np["q_mean"], dtype=dtype, device=device),
         "q_std": torch.as_tensor(data_np["q_std"], dtype=dtype, device=device),
         "geom_norm": torch.as_tensor(data_np["geom_norm"], dtype=dtype, device=device),
+        "geom_norm_by_case": torch.as_tensor(data_np["geom_norm_by_case"], dtype=dtype, device=device),
         "trunk_norm_by_case": torch.as_tensor(data_np["trunk_norm_by_case"], dtype=dtype, device=device),
         "le": torch.as_tensor(data_np["le"], dtype=dtype, device=device),
         "b": torch.as_tensor(data_np["b"], dtype=dtype, device=device),
@@ -335,6 +379,7 @@ def make_tensors(data_np: dict[str, Any], *, device: torch.device) -> dict[str, 
         "b_raw": torch.as_tensor(data_np["b_raw"], dtype=dtype, device=device),
         "sample_case_ids": torch.as_tensor(data_np["sample_case_ids"], dtype=torch.long, device=device),
         "sample_frame_ids": torch.as_tensor(data_np["sample_frame_ids"], dtype=torch.long, device=device),
+        "le_sample_case_ids": torch.as_tensor(data_np["le_sample_case_ids"], dtype=torch.long, device=device),
     }
 
 
@@ -600,11 +645,13 @@ def make_component_scales(
     b_floor_frac: float = 1.0e-4,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     device = data["q"].device
+    le_value = data["le_value"]
     le_scales: list[torch.Tensor] = []
     b_scales: list[torch.Tensor] = []
     for case_id in case_ids:
         mask = data["sample_case_ids"] == int(case_id)
-        le_scale = torch.sqrt(torch.mean(data["le"][mask] * data["le"][mask], dim=(0, 1)))
+        le_mask = data["le_sample_case_ids"] == int(case_id)
+        le_scale = torch.sqrt(torch.mean(le_value[le_mask] * le_value[le_mask], dim=(0, 1)))
         b_scale = torch.sqrt(torch.mean(data["b"][mask] * data["b"][mask], dim=(0, 1)))
         b_global_rms = torch.sqrt(torch.mean(data["b"][mask] * data["b"][mask]))
         b_floor = torch.clamp(float(b_floor_frac) * b_global_rms, min=float(eps))
@@ -653,8 +700,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     ).to(device=device, dtype=torch.float32)
     opt = torch.optim.AdamW(model.parameters(), lr=float(args.lr), weight_decay=float(args.weight_decay))
     sample_count = int(data["q"].shape[0])
+    le_value_sample_count = int(data["le_value"].shape[0])
     point_count = int(data["le"].shape[1])
     sample_batch = min(int(args.sample_batch), sample_count)
+    le_value_batch = min(int(args.le_value_batch), le_value_sample_count)
     le_point_batch = min(int(args.le_point_batch), point_count)
     ad_point_batch = min(int(args.ad_point_batch), point_count)
     use_le_loss = float(args.le_weight) != 0.0
@@ -684,6 +733,20 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         losses: list[torch.Tensor] = []
         le_terms: list[torch.Tensor] = []
         b_terms: list[torch.Tensor] = []
+        if use_le_loss:
+            le_value_idx = torch.randperm(le_value_sample_count, device=device)[:le_value_batch]
+            for le_sample_index in le_value_idx.tolist():
+                case_id = int(data["le_sample_case_ids"][le_sample_index].detach().cpu().item())
+                case_pos = int(case_to_index[case_id])
+                q_norm = data["le_q_norm"][le_sample_index]
+                geom = data["geom_norm_by_case"][case_pos].reshape(1, -1)
+                trunk = data["trunk_norm_by_case"][case_pos]
+                le_idx = torch.randperm(point_count, device=device)[:le_point_batch]
+                pred = forward_sample(model, q_norm, geom, trunk, point_idx=le_idx)[0]
+                le_target = data["le_value"][le_sample_index].index_select(0, le_idx)
+                le_loss = torch.mean(((pred - le_target) / le_scale_case[case_pos]) ** 2)
+                losses.append(float(args.le_weight) * le_loss)
+                le_terms.append(le_loss.detach())
         for sample_index in sample_idx.tolist():
             case_id = int(data["sample_case_ids"][sample_index].detach().cpu().item())
             case_pos = int(case_to_index[case_id])
@@ -691,13 +754,6 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             geom = data["geom_norm"][sample_index].reshape(1, -1)
             trunk = data["trunk_norm_by_case"][case_pos]
             sample_loss = torch.zeros((), device=device)
-            if use_le_loss:
-                le_idx = torch.randperm(point_count, device=device)[:le_point_batch]
-                pred = forward_sample(model, q_norm, geom, trunk, point_idx=le_idx)[0]
-                le_target = data["le"][sample_index].index_select(0, le_idx)
-                le_loss = torch.mean(((pred - le_target) / le_scale_case[case_pos]) ** 2)
-                sample_loss = sample_loss + float(args.le_weight) * le_loss
-                le_terms.append(le_loss.detach())
             if use_ad_loss and b_weight_eff != 0.0:
                 ad_idx = torch.randperm(point_count, device=device)[:ad_point_batch]
                 b_target = data["b"][sample_index].index_select(0, ad_idx)
@@ -742,6 +798,9 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "case_ids": case_ids,
         "case_count": len(case_ids),
         "sample_count": sample_count,
+        "base_sample_count": int(data_np["base_sample_count"]),
+        "le_value_sample_count": int(data_np["le_value_sample_count"]),
+        "plus_value_sample_count": int(data_np["plus_value_sample_count"]),
         "point_count": point_count,
         "q_useful_hat_dim": int(data["q"].shape[1]),
         "geometry_global_hat_dim": int(data["geom_norm"].shape[1]),
@@ -757,10 +816,12 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "uses_case_id_anchor": False,
         "uses_direct_b_head": False,
         "uses_radial_loss": False,
+        "uses_plus_value_samples": bool(args.use_plus_samples),
         "uses_old_true176_labels_as_v3_labels": False,
         "loss_weights": {
             "le_weight": float(args.le_weight),
             "b_weight": float(args.b_weight),
+            "le_value_batch": int(le_value_batch),
         },
         "curriculum": {
             "le_pretrain_steps": int(args.le_pretrain_steps),
@@ -776,6 +837,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         },
         "active_losses": {
             "le_loss": use_le_loss,
+            "plus_value_le_loss": bool(args.use_plus_samples) and use_le_loss,
             "ad_b_loss": use_ad_loss,
             "direct_b_head_loss": False,
             "radial_loss": False,
@@ -833,6 +895,13 @@ def main() -> None:
     parser.add_argument("--le-pretrain-steps", type=int, default=None)
     parser.add_argument("--b-ramp-steps", type=int, default=None)
     parser.add_argument("--sample-batch", type=int, default=None)
+    parser.add_argument(
+        "--le-value-batch",
+        type=int,
+        default=None,
+        help="Number of base/plus LE value samples per step; defaults to --sample-batch.",
+    )
+    parser.add_argument("--use-plus-samples", action="store_true", help="Train LE loss on optional q_plus_useful_hat/LE_plus_local_stack samples.")
     parser.add_argument("--le-point-batch", type=int, default=None)
     parser.add_argument("--ad-point-batch", type=int, default=None)
     parser.add_argument("--eval-point-batch", type=int, default=None)
@@ -851,6 +920,10 @@ def main() -> None:
         raise SystemExit("--le-pretrain-steps must be non-negative")
     if int(args.b_ramp_steps) < 0:
         raise SystemExit("--b-ramp-steps must be non-negative")
+    if args.le_value_batch is None:
+        args.le_value_batch = args.sample_batch
+    if int(args.le_value_batch) < 1:
+        raise SystemExit("--le-value-batch must be positive")
     if float(args.scale_eps) <= 0.0:
         raise SystemExit("--scale-eps must be positive")
     if float(args.b_scale_floor_frac) < 0.0:

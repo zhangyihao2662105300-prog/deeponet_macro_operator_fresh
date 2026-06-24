@@ -9,9 +9,11 @@ This is the clean LE-primary gate for the v3 standard-operator route:
     AD-B:   dLE_local_stack / dq_useful_hat
 
 The default model has no direct B head, no radial loss, and no V + B @ q_perp
-decomposition.  It uses an FE-like linear-in-q baseline inside the LE operator
-plus a DeepONet residual.  The legacy pure DeepONet form is still available as
-an explicit ablation.
+decomposition.  It uses a state-conditioned FE-like linear-in-q baseline inside
+the LE operator plus a DeepONet residual.  The state condition is detached by
+default, so AD-B sees the local tangent itself rather than an extra dB_state/dq
+term.  The legacy point-only FE baseline and pure DeepONet forms are still
+available as explicit ablations.
 
 The trainer is a smoke/gate script.  It writes JSON/CSV metrics but no
 checkpoint and makes no held-out generalization claim.
@@ -576,6 +578,206 @@ class FELinearResidualLEOperator(nn.Module):
         return linear + self.residual_scale * residual + self.bias.view(1, 1, self.strain_dim)
 
 
+class FEStateLinearResidualLEOperator(nn.Module):
+    """LE operator with a q-state-conditioned FE-like tangent baseline.
+
+    The point-only FE baseline can only represent one average tangent per
+    integration point.  This variant keeps that prior and adds a low-rank
+    correction that depends on the current normalized q state:
+
+        B_state(point, q_state) = B_static(point) + U(point) V(q_state, geometry)
+        LE_local = B_state(point, q_state) @ q_useful_hat + residual.
+
+    By default q_state is detached before it enters V.  The resulting AD-B is
+    the selected local tangent plus the residual derivative, without an extra
+    second-order-looking dB_state/dq contribution from the baseline selector.
+    """
+
+    def __init__(
+        self,
+        *,
+        q_dim: int,
+        geom_dim: int,
+        trunk_dim: int,
+        point_count: int,
+        hidden: int = 256,
+        basis: int = 96,
+        depth: int = 4,
+        q_mean: torch.Tensor,
+        q_std: torch.Tensor,
+        static_b_hat_init: torch.Tensor | None = None,
+        residual_scale: float = 1.0,
+        baseline_scale: float = 1.0,
+        train_static_baseline: bool = True,
+        train_point_baseline: bool = True,
+        zero_init_residual: bool = True,
+        state_rank: int = 16,
+        state_scale: float = 1.0,
+        detach_state_baseline: bool = True,
+    ) -> None:
+        super().__init__()
+        self.q_dim = int(q_dim)
+        self.geom_dim = int(geom_dim)
+        self.trunk_dim = int(trunk_dim)
+        self.point_count = int(point_count)
+        self.hidden = int(hidden)
+        self.basis = int(basis)
+        self.strain_dim = 6
+        self.residual_scale = float(residual_scale)
+        self.baseline_scale = float(baseline_scale)
+        self.train_point_baseline = bool(train_point_baseline)
+        self.zero_init_residual = bool(zero_init_residual)
+        self.state_rank = int(state_rank)
+        self.state_scale = float(state_scale)
+        self.detach_state_baseline = bool(detach_state_baseline)
+        if self.state_rank < 1:
+            raise ValueError("state_rank must be positive")
+        self.register_buffer("q_mean", torch.as_tensor(q_mean, dtype=torch.float32).reshape(self.q_dim))
+        self.register_buffer("q_std", torch.as_tensor(q_std, dtype=torch.float32).reshape(self.q_dim))
+        out_dim = self.strain_dim * self.basis
+        self.branch = MLP(
+            self.q_dim + self.geom_dim,
+            out_dim,
+            int(hidden),
+            int(depth),
+            zero_last=self.zero_init_residual,
+        )
+        self.trunk = MLP(self.trunk_dim, out_dim, int(hidden), int(depth))
+        self.point_b_net = MLP(
+            self.trunk_dim,
+            self.strain_dim * self.q_dim,
+            int(hidden),
+            int(depth),
+            zero_last=True,
+        )
+        self.point_state_net = MLP(
+            self.trunk_dim,
+            self.strain_dim * self.q_dim * self.state_rank,
+            int(hidden),
+            int(depth),
+            zero_last=False,
+        )
+        self.state_coeff_net = MLP(
+            self.q_dim + self.geom_dim,
+            self.state_rank,
+            int(hidden),
+            int(depth),
+            zero_last=True,
+        )
+        for param in self.point_b_net.parameters():
+            param.requires_grad_(self.train_point_baseline)
+        for param in self.point_state_net.parameters():
+            param.requires_grad_(self.train_point_baseline)
+        for param in self.state_coeff_net.parameters():
+            param.requires_grad_(self.train_point_baseline)
+        self.bias = nn.Parameter(torch.zeros(self.strain_dim))
+        if static_b_hat_init is None:
+            static = torch.zeros(self.point_count, self.strain_dim, self.q_dim, dtype=torch.float32)
+        else:
+            static = torch.as_tensor(static_b_hat_init, dtype=torch.float32).reshape(
+                self.point_count,
+                self.strain_dim,
+                self.q_dim,
+            )
+        self.static_b_hat = nn.Parameter(static, requires_grad=bool(train_static_baseline))
+
+    def _state_input(self, q_norm: torch.Tensor, geom_norm: torch.Tensor) -> torch.Tensor:
+        q_state = q_norm.detach() if self.detach_state_baseline else q_norm
+        geom_state = geom_norm.detach() if self.detach_state_baseline else geom_norm
+        return torch.cat([q_state, geom_state], dim=-1)
+
+    def _q_hat(self, q_norm: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        q_delta_hat = q_norm * self.q_std.reshape(1, -1)
+        q_hat = q_delta_hat + self.q_mean.reshape(1, -1)
+        return q_delta_hat, q_hat
+
+    def linear_b_hat(
+        self,
+        trunk_norm: torch.Tensor,
+        *,
+        q_norm: torch.Tensor | None = None,
+        geom_norm: torch.Tensor | None = None,
+        point_idx: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        point_count = int(trunk_norm.shape[0])
+        delta = self.point_b_net(trunk_norm).reshape(point_count, self.strain_dim, self.q_dim)
+        if point_idx is None:
+            if point_count != self.point_count:
+                raise ValueError("point_idx is required when evaluating a subset of trunk points")
+            static = self.static_b_hat
+        else:
+            static = self.static_b_hat.index_select(0, point_idx)
+        point_b = static + self.baseline_scale * delta
+        if q_norm is None:
+            return point_b
+        if geom_norm is None:
+            raise ValueError("geom_norm is required when q_norm is provided")
+        if q_norm.ndim == 1:
+            q_norm = q_norm.unsqueeze(0)
+        batch = int(q_norm.shape[0])
+        if geom_norm.ndim == 1:
+            geom_norm = geom_norm.unsqueeze(0)
+        if int(geom_norm.shape[0]) == 1 and batch != 1:
+            geom_norm = geom_norm.expand(batch, -1)
+        geom_flat = geom_norm.reshape(batch, -1)
+        state_in = self._state_input(q_norm, geom_flat)
+        coeff = self.state_coeff_net(state_in).reshape(batch, self.state_rank)
+        basis = self.point_state_net(trunk_norm).reshape(point_count, self.strain_dim, self.q_dim, self.state_rank)
+        state_delta = torch.einsum("pakr,nr->npak", basis, coeff)
+        return point_b.unsqueeze(0) + self.state_scale * state_delta
+
+    def linear_b_norm(
+        self,
+        trunk_norm: torch.Tensor,
+        *,
+        q_norm: torch.Tensor | None = None,
+        geom_norm: torch.Tensor | None = None,
+        point_idx: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        b_hat = self.linear_b_hat(
+            trunk_norm,
+            q_norm=q_norm,
+            geom_norm=geom_norm,
+            point_idx=point_idx,
+        )
+        if b_hat.ndim == 3:
+            return b_hat * self.q_std.reshape(1, 1, -1)
+        return b_hat * self.q_std.reshape(1, 1, 1, -1)
+
+    def forward(
+        self,
+        q_norm: torch.Tensor,
+        geom_norm: torch.Tensor,
+        trunk_norm: torch.Tensor,
+        *,
+        point_idx: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if q_norm.ndim == 1:
+            q_norm = q_norm.unsqueeze(0)
+        batch = int(q_norm.shape[0])
+        if geom_norm.ndim == 1:
+            geom_norm = geom_norm.unsqueeze(0)
+        if int(geom_norm.shape[0]) == 1 and batch != 1:
+            geom_norm = geom_norm.expand(batch, -1)
+        geom_flat = geom_norm.reshape(batch, -1)
+        q_delta_hat, q_hat = self._q_hat(q_norm)
+        branch_in = torch.cat([q_delta_hat, geom_flat], dim=-1)
+        b_base = self.linear_b_hat(
+            trunk_norm,
+            q_norm=q_norm,
+            geom_norm=geom_flat,
+            point_idx=point_idx,
+        )
+        linear = torch.einsum("npak,nk->npa", b_base, q_hat)
+        b = self.branch(branch_in).reshape(batch, self.strain_dim, self.basis)
+        t = self.trunk(trunk_norm).reshape(int(trunk_norm.shape[0]), self.strain_dim, self.basis)
+        residual = torch.einsum("nak,pak->npa", b, t) / (self.basis ** 0.5)
+        return linear + self.residual_scale * residual + self.bias.view(1, 1, self.strain_dim)
+
+
+FE_BASELINE_OPERATOR_TYPES = (FELinearResidualLEOperator, FEStateLinearResidualLEOperator)
+
+
 def forward_sample(
     model: nn.Module,
     q_norm: torch.Tensor,
@@ -913,6 +1115,28 @@ def static_b_hat_init(data: dict[str, torch.Tensor]) -> torch.Tensor:
     return torch.mean(data["b"], dim=0)
 
 
+def linear_b_hat_for_loss(
+    model: nn.Module,
+    q_norm: torch.Tensor,
+    geom_norm: torch.Tensor,
+    trunk_subset: torch.Tensor,
+    point_idx: torch.Tensor,
+) -> torch.Tensor:
+    if isinstance(model, FEStateLinearResidualLEOperator):
+        b_hat = model.linear_b_hat(
+            trunk_subset,
+            q_norm=q_norm,
+            geom_norm=geom_norm,
+            point_idx=point_idx,
+        )
+        if b_hat.ndim != 4 or int(b_hat.shape[0]) != 1:
+            raise ValueError(f"state linear baseline must return [1,P,6,Q], got {tuple(b_hat.shape)}")
+        return b_hat[0]
+    if isinstance(model, FELinearResidualLEOperator):
+        return model.linear_b_hat(trunk_subset, point_idx=point_idx)
+    raise TypeError("linear_b_hat_for_loss requires an FE baseline model")
+
+
 def build_model(args: argparse.Namespace, data: dict[str, torch.Tensor]) -> nn.Module:
     common = {
         "q_dim": int(data["q"].shape[1]),
@@ -936,6 +1160,22 @@ def build_model(args: argparse.Namespace, data: dict[str, torch.Tensor]) -> nn.M
             train_static_baseline=not bool(args.freeze_static_baseline),
             train_point_baseline=not bool(args.freeze_fe_point_baseline),
             zero_init_residual=not bool(args.no_zero_init_residual),
+        )
+    if str(args.model_style) == "fe-state-linear-residual":
+        return FEStateLinearResidualLEOperator(
+            **common,
+            point_count=int(data["le"].shape[1]),
+            q_mean=data["q_mean"],
+            q_std=data["q_std"],
+            static_b_hat_init=static_b_hat_init(data),
+            residual_scale=float(args.residual_scale),
+            baseline_scale=float(args.fe_baseline_scale),
+            train_static_baseline=not bool(args.freeze_static_baseline),
+            train_point_baseline=not bool(args.freeze_fe_point_baseline),
+            zero_init_residual=not bool(args.no_zero_init_residual),
+            state_rank=int(args.state_baseline_rank),
+            state_scale=float(args.state_baseline_scale),
+            detach_state_baseline=not bool(args.no_detach_state_baseline),
         )
     raise ValueError(f"unknown model style: {args.model_style}")
 
@@ -980,7 +1220,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     ad_point_batch = min(int(args.ad_point_batch), point_count)
     use_le_loss = float(args.le_weight) != 0.0
     use_ad_loss = float(args.b_weight) != 0.0
-    use_baseline_loss = isinstance(model, FELinearResidualLEOperator) and float(args.baseline_jacobian_weight) != 0.0
+    use_baseline_loss = isinstance(model, FE_BASELINE_OPERATOR_TYPES) and float(args.baseline_jacobian_weight) != 0.0
     if not (use_le_loss or use_ad_loss or use_baseline_loss):
         raise SystemExit("At least one of --le-weight, --b-weight, or --baseline-jacobian-weight must be non-zero")
     le_scale_case, b_scale_case, b_global_scale_case = make_component_scales(
@@ -1062,7 +1302,13 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                     b_rel_terms.append(b_parts["b_loss_rel_eps_mse"].detach())
                     b_action_terms.append(b_parts["b_loss_action_mse"].detach())
                 if use_baseline_loss:
-                    baseline_b_hat = model.linear_b_hat(trunk.index_select(0, ad_idx), point_idx=ad_idx)
+                    baseline_b_hat = linear_b_hat_for_loss(
+                        model,
+                        q_norm,
+                        geom,
+                        trunk.index_select(0, ad_idx),
+                        ad_idx,
+                    )
                     baseline_loss, baseline_parts = b_loss_objective(
                         baseline_b_hat,
                         b_target,
@@ -1150,21 +1396,30 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "ad_target": "dLE_local_stack/dq_useful_hat",
         "model_style": str(args.model_style),
         "operator_form": (
-            "LE = B_base_hat(point_features) @ q_useful_hat + DeepONet residual(q_delta_hat, geometry, point)"
-            if isinstance(model, FELinearResidualLEOperator)
-            else "DeepONet branch(q_norm,geometry_norm) dot trunk(point_norm)"
+            "LE = B_state_hat(point_features, q_state, geometry) @ q_useful_hat + DeepONet residual(q_delta_hat, geometry, point)"
+            if isinstance(model, FEStateLinearResidualLEOperator)
+            else (
+                "LE = B_base_hat(point_features) @ q_useful_hat + DeepONet residual(q_delta_hat, geometry, point)"
+                if isinstance(model, FELinearResidualLEOperator)
+                else "DeepONet branch(q_norm,geometry_norm) dot trunk(point_norm)"
+            )
         ),
         "linear_baseline_relation": (
-            "B_base_hat = dLE_local_stack/dq_useful_hat; forward reconstructs q_useful_hat = q_norm * q_std + q_mean"
-            if isinstance(model, FELinearResidualLEOperator)
-            else None
+            "B_state_hat = state-conditioned dLE_local_stack/dq_useful_hat baseline; q_state is detached unless --no-detach-state-baseline is set"
+            if isinstance(model, FEStateLinearResidualLEOperator)
+            else (
+                "B_base_hat = dLE_local_stack/dq_useful_hat; forward reconstructs q_useful_hat = q_norm * q_std + q_mean"
+                if isinstance(model, FELinearResidualLEOperator)
+                else None
+            )
         ),
         "formal_training": False,
         "checkpoint_written": False,
         "held_out_split": False,
         "uses_case_id_anchor": False,
         "uses_direct_b_head": False,
-        "uses_fe_linear_b_baseline": isinstance(model, FELinearResidualLEOperator),
+        "uses_fe_linear_b_baseline": isinstance(model, FE_BASELINE_OPERATOR_TYPES),
+        "uses_state_conditioned_b_baseline": isinstance(model, FEStateLinearResidualLEOperator),
         "uses_radial_loss": False,
         "uses_plus_value_samples": bool(args.use_plus_samples),
         "uses_old_true176_labels_as_v3_labels": False,
@@ -1185,6 +1440,9 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "model_options": {
             "residual_scale": float(args.residual_scale),
             "fe_baseline_scale": float(args.fe_baseline_scale),
+            "state_baseline_rank": int(args.state_baseline_rank),
+            "state_baseline_scale": float(args.state_baseline_scale),
+            "detach_state_baseline": not bool(args.no_detach_state_baseline),
             "freeze_static_baseline": bool(args.freeze_static_baseline),
             "freeze_fe_point_baseline": bool(args.freeze_fe_point_baseline),
             "zero_init_residual": not bool(args.no_zero_init_residual),
@@ -1258,9 +1516,20 @@ def main() -> None:
     parser.add_argument("--hidden", type=int, default=None)
     parser.add_argument("--basis", type=int, default=None)
     parser.add_argument("--depth", type=int, default=4)
-    parser.add_argument("--model-style", default="fe-linear-residual", choices=["fe-linear-residual", "deeponet"])
+    parser.add_argument(
+        "--model-style",
+        default="fe-state-linear-residual",
+        choices=["fe-state-linear-residual", "fe-linear-residual", "deeponet"],
+    )
     parser.add_argument("--residual-scale", type=float, default=1.0)
     parser.add_argument("--fe-baseline-scale", type=float, default=1.0)
+    parser.add_argument("--state-baseline-rank", type=int, default=16)
+    parser.add_argument("--state-baseline-scale", type=float, default=1.0)
+    parser.add_argument(
+        "--no-detach-state-baseline",
+        action="store_true",
+        help="Allow the state-conditioned baseline selector to contribute dB_state/dq terms to AD-B.",
+    )
     parser.add_argument("--freeze-static-baseline", action="store_true")
     parser.add_argument("--freeze-fe-point-baseline", action="store_true")
     parser.add_argument("--no-zero-init-residual", action="store_true")
@@ -1313,6 +1582,10 @@ def main() -> None:
         raise SystemExit("--residual-scale must be non-negative")
     if float(args.fe_baseline_scale) < 0.0:
         raise SystemExit("--fe-baseline-scale must be non-negative")
+    if int(args.state_baseline_rank) < 1:
+        raise SystemExit("--state-baseline-rank must be positive")
+    if float(args.state_baseline_scale) < 0.0:
+        raise SystemExit("--state-baseline-scale must be non-negative")
     if float(args.baseline_jacobian_weight) < 0.0:
         raise SystemExit("--baseline-jacobian-weight must be non-negative")
     if float(args.physical_b_aux_weight) < 0.0:

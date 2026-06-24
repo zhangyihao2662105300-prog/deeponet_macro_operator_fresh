@@ -207,6 +207,49 @@ final local strain coordinate must therefore be `Q_stack(point)`, with local-3
 parallel to `dX/dt`, and the final trunk coordinate must include
 `ip_macro_xi` or an equivalent `subcell_id + local r,s,t` representation.
 
+## v3 CSS8 Standard-Operator Compact Status
+
+The v3 CSS8 compact builder and independent audit are now implemented:
+
+```text
+scripts/v3_css8_standard_operator_common.py
+scripts/build_v3_css8_standard_operator_compacts.py
+scripts/audit_v3_css8_standard_operator_compact.py
+```
+
+The model-visible contract is:
+
+```text
+q_useful_hat
+geometry_global_hat
+trunk_features_hat = ip_macro_xi + ip_local_rst + local_geometry_features_hat
+  -> LE_local_stack
+```
+
+with:
+
+```text
+q_useful_hat = (T_q_raw_to_useful @ q48_raw) / L_ref
+B_local_useful_stack_hat =
+  L_ref * T_eps_from_abq_stack @ B_LE128_forward @ T_q_raw_to_useful.T
+B_raw_hat =
+  T_eps_to_abq_stack @ B_local_useful_stack_hat @ (T_q_raw_to_useful / L_ref)
+```
+
+10-case generation and independent strict audit:
+
+```text
+compact_count = 10
+strict_pass_count = 10
+strict_fail_count = 0
+q_useful_hat_transform_rel = 0.0 to 0.0
+LE_local_stack_to_abq_roundtrip_rel = 1.4773780403428246e-16 to 1.777626317589404e-16
+B_raw_projected_rel = 4.325447894744243e-16 to 4.648154783275927e-16
+```
+
+This is a preprocessing/postprocessing contract result, not a model-learning
+result.
+
 ## Current v1.3 Boundary
 
 The current v1.3 route learns approximately:

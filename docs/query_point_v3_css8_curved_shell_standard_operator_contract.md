@@ -224,14 +224,37 @@ geometry descriptors:
   curvature/director-gradient descriptors when available
 ```
 
-Minimal next compact:
+Implemented v3 compact model-visible fields:
 
 ```text
-q_useful: [N,42]
+q_useful_hat: [N,42]
+geometry_global_hat: [G]
 ip_macro_xi: [128,3]
 ip_local_rst: [128,3]
+local_geometry_features_hat: [128,F]
+trunk_features_hat = [ip_macro_xi, ip_local_rst, local_geometry_features_hat]
 LE_local_stack: [N,128,6]
-B_local_useful_stack: [N,128,6,42]
+B_local_useful_stack_hat: [N,128,6,42]
+```
+
+The branch displacement is dimensionless:
+
+```text
+q_useful_hat = (T_q_raw_to_useful @ q48_raw) / L_ref
+```
+
+The corresponding B label uses the same scale:
+
+```text
+B_local_useful_stack_hat =
+  L_ref * T_eps_from_abq_stack @ B_LE128_forward @ T_q_raw_to_useful.T
+```
+
+The raw-B backprojection is therefore:
+
+```text
+B_raw_hat =
+  T_eps_to_abq_stack @ B_local_useful_stack_hat @ (T_q_raw_to_useful / L_ref)
 ```
 
 Audit/postprocess fields:
@@ -376,24 +399,72 @@ standard-operator compact.
 
 This is still not a model-performance result.
 
-## Next Implementation Step
+## Implemented v3 Compact Builder and Audit
 
-The next concrete step should be a v3 CSS8 standard-operator compact builder:
+Implemented lightweight utilities:
 
 ```text
+scripts/v3_css8_standard_operator_common.py
 scripts/build_v3_css8_standard_operator_compacts.py
+scripts/audit_v3_css8_standard_operator_compact.py
 ```
 
-It should read v2b/fresh compacts and write:
+Builder command:
+
+```powershell
+py -3 scripts\build_v3_css8_standard_operator_compacts.py `
+  --compact-list D:\IS-FEM\outputs\query_point_v2_coordinate_pilot\multi_case_v2b_min10\v2b_compact_list.txt `
+  --out-root D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\multi_case_min10 `
+  --strict
+```
+
+Independent audit command:
+
+```powershell
+py -3 scripts\audit_v3_css8_standard_operator_compact.py `
+  --compact-list D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\multi_case_min10\v3_css8_standard_operator_compact_list.txt `
+  --out-root D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\multi_case_min10_audit `
+  --strict
+```
+
+Output:
 
 ```text
-ip_macro_xi
-ip_local_rst
-Q_stack
-T_eps_to_abq_stack
-T_eps_from_abq_stack
-LE_local_stack
-B_local_useful_stack
+D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\multi_case_min10\v3_css8_standard_operator_compact_list.txt
+D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\multi_case_min10\v3_css8_standard_operator_summary.json
+D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\multi_case_min10_audit\v3_css8_standard_operator_audit_summary.json
 ```
 
-Only after that compact contract passes should v3 training be considered.
+10-case result:
+
+```text
+compact_count = 10
+strict_pass_count = 10
+strict_fail_count = 0
+strict_pass = true
+```
+
+Metric ranges from the independent audit:
+
+```text
+q_useful_hat_transform_rel = 0.0 to 0.0
+LE_local_stack_to_abq_roundtrip_rel = 1.4773780403428246e-16 to 1.777626317589404e-16
+B_raw_projected_rel = 4.325447894744243e-16 to 4.648154783275927e-16
+B_rigid_residual_rel = 0.00010968263851608603 to 0.0012638931647260504
+Q_stack_orthonormal_max = 1.1102230246251565e-16 to 2.220446049250313e-16
+Q_stack_e3_dot_g_t_min = 0.9999999999999998 to 0.9999999999999999
+ip_J_hat_scaling_rel = 0.0 to 0.0
+ip_invJ_hat_scaling_rel = 0.0 to 0.0
+ip_detJ_hat_scaling_rel = 0.0 to 0.0
+ip_detJ_vs_det_ip_J_rel = 3.477257433075717e-08 to 4.098070681275398e-08
+```
+
+Interpretation:
+
+```text
+The v3 CSS8 data contract is now implemented and audited on 10 fresh cases.
+This establishes the preprocessing/postprocessing chain, not model performance.
+No training was run.
+```
+
+Only after this compact contract passes should v3 training be considered.

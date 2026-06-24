@@ -3,6 +3,118 @@
 This file records the route-level history for the Abaqus real-integration-point
 DeepONet/query-point training line.  Keep it updated whenever this route changes.
 
+## v3 single-frame radial learning diagnosis - 2026-06-24 - B-head is the bottleneck
+
+Purpose:
+
+- Follow up the single-frame radial smoke, which ran but did not close the
+  10-case training pool.
+- Diagnose whether the failure is caused by the autograd/radial construction
+  or by the direct tangent head itself.
+- Keep this as an overfit diagnostic only: no held-out split, no data expansion,
+  no checkpoint, and no final model claim.
+
+Added / changed:
+
+- Extended `scripts/train_v3_single_frame_radial_operator_smoke.py` with:
+  `--filter-case`, `--filter-frame`, `B_hat_direct_rel`,
+  `B_hat_direct_cos`, and optional `--direct-b-head-weight`.
+- The new direct tangent metrics compare the model's explicit
+  `B_hat(s,d,geometry,point)` head against `B_local_useful_stack_hat`, before
+  using autograd to form `AD-B`.
+
+One-frame overfit command:
+
+```powershell
+py -3 scripts\train_v3_single_frame_radial_operator_smoke.py `
+  --compact-list D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\multi_case_min10\v3_css8_standard_operator_compact_list.txt `
+  --out-root D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\single_frame_radial_learning_diagnosis_case031_frame09 `
+  --filter-case 31 `
+  --filter-frame 9 `
+  --steps 2000 `
+  --eval-every 500 `
+  --hidden 128 `
+  --lr 3e-4 `
+  --sample-batch 1 `
+  --le-point-batch 128 `
+  --ad-point-batch 16 `
+  --eval-point-batch 16 `
+  --le-weight 1.0 `
+  --b-weight 0.1 `
+  --direct-b-head-weight 1.0 `
+  --radial-weight 0.1
+```
+
+One-frame result:
+
+```text
+sample_count = 1
+filter_case = [31]
+filter_frame = [9]
+
+train_LE_local_stack_rel = 0.0308176912
+train_AD_B_local_useful_hat_rel = 0.6214236617
+train_AD_B_local_useful_hat_cos = 0.7985625863
+B_hat_direct_rel = 0.6214291453
+B_hat_direct_cos = 0.7985562086
+B_model_raw_rel = 0.6221962571
+```
+
+One-case / 10-frame command:
+
+```powershell
+py -3 scripts\train_v3_single_frame_radial_operator_smoke.py `
+  --compact-list D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\multi_case_min10\v3_css8_standard_operator_compact_list.txt `
+  --out-root D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\single_frame_radial_learning_diagnosis_case031_10frame `
+  --filter-case 31 `
+  --steps 2000 `
+  --eval-every 500 `
+  --hidden 128 `
+  --lr 3e-4 `
+  --sample-batch 4 `
+  --le-point-batch 128 `
+  --ad-point-batch 16 `
+  --eval-point-batch 16 `
+  --le-weight 1.0 `
+  --b-weight 0.1 `
+  --direct-b-head-weight 1.0 `
+  --radial-weight 0.1
+```
+
+One-case result:
+
+```text
+sample_count = 10
+filter_case = [31]
+
+train_LE_local_stack_rel = 0.1983168423
+train_AD_B_local_useful_hat_rel = 0.5744041800
+train_AD_B_local_useful_hat_cos = 0.8311612010
+B_hat_direct_rel = 0.5744073987
+B_hat_direct_cos = 0.8311581612
+B_model_raw_rel = 0.5756050348
+```
+
+Interpretation:
+
+- One-frame `LE` value overfit is possible (`LE_rel` about `0.031`), so the
+  value path is not the immediate blocker.
+- In both diagnostics, `B_hat_direct_rel` and `AD_B_rel` are essentially equal.
+  That means the autograd/radial construction is not adding a separate large
+  error; the explicit `B_hat` tangent head itself is not learning the target
+  tangent well enough.
+- The one-case path improves `B` slightly but leaves value worse than one-frame,
+  so the current naive single-frame radial network still does not close even a
+  one-case amplitude path.
+
+Boundary:
+
+- This is still not a held-out result.
+- No old true176 labels are used.
+- No large data artifact or checkpoint is committed.
+- The next modeling step should focus on the tangent/B representation, not on
+  debugging raw-B back projection or adding more data.
+
 ## v3 single-frame radial operator smoke - 2026-06-24 - Deployable interface runs, learning not closed
 
 Purpose:

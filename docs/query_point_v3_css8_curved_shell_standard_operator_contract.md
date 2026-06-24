@@ -1138,3 +1138,84 @@ This smoke is useful because it matches the intended one-frame inference
 interface and proves that the v3 compact fields are sufficient for the
 deployable path.  It also shows that a naive single-frame radial network has
 not yet replaced the non-deployable per-case hybrid-cubic oracle.
+
+### Single-Frame Radial Learning Diagnosis
+
+The follow-up diagnostic adds case/frame filters and direct tangent-head
+metrics:
+
+```text
+--filter-case
+--filter-frame
+--direct-b-head-weight
+
+B_hat_direct_rel = ||B_hat - B_local_useful_stack_hat|| / ||B_local_useful_stack_hat||
+B_hat_direct_cos = cos(B_hat, B_local_useful_stack_hat)
+```
+
+This separates two possible failure modes:
+
+```text
+B_hat_direct_rel high and AD_B_rel high:
+  tangent head itself is not learning the target B.
+
+B_hat_direct_rel low but AD_B_rel high:
+  autograd/radial consistency construction is wrong.
+```
+
+The one-frame diagnostic used `case031 frame09`:
+
+```powershell
+py -3 scripts\train_v3_single_frame_radial_operator_smoke.py `
+  --compact-list D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\multi_case_min10\v3_css8_standard_operator_compact_list.txt `
+  --out-root D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\single_frame_radial_learning_diagnosis_case031_frame09 `
+  --filter-case 31 `
+  --filter-frame 9 `
+  --steps 2000 `
+  --eval-every 500 `
+  --hidden 128 `
+  --lr 3e-4 `
+  --sample-batch 1 `
+  --le-point-batch 128 `
+  --ad-point-batch 16 `
+  --eval-point-batch 16 `
+  --le-weight 1.0 `
+  --b-weight 0.1 `
+  --direct-b-head-weight 1.0 `
+  --radial-weight 0.1
+```
+
+Result:
+
+```text
+sample_count = 1
+filter_case = [31]
+filter_frame = [9]
+
+train_LE_local_stack_rel = 0.0308176912
+train_AD_B_local_useful_hat_rel = 0.6214236617
+B_hat_direct_rel = 0.6214291453
+B_model_raw_rel = 0.6221962571
+```
+
+The one-case diagnostic used all ten frames of `case031`:
+
+```text
+sample_count = 10
+filter_case = [31]
+
+train_LE_local_stack_rel = 0.1983168423
+train_AD_B_local_useful_hat_rel = 0.5744041800
+B_hat_direct_rel = 0.5744073987
+B_model_raw_rel = 0.5756050348
+```
+
+Conclusion:
+
+```text
+The v3 single-frame radial interface can fit one-frame LE values,
+but its explicit B_hat tangent head does not yet learn the target tangent.
+Because B_hat_direct_rel approximately equals AD_B_rel, the main issue is not
+raw-B projection or autograd bookkeeping.  The next v3 model step should focus
+on a stronger tangent/B representation.
+```

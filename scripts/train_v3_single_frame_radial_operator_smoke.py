@@ -122,6 +122,16 @@ def load_paths(args: argparse.Namespace) -> list[Path]:
     return out
 
 
+def parse_int_filter(values: list[str]) -> set[int]:
+    out: set[int] = set()
+    for value in values:
+        for item in str(value).split(","):
+            text = item.strip()
+            if text:
+                out.add(int(text))
+    return out
+
+
 def load_one(path: Path) -> dict[str, Any]:
     with np.load(str(path), allow_pickle=True) as z:
         required = {
@@ -176,6 +186,12 @@ def load_one(path: Path) -> dict[str, Any]:
 
 def load_pool(args: argparse.Namespace) -> dict[str, Any]:
     rows = sorted([load_one(path) for path in load_paths(args)], key=lambda row: int(row["case_id"]))
+    filter_cases = parse_int_filter(args.filter_case)
+    filter_frames = parse_int_filter(args.filter_frame)
+    if filter_cases:
+        rows = [row for row in rows if int(row["case_id"]) in filter_cases]
+    if not rows:
+        raise SystemExit("No compact matched the selected --filter-case values")
     geom_shape = rows[0]["geom"].shape
     trunk_shape = rows[0]["trunk"].shape
     for row in rows:
@@ -197,6 +213,8 @@ def load_pool(args: argparse.Namespace) -> dict[str, Any]:
     for row in rows:
         frames = int(row["q"].shape[0])
         for frame in range(frames):
+            if filter_frames and int(frame) not in filter_frames:
+                continue
             sample_q.append(row["q"][frame])
             sample_geom.append(row["geom"])
             sample_le.append(row["le"][frame])
@@ -207,6 +225,8 @@ def load_pool(args: argparse.Namespace) -> dict[str, Any]:
             sample_case_ids.append(int(row["case_id"]))
             sample_frame_ids.append(int(frame))
             sample_compact_paths.append(str(row["path"]))
+    if not sample_q:
+        raise SystemExit("No frames matched the selected --filter-frame values")
 
     q = np.stack(sample_q, axis=0)
     geom = np.stack(sample_geom, axis=0)
@@ -222,6 +242,8 @@ def load_pool(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "case_ids": [int(row["case_id"]) for row in rows],
         "compact_paths": [str(row["path"]) for row in rows],
+        "filter_case": sorted(filter_cases),
+        "filter_frame": sorted(filter_frames),
         "sample_case_ids": np.asarray(sample_case_ids, dtype=np.int64),
         "sample_frame_ids": np.asarray(sample_frame_ids, dtype=np.int64),
         "sample_compact_paths": sample_compact_paths,
@@ -384,6 +406,18 @@ def radial_consistency_loss(
     return torch.mean((dv_ds - b_radial) ** 2)
 
 
+def direct_b_head(
+    model: SingleFrameRadialOperator,
+    q_raw: torch.Tensor,
+    geom_norm: torch.Tensor,
+    trunk_norm: torch.Tensor,
+    point_idx: torch.Tensor | None = None,
+) -> torch.Tensor:
+    trunk_use = trunk_norm if point_idx is None else trunk_norm.index_select(0, point_idx)
+    _, b_hat, _, _ = model.vb(q_raw, geom_norm, trunk_use)
+    return b_hat
+
+
 def raw_project_b(ad_b_local_hat: torch.Tensor, t_eps: torch.Tensor, t_q_hat: torch.Tensor) -> torch.Tensor:
     b_abq = torch.einsum("pab,npbk->npak", t_eps, ad_b_local_hat)
     return torch.einsum("npak,kj->npaj", b_abq, t_q_hat)
@@ -407,6 +441,10 @@ def evaluate(
         "ad_pred_sq": torch.zeros((), device=device),
         "braw_diff_sq": torch.zeros((), device=device),
         "braw_den_sq": torch.zeros((), device=device),
+        "bhead_diff_sq": torch.zeros((), device=device),
+        "bhead_den_sq": torch.zeros((), device=device),
+        "bhead_dot": torch.zeros((), device=device),
+        "bhead_pred_sq": torch.zeros((), device=device),
     }
     case_accum: dict[int, dict[str, torch.Tensor]] = {
         int(case_id): {key: torch.zeros((), device=device) for key in overall}
@@ -434,17 +472,27 @@ def evaluate(
         ad_pred_sq = torch.zeros((), device=device)
         braw_diff_sq = torch.zeros((), device=device)
         braw_den_sq = torch.zeros((), device=device)
+        bhead_diff_sq = torch.zeros((), device=device)
+        bhead_den_sq = torch.zeros((), device=device)
+        bhead_dot = torch.zeros((), device=device)
+        bhead_pred_sq = torch.zeros((), device=device)
         for p0 in range(0, point_count, int(point_chunk)):
             p1 = min(p0 + int(point_chunk), point_count)
             point_idx = torch.arange(p0, p1, device=device)
             ad_b = jacobian_sample(model, q_norm, geom, trunk, data["q_mean"], data["q_std"], point_idx=point_idx)
+            b_hat = direct_b_head(model, q_raw.reshape(1, -1), geom, trunk, point_idx=point_idx)[0]
             target = b_target_full[p0:p1]
             diff = ad_b - target
+            bhead_diff = b_hat.detach() - target
             with torch.no_grad():
                 ad_diff_sq = ad_diff_sq + torch.sum(diff.detach() * diff.detach())
                 ad_den_sq = ad_den_sq + torch.sum(target * target)
                 ad_dot = ad_dot + torch.sum(ad_b.detach() * target)
                 ad_pred_sq = ad_pred_sq + torch.sum(ad_b.detach() * ad_b.detach())
+                bhead_diff_sq = bhead_diff_sq + torch.sum(bhead_diff * bhead_diff)
+                bhead_den_sq = bhead_den_sq + torch.sum(target * target)
+                bhead_dot = bhead_dot + torch.sum(b_hat.detach() * target)
+                bhead_pred_sq = bhead_pred_sq + torch.sum(b_hat.detach() * b_hat.detach())
                 b_model_raw = raw_project_b(ad_b.detach().unsqueeze(0), data["t_eps"][sample_index, p0:p1], data["t_q_hat"][sample_index])
                 b_raw_chunk = data["b_raw"][sample_index, p0:p1].unsqueeze(0)
                 braw_diff = b_model_raw - b_raw_chunk
@@ -459,6 +507,10 @@ def evaluate(
             ("ad_pred_sq", ad_pred_sq),
             ("braw_diff_sq", braw_diff_sq),
             ("braw_den_sq", braw_den_sq),
+            ("bhead_diff_sq", bhead_diff_sq),
+            ("bhead_den_sq", bhead_den_sq),
+            ("bhead_dot", bhead_dot),
+            ("bhead_pred_sq", bhead_pred_sq),
         ]:
             overall[key] = overall[key] + val.detach()
             case_accum[case_id][key] = case_accum[case_id][key] + val.detach()
@@ -469,6 +521,8 @@ def evaluate(
         ad_rel = rel_from_squares(acc["ad_diff_sq"], acc["ad_den_sq"])
         ad_cos = acc["ad_dot"] / torch.clamp(torch.sqrt(acc["ad_pred_sq"]) * torch.sqrt(acc["ad_den_sq"]), min=1.0e-30)
         braw_rel = rel_from_squares(acc["braw_diff_sq"], acc["braw_den_sq"])
+        bhead_rel = rel_from_squares(acc["bhead_diff_sq"], acc["bhead_den_sq"])
+        bhead_cos = acc["bhead_dot"] / torch.clamp(torch.sqrt(acc["bhead_pred_sq"]) * torch.sqrt(acc["bhead_den_sq"]), min=1.0e-30)
         case_rows.append({
             "case_index": int(idx),
             "case_id": int(case_id),
@@ -476,17 +530,23 @@ def evaluate(
             "train_AD_B_local_useful_hat_rel": scalar_float(ad_rel),
             "train_AD_B_local_useful_hat_cos": scalar_float(ad_cos),
             "B_model_raw_rel": scalar_float(braw_rel),
+            "B_hat_direct_rel": scalar_float(bhead_rel),
+            "B_hat_direct_cos": scalar_float(bhead_cos),
             "selection_score": scalar_float(le_rel + ad_rel),
         })
     le_rel = rel_from_squares(overall["le_diff_sq"], overall["le_den_sq"])
     ad_rel = rel_from_squares(overall["ad_diff_sq"], overall["ad_den_sq"])
     ad_cos = overall["ad_dot"] / torch.clamp(torch.sqrt(overall["ad_pred_sq"]) * torch.sqrt(overall["ad_den_sq"]), min=1.0e-30)
     braw_rel = rel_from_squares(overall["braw_diff_sq"], overall["braw_den_sq"])
+    bhead_rel = rel_from_squares(overall["bhead_diff_sq"], overall["bhead_den_sq"])
+    bhead_cos = overall["bhead_dot"] / torch.clamp(torch.sqrt(overall["bhead_pred_sq"]) * torch.sqrt(overall["bhead_den_sq"]), min=1.0e-30)
     return {
         "train_LE_local_stack_rel": scalar_float(le_rel),
         "train_AD_B_local_useful_hat_rel": scalar_float(ad_rel),
         "train_AD_B_local_useful_hat_cos": scalar_float(ad_cos),
         "B_model_raw_rel": scalar_float(braw_rel),
+        "B_hat_direct_rel": scalar_float(bhead_rel),
+        "B_hat_direct_cos": scalar_float(bhead_cos),
         "selection_score": scalar_float(le_rel + ad_rel),
     }, case_rows
 
@@ -495,9 +555,10 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     if not rows:
         return
     preferred = [
-        "step", "case_index", "case_id", "loss", "le_loss", "b_loss", "radial_loss",
+        "step", "case_index", "case_id", "loss", "le_loss", "b_loss", "direct_b_head_loss", "radial_loss",
         "train_LE_local_stack_rel", "train_AD_B_local_useful_hat_rel",
-        "train_AD_B_local_useful_hat_cos", "B_model_raw_rel", "selection_score",
+        "train_AD_B_local_useful_hat_cos", "B_model_raw_rel",
+        "B_hat_direct_rel", "B_hat_direct_cos", "selection_score",
     ]
     fields = {key for row in rows for key in row}
     ordered = [key for key in preferred if key in fields]
@@ -550,6 +611,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         losses: list[torch.Tensor] = []
         le_terms: list[torch.Tensor] = []
         b_terms: list[torch.Tensor] = []
+        direct_b_head_terms: list[torch.Tensor] = []
         radial_terms: list[torch.Tensor] = []
         for sample_index in sample_idx.tolist():
             case_id = int(data["sample_case_ids"][sample_index].detach().cpu().item())
@@ -564,12 +626,20 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             le_loss = torch.mean(((pred - le_target) / le_scale_case[case_pos]) ** 2)
             ad_idx = torch.randperm(point_count, device=device)[:ad_point_batch]
             ad_b = jacobian_sample(model, q_norm, geom, trunk, data["q_mean"], data["q_std"], point_idx=ad_idx)
+            b_hat_direct = direct_b_head(model, q_raw, geom, trunk, point_idx=ad_idx)[0]
             b_target = data["b"][sample_index].index_select(0, ad_idx)
             b_loss = torch.mean(((ad_b - b_target) / b_scale_case[case_pos]) ** 2)
+            direct_b_head_loss = torch.mean(((b_hat_direct - b_target) / b_scale_case[case_pos]) ** 2)
             radial_loss = radial_consistency_loss(model, q_raw, geom, trunk, ad_idx) / (b_scale_case[case_pos] ** 2)
-            losses.append(float(args.le_weight) * le_loss + float(args.b_weight) * b_loss + float(args.radial_weight) * radial_loss)
+            losses.append(
+                float(args.le_weight) * le_loss
+                + float(args.b_weight) * b_loss
+                + float(args.direct_b_head_weight) * direct_b_head_loss
+                + float(args.radial_weight) * radial_loss
+            )
             le_terms.append(le_loss.detach())
             b_terms.append(b_loss.detach())
+            direct_b_head_terms.append(direct_b_head_loss.detach())
             radial_terms.append(radial_loss.detach())
         loss = torch.stack(losses).mean()
         opt.zero_grad(set_to_none=True)
@@ -583,6 +653,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 "loss": scalar_float(loss.detach()),
                 "le_loss": scalar_float(torch.stack(le_terms).mean()),
                 "b_loss": scalar_float(torch.stack(b_terms).mean()),
+                "direct_b_head_loss": scalar_float(torch.stack(direct_b_head_terms).mean()),
                 "radial_loss": scalar_float(torch.stack(radial_terms).mean()),
                 **metrics,
             }
@@ -620,8 +691,11 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "loss_weights": {
             "le_weight": float(args.le_weight),
             "b_weight": float(args.b_weight),
+            "direct_b_head_weight": float(args.direct_b_head_weight),
             "radial_weight": float(args.radial_weight),
         },
+        "filter_case": data_np["filter_case"],
+        "filter_frame": data_np["filter_frame"],
         "initial_metrics": initial,
         "best_metrics": best,
         "latest_metrics": latest,
@@ -642,6 +716,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--compact-list", default="")
     parser.add_argument("--compact", action="append", default=[])
+    parser.add_argument("--filter-case", action="append", default=[], help="Optional comma-separated case_id filter for overfit diagnostics.")
+    parser.add_argument("--filter-frame", action="append", default=[], help="Optional comma-separated frame index filter for overfit diagnostics.")
     parser.add_argument("--out-root", required=True)
     parser.add_argument("--steps", type=int, default=1200)
     parser.add_argument("--seed", type=int, default=20260624)
@@ -651,6 +727,7 @@ def main() -> None:
     parser.add_argument("--weight-decay", type=float, default=1.0e-5)
     parser.add_argument("--le-weight", type=float, default=1.0)
     parser.add_argument("--b-weight", type=float, default=0.1)
+    parser.add_argument("--direct-b-head-weight", type=float, default=0.0)
     parser.add_argument("--radial-weight", type=float, default=0.1)
     parser.add_argument("--sample-batch", type=int, default=8)
     parser.add_argument("--le-point-batch", type=int, default=128)

@@ -19,6 +19,92 @@ The v2 route should make that coordinate system explicit.  It should learn a
 standard/local macro-element operator and map it back to Abaqus raw coordinates
 through recorded transformations.
 
+## v2l Standard-Operator Preprocessing Contract Status
+
+The v2l step pauses model tuning and extracts preprocessing/postprocessing into
+an explicit standard-operator contract.  This is not a new model-performance
+claim.
+
+New lightweight utilities:
+
+```text
+scripts/build_v2_standard_operator_compacts.py
+scripts/audit_v2_standard_operator_contract.py
+docs/query_point_v2_standard_operator_preprocessing_contract.md
+```
+
+The standard route is now:
+
+```text
+Raw Abaqus:
+  q48_raw, LE_abq, B_abq
+
+Preprocess:
+  q_useful = T_q_raw_to_useful @ q48_raw
+  LE_local = T_eps_from_abq @ LE_abq
+  B_local_useful = T_eps_from_abq @ B_abq @ T_q_raw_to_useful.T
+
+Network-visible operator:
+  LE_local = NN(q_useful, ip_xi)
+  B_local_useful_hat = dLE_local_hat / dq_useful
+
+Postprocess:
+  LE_abq_hat = T_eps_to_abq @ LE_local_hat
+  B_raw_hat = T_eps_to_abq @ B_local_useful_hat @ T_q_raw_to_useful
+```
+
+The network should only read:
+
+```text
+q_useful
+ip_xi
+LE_local
+B_local_useful
+```
+
+Transform and raw fields are preprocessing/postprocessing/audit fields, not
+quantities for the network to learn:
+
+```text
+q48_raw
+LE_abq
+B_LE128_forward
+T_q_raw_to_useful
+T_eps_to_abq
+T_eps_from_abq
+local_frame_Q
+```
+
+10-case standard-operator generation and strict audit:
+
+```text
+standard_operator_compact_list =
+  D:\IS-FEM\outputs\query_point_v2_standard_operator\multi_case_min10\standard_operator_compact_list.txt
+
+standard_operator_summary =
+  D:\IS-FEM\outputs\query_point_v2_standard_operator\multi_case_min10\standard_operator_summary.json
+
+compact_count = 10
+strict_pass_count = 10
+strict_fail_count = 0
+q_useful_transform_rel = 0.0 to 0.0
+LE_local_to_abq_roundtrip_rel = 1.6410479539884723e-16 to 3.0740682511657065e-16
+B_raw_projected_rel = 4.462975556507417e-16 to 4.652329014360367e-16
+B_rigid_residual_rel = 0.00010968263851608675 to 0.0012638931647260517
+```
+
+The rigid residual is reported only.  It is not a strict failure because the
+standard operator intentionally removes rigid q modes.
+
+Boundary:
+
+```text
+no training
+no model/loss/lr/epoch/split changes
+no old TRUE176 LE/B labels used as v2 labels
+no large generated artifacts committed
+```
+
 ## Current v1.3 Boundary
 
 The current v1.3 route learns approximately:

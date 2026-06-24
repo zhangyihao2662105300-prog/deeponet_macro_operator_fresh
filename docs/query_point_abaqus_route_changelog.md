@@ -3,6 +3,84 @@
 This file records the route-level history for the Abaqus real-integration-point
 DeepONet/query-point training line.  Keep it updated whenever this route changes.
 
+## v2l - 2026-06-24 - Standard-operator preprocessing contract
+
+Purpose:
+
+- Pause v2 model tuning after the v2k tangent/schedule diagnostic.
+- Extract q-coordinate, strain-coordinate, and B-coordinate transforms from
+  the neural-network route into an explicit preprocessing/postprocessing
+  contract.
+- Redefine the network-visible operator as:
+
+```text
+(q_useful, ip_xi) -> LE_local
+B_local_useful = autograd(dLE_local/dq_useful)
+```
+
+Contract:
+
+```text
+Raw Abaqus:
+  q48_raw, LE_abq, B_abq
+
+Preprocess:
+  q_useful = T_q_raw_to_useful @ q48_raw
+  LE_local = T_eps_from_abq @ LE_abq
+  B_local_useful = T_eps_from_abq @ B_abq @ T_q_raw_to_useful.T
+
+Postprocess:
+  LE_abq_hat = T_eps_to_abq @ LE_local_hat
+  B_raw_hat = T_eps_to_abq @ B_local_useful_hat @ T_q_raw_to_useful
+```
+
+Added:
+
+- `scripts/build_v2_standard_operator_compacts.py`
+- `scripts/audit_v2_standard_operator_contract.py`
+- `docs/query_point_v2_standard_operator_preprocessing_contract.md`
+
+Input:
+
+```text
+D:\IS-FEM\outputs\query_point_v2_coordinate_pilot\multi_case_v2b_min10\v2b_compact_list.txt
+```
+
+Output:
+
+```text
+D:\IS-FEM\outputs\query_point_v2_standard_operator\multi_case_min10\standard_operator_compact_list.txt
+D:\IS-FEM\outputs\query_point_v2_standard_operator\multi_case_min10\standard_operator_summary.json
+```
+
+Strict 10-case result:
+
+```text
+compact_count = 10
+strict_pass_count = 10
+strict_fail_count = 0
+q_useful_transform_rel = 0.0 to 0.0
+LE_local_to_abq_roundtrip_rel = 1.6410479539884723e-16 to 3.0740682511657065e-16
+B_raw_projected_rel = 4.462975556507417e-16 to 4.652329014360367e-16
+B_rigid_residual_rel = 0.00010968263851608675 to 0.0012638931647260517
+```
+
+Interpretation:
+
+- The standard-operator preprocessing/postprocessing contract closes for all
+  10 v2b fresh cases.
+- This is a data/engineering contract result, not a model-performance result.
+- The rigid residual is recorded but not used as a strict failure because the
+  useful q-coordinate intentionally removes rigid modes.
+
+Validation boundary:
+
+- No training was run.
+- No model structure, loss, learning rate, epoch, or split policy was changed.
+- No old TRUE176 `LE/B` labels were used as v2 labels.
+- No tag was moved.
+- Generated `.npz` outputs remain outside git and must not be committed.
+
 ## v2k - 2026-06-24 - Tangent / training-schedule diagnostic
 
 Purpose:

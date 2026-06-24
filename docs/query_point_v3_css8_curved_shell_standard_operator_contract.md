@@ -581,3 +581,73 @@ B_model_raw_rel = 0.0308490749
 
 This passes the multi-case loader/shape/autograd gate.  It does not prove v3
 model performance or held-out generalization.
+
+## Overfit Diagnosis
+
+The next diagnostic asked whether the 10-case training-set issue means that more
+data is needed immediately.  The answer is no: the first issue is loss scaling
+and value anchoring inside the existing 10-case pool.
+
+The diagnostic script is:
+
+```text
+scripts/diagnose_v3_css8_overfit_cases.py
+```
+
+It computes per-case scale metrics and closed-form value anchors, including:
+
+```text
+B_mean(case, point) @ q_useful_hat -> LE_local_stack
+```
+
+On the current 10-case pool:
+
+```text
+Bmean_at_q_LE_rel_min = 0.0230911508
+Bmean_at_q_LE_rel_median = 0.0365142219
+Bmean_at_q_LE_rel_max = 0.2938258832
+Bmean_anchor_bad_case_ids = [31]
+```
+
+Thus, for 9/10 cases, the simple case-wise Bmean value anchor already explains
+`LE_local_stack` to about 2--5 percent relative error.  The main outlier is
+`case031`.
+
+The original 10-case global-scale residual smoke degraded many low-amplitude
+cases away from this good anchor.  A diagnostic rerun with per-case loss scaling
+kept all non-case031 cases near the anchor:
+
+```text
+smoke_final_LE_rel_min = 0.0208749175
+smoke_final_LE_rel_median = 0.0290177781
+smoke_final_LE_rel_max = 0.2798568606
+smoke_degraded_from_Bmean_anchor_case_ids = []
+```
+
+Latest per-case values under per-case scaling:
+
+```text
+case019: LE_rel=0.0308, AD_B_rel=0.0134
+case025: LE_rel=0.0209, AD_B_rel=0.0072
+case031: LE_rel=0.2799, AD_B_rel=0.1122
+case041: LE_rel=0.0339, AD_B_rel=0.0056
+case043: LE_rel=0.0300, AD_B_rel=0.0066
+case044: LE_rel=0.0336, AD_B_rel=0.0056
+case045: LE_rel=0.0275, AD_B_rel=0.0059
+case046: LE_rel=0.0226, AD_B_rel=0.0056
+case049: LE_rel=0.0242, AD_B_rel=0.0062
+case050: LE_rel=0.0280, AD_B_rel=0.0070
+```
+
+Interpretation:
+
+```text
+The v3 compact contract is not the blocker.
+The next blocker is formal training objective design:
+  per-case / relative LE scaling is needed;
+  case031 needs a stronger value anchor than B_mean(case,point) @ q.
+```
+
+Therefore the next gate should refine the formal v3 objective/value anchor on
+the existing 10-case training pool before adding more data or judging held-out
+generalization.

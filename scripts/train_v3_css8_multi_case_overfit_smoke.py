@@ -527,6 +527,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     opt = torch.optim.AdamW(model.parameters(), lr=float(args.lr), weight_decay=float(args.weight_decay))
     le_scale = torch.clamp(torch.sqrt(torch.mean(data["le"] * data["le"])), min=1.0e-12)
     b_scale = torch.clamp(torch.sqrt(torch.mean(data["b"] * data["b"])), min=1.0e-12)
+    le_scale_case = torch.clamp(torch.sqrt(torch.mean(data["le"] * data["le"], dim=(1, 2, 3))), min=1.0e-12)
+    b_scale_case = torch.clamp(torch.sqrt(torch.mean(data["b"] * data["b"], dim=(1, 2, 3, 4))), min=1.0e-12)
 
     case_count = int(data["q_norm"].shape[0])
     frame_count = int(data["q_norm"].shape[1])
@@ -566,7 +568,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 point_idx=le_idx,
             )
             le_target = data["le"][case_index].index_select(0, frame_idx).index_select(1, le_idx)
-            le_loss = torch.mean(((pred - le_target) / le_scale) ** 2)
+            cur_le_scale = le_scale_case[case_index] if args.loss_scale_mode == "per-case" else le_scale
+            le_loss = torch.mean(((pred - le_target) / cur_le_scale) ** 2)
 
             ad_idx = torch.randperm(point_count, device=device)[:ad_point_batch]
             b_target = data["b"][case_index].index_select(0, frame_idx).index_select(1, ad_idx)
@@ -580,7 +583,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 data["q_std"],
                 point_idx=ad_idx,
             )
-            b_loss = torch.mean(((ad_b - b_target) / b_scale) ** 2)
+            cur_b_scale = b_scale_case[case_index] if args.loss_scale_mode == "per-case" else b_scale
+            b_loss = torch.mean(((ad_b - b_target) / cur_b_scale) ** 2)
             loss_terms.append(float(args.le_weight) * le_loss + float(args.b_weight) * b_loss)
             le_terms.append(le_loss.detach())
             b_terms.append(b_loss.detach())
@@ -629,6 +633,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "raw_backprojection": "B_raw_hat = T_eps_to_abq_stack @ AD_B_local_hat @ T_q_raw_to_useful_hat",
         "model_form": "script-local multi-case anchored B-prior smoke: B_prior(case,point) @ q_useful_hat + R(q,geometry,trunk) - R(0,geometry,trunk); not final v3 architecture",
         "b_prior_trainable": bool(model.b_prior.requires_grad),
+        "loss_scale_mode": str(args.loss_scale_mode),
         "formal_training": False,
         "checkpoint_written": False,
         "uses_old_true176_labels_as_v3_labels": False,
@@ -688,6 +693,7 @@ def main() -> None:
     parser.add_argument("--eval-every", type=int, default=200)
     parser.add_argument("--grad-clip", type=float, default=10.0)
     parser.add_argument("--freeze-b-prior", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--loss-scale-mode", choices=["global", "per-case"], default="global")
     args = parser.parse_args()
     if int(args.steps) < 1:
         raise SystemExit("--steps must be positive")

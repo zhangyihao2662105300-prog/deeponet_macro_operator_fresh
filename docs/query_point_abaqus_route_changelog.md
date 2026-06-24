@@ -3,6 +3,119 @@
 This file records the route-level history for the Abaqus real-integration-point
 DeepONet/query-point training line.  Keep it updated whenever this route changes.
 
+## v3 CSS8 overfit diagnosis - 2026-06-24 - Case scale and value-anchor audit
+
+Purpose:
+
+- Pause before adding more data or running held-out splits.
+- Diagnose why the 10-case v3 training-set smoke showed uneven
+  `LE_local_stack` overfit.
+- Separate three possible causes:
+  data/contract issue, value-anchor weakness, and loss-scale imbalance.
+
+Added:
+
+- `scripts/diagnose_v3_css8_overfit_cases.py`
+- `--loss-scale-mode {global,per-case}` diagnostic option in
+  `scripts/train_v3_css8_multi_case_overfit_smoke.py`.
+
+Per-case oracle diagnostic command:
+
+```powershell
+py -3 scripts\diagnose_v3_css8_overfit_cases.py `
+  --compact-list D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\multi_case_min10\v3_css8_standard_operator_compact_list.txt `
+  --smoke-case-history D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\multi_case_overfit_smoke_10case_lr1e5\v3_multi_case_overfit_case_history.csv `
+  --out-root D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\overfit_case_diagnosis_10case
+```
+
+Initial diagnostic result:
+
+```text
+Bmean_at_q_LE_rel_min = 0.0230911508
+Bmean_at_q_LE_rel_median = 0.0365142219
+Bmean_at_q_LE_rel_max = 0.2938258832
+Bmean_anchor_bad_case_ids = [31]
+smoke_degraded_from_Bmean_anchor_case_ids =
+  [19,25,41,43,44,45,46,49,50]
+```
+
+Interpretation:
+
+- For 9/10 cases, the closed-form value anchor
+  `B_mean(case,point) @ q_useful_hat` already explains `LE_local_stack` to
+  roughly 2--5 percent relative error.
+- `case031` is the only clear Bmean/value-anchor hard case
+  (`Bmean_at_q_LE_rel ~= 0.294`).
+- The previous global-scale 10-case residual smoke degraded many low-amplitude
+  cases from a good anchor to very poor relative LE.  That points to loss-scale
+  imbalance/residual optimization, not a v3 compact contract failure.
+
+Per-case loss-scale capacity smoke:
+
+```powershell
+py -3 scripts\train_v3_css8_multi_case_overfit_smoke.py `
+  --compact-list D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\multi_case_min10\v3_css8_standard_operator_compact_list.txt `
+  --out-root D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\multi_case_overfit_smoke_10case_percase_scale `
+  --steps 1200 `
+  --eval-every 300 `
+  --hidden 128 `
+  --lr 1e-5 `
+  --case-batch 4 `
+  --frame-batch 10 `
+  --le-point-batch 128 `
+  --ad-point-batch 8 `
+  --eval-point-batch 16 `
+  --loss-scale-mode per-case
+```
+
+Per-case loss-scale result:
+
+```text
+smoke_final_LE_rel_min = 0.0208749175
+smoke_final_LE_rel_median = 0.0290177781
+smoke_final_LE_rel_max = 0.2798568606
+smoke_degraded_from_Bmean_anchor_case_ids = []
+
+case031 remains the worst:
+  Bmean_at_q_LE_rel = 0.2938258832
+  smoke_final_LE_rel = 0.2798568606
+  smoke_final_AD_B_rel = 0.1122235432
+```
+
+Representative latest per-case values:
+
+```text
+case019: LE_rel=0.0308, AD_B_rel=0.0134
+case025: LE_rel=0.0209, AD_B_rel=0.0072
+case031: LE_rel=0.2799, AD_B_rel=0.1122
+case041: LE_rel=0.0339, AD_B_rel=0.0056
+case043: LE_rel=0.0300, AD_B_rel=0.0066
+case044: LE_rel=0.0336, AD_B_rel=0.0056
+case045: LE_rel=0.0275, AD_B_rel=0.0059
+case046: LE_rel=0.0226, AD_B_rel=0.0056
+case049: LE_rel=0.0242, AD_B_rel=0.0062
+case050: LE_rel=0.0280, AD_B_rel=0.0070
+```
+
+Current conclusion:
+
+- The v3 10-case training-set issue is not primarily "need more data".
+- The v3 compact contract and multi-case loader/AD path are usable.
+- Most cases can be held near the value-anchor oracle when the diagnostic loss
+  uses per-case scaling.
+- The global-scale smoke failed because low-amplitude cases were sacrificed by
+  the residual/shared loss scale.
+- `case031` is a separate hard case where the simple `B_mean @ q` value anchor
+  is intrinsically weak.
+
+Next recommended gate:
+
+- Do not start held-out split yet.
+- Do not add data just to fix this symptom.
+- First move the formal v3 training objective toward train-only per-case or
+  relative LE scaling, and add a better value anchor for cases like `case031`
+  before interpreting split performance.
+
 ## v3 CSS8 multi-case smoke - 2026-06-24 - Loader, shape, and AD gate
 
 Purpose:

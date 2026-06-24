@@ -10,8 +10,8 @@ The v3 model-visible contract is:
         -> LE_local_stack
 
 where q_useful_hat is dimensionless and rigid-motion-free, and LE_local_stack is
-in the CSS8 stack-director frame.  Raw Abaqus LE/B are kept only for audit and
-postprocessing.
+in a reference-geometry local frame.  Raw Abaqus LE/B are kept only for audit
+and postprocessing.
 """
 
 from __future__ import annotations
@@ -26,23 +26,22 @@ import numpy as np
 from v3_css8_standard_operator_common import (
     AUDIT_POSTPROCESS_FIELDS,
     CONTRACT_VERSION,
+    GeometryMap,
     MODEL_VISIBLE_FIELDS,
     apply_t_eps_to_b,
     apply_t_eps_to_strain,
     apply_t_q,
-    characteristic_length,
     collect_paths,
-    css8_standard_coordinates,
+    css8_connectivity_zero_based,
+    css8_point_table,
     first_key,
     json_default,
-    local_geometry_features,
     parse_case_id,
     project_raw_b_to_useful_subspace,
     rel_norm,
     right_multiply_t_q_transpose,
     scalar_bool,
     scalar_text,
-    stack_frames_from_ip_j,
     strain_transform_matrices,
     useful_to_raw_projected,
     write_json,
@@ -51,22 +50,6 @@ from v3_css8_standard_operator_common import (
 
 def as_float64(z: np.lib.npyio.NpzFile, key: str) -> np.ndarray:
     return np.asarray(z[key], dtype=np.float64)
-
-
-def build_geometry_global_hat(
-    *,
-    x_macro_hat: np.ndarray,
-    span_hat: np.ndarray,
-    shape4: np.ndarray | None,
-) -> tuple[np.ndarray, list[str]]:
-    parts = [np.asarray(x_macro_hat, dtype=np.float64).reshape(-1)]
-    names = [f"X_macro_hat_{idx}_{axis}" for idx in range(x_macro_hat.shape[0]) for axis in ("x", "y", "z")]
-    parts.append(np.asarray(span_hat, dtype=np.float64).reshape(3))
-    names.extend(["span_hat_x", "span_hat_y", "span_hat_z"])
-    if shape4 is not None:
-        parts.append(np.asarray(shape4, dtype=np.float64).reshape(-1))
-        names.extend([f"shape4_{idx}" for idx in range(np.asarray(shape4).reshape(-1).shape[0])])
-    return np.concatenate(parts, axis=0), names
 
 
 def normalize_shape4_for_global_geometry(shape4: np.ndarray | None, *, frame_count: int) -> np.ndarray | None:
@@ -131,8 +114,9 @@ def audit_arrays(
 
     qtq = np.einsum("pji,pjk->pik", q_stack, q_stack)
     q_det = np.linalg.det(q_stack)
-    gt_unit = ip_j[:, 2, :] / np.linalg.norm(ip_j[:, 2, :], axis=1, keepdims=True)
-    stack_e3_dot_gt = np.einsum("pi,pi->p", q_stack[:, :, 2], gt_unit)
+    normal = np.cross(ip_j[:, 0, :], ip_j[:, 1, :])
+    normal_unit = normal / np.linalg.norm(normal, axis=1, keepdims=True)
+    stack_e3_dot_normal = np.einsum("pi,pi->p", q_stack[:, :, 2], normal_unit)
 
     ip_j_hat_check = ip_j / float(l_ref)
     ip_invj_hat_check = ip_invj * float(l_ref)
@@ -172,8 +156,8 @@ def audit_arrays(
             failures.append("Q_stack_not_orthonormal")
         if np.min(q_det) < 1.0 - 5.0e-12:
             failures.append("Q_stack_not_right_handed")
-        if np.min(stack_e3_dot_gt) < 1.0 - 1.0e-12:
-            failures.append("Q_stack_e3_not_aligned_to_g_t")
+        if np.min(stack_e3_dot_normal) < 1.0 - 1.0e-12:
+            failures.append("Q_stack_e3_not_aligned_to_reference_normal")
 
     return {
         "strict_pass": len(failures) == 0,
@@ -193,8 +177,8 @@ def audit_arrays(
         "Q_stack_orthonormal_max": float(np.max(np.abs(qtq - np.eye(3)))),
         "Q_stack_det_min": float(np.min(q_det)),
         "Q_stack_det_max": float(np.max(q_det)),
-        "Q_stack_e3_dot_g_t_min": float(np.min(stack_e3_dot_gt)),
-        "Q_stack_e3_dot_g_t_median": float(np.median(stack_e3_dot_gt)),
+        "Q_stack_e3_dot_reference_normal_min": float(np.min(stack_e3_dot_normal)),
+        "Q_stack_e3_dot_reference_normal_median": float(np.median(stack_e3_dot_normal)),
     }
 
 
@@ -240,7 +224,10 @@ def build_one(path: Path, out_root: Path, *, strict: bool, tol: float, nx: int, 
     if q48_raw.ndim != 2 or q48_raw.shape[1] != 48:
         raise ValueError(f"{path}: q48_raw must be [N,48], got {q48_raw.shape}")
     n_frames = int(q48_raw.shape[0])
-    row_map, ip_macro_xi, ip_local_rst = css8_standard_coordinates(nx=nx, ny=ny)
+    point_table = css8_point_table(nx=nx, ny=ny)
+    row_map = np.asarray(point_table.row_map, dtype=np.float64)
+    ip_macro_xi = np.asarray(point_table.xi_macro, dtype=np.float64)
+    ip_local_rst = np.asarray(point_table.rst, dtype=np.float64)
     point_count = int(ip_macro_xi.shape[0])
     if point_count != ip_j.shape[0]:
         raise ValueError(f"{path}: row-map point count {point_count} does not match ip_J {ip_j.shape}")
@@ -249,13 +236,24 @@ def build_one(path: Path, out_root: Path, *, strict: bool, tol: float, nx: int, 
     if b_raw.shape != (n_frames, point_count, 6, 48):
         raise ValueError(f"{path}: B_LE128_forward must be [N,{point_count},6,48], got {b_raw.shape}")
 
-    l_ref, x_center, x_span = characteristic_length(x_macro)
-    x_macro_hat = (x_macro - x_center.reshape(1, 3)) / float(l_ref)
-    ip_xyz_hat = (ip_xyz - x_center.reshape(1, 3)) / float(l_ref)
-    ip_j_hat = ip_j / float(l_ref)
-    ip_invj_hat = ip_invj * float(l_ref)
-    ip_detj_hat = ip_detj / (float(l_ref) ** 3)
-    q_stack = stack_frames_from_ip_j(ip_j)
+    geom_map = GeometryMap(
+        x_macro,
+        css8_connectivity_zero_based(nx=nx, ny=ny),
+        cell_type="CSS8",
+        detj_scale_dim=3,
+        frame_mode="shell-normal",
+    )
+    local_geom, local_geom_names, trunk, trunk_names, geom_fields = geom_map.build_trunk_features(point_table)
+    physical_fields = geom_map.physical_point_fields(geom_fields)
+    l_ref = float(geom_map.L_ref)
+    x_center = geom_map.center
+    x_span = geom_map.span
+    x_macro_hat = geom_map.X_hat
+    ip_xyz_hat = geom_fields["x_hat"]
+    ip_j_hat = geom_fields["J_hat"]
+    ip_invj_hat = geom_fields["invJ_hat"]
+    ip_detj_hat = geom_fields["detJ_hat"]
+    q_stack = geom_fields["Q"]
     t_eps_from_abq_stack, t_eps_to_abq_stack = strain_transform_matrices(q_stack)
 
     q_useful = apply_t_q(q48_raw, t_q)
@@ -267,20 +265,16 @@ def build_one(path: Path, out_root: Path, *, strict: bool, tol: float, nx: int, 
     b_local_raw = apply_t_eps_to_b(t_eps_from_abq_stack, b_raw)
     b_local_useful_stack_hat = float(l_ref) * right_multiply_t_q_transpose(b_local_raw, t_q)
 
-    geometry_global_hat, geometry_global_names = build_geometry_global_hat(
-        x_macro_hat=x_macro_hat,
-        span_hat=x_span / float(l_ref),
-        shape4=shape4,
+    geometry_global_hat, geometry_global_names = geom_map.build_global_features(
+        shape_params=shape4,
+        shape_prefix="shape4",
     )
-    local_geom, local_geom_names, trunk, trunk_names = local_geometry_features(
-        ip_macro_xi=ip_macro_xi,
-        ip_local_rst=ip_local_rst,
-        ip_xyz_hat=ip_xyz_hat,
-        q_stack=q_stack,
-        ip_j_hat=ip_j_hat,
-        ip_invj_hat=ip_invj_hat,
-        ip_detj_hat=ip_detj_hat,
-    )
+    source_geometry_diffs = {
+        "source_ip_xyz_vs_geometry_map_rel": rel_norm(ip_xyz - physical_fields["ip_xyz"], physical_fields["ip_xyz"]),
+        "source_ip_J_vs_geometry_map_rel": rel_norm(ip_j - physical_fields["ip_J"], physical_fields["ip_J"]),
+        "source_ip_invJ_vs_geometry_map_rel": rel_norm(ip_invj - physical_fields["ip_invJ"], physical_fields["ip_invJ"]),
+        "source_ip_detJ_vs_geometry_map_rel": rel_norm(ip_detj - physical_fields["ip_detJ"], physical_fields["ip_detJ"]),
+    }
 
     audit = audit_arrays(
         q48_raw=q48_raw,
@@ -293,11 +287,11 @@ def build_one(path: Path, out_root: Path, *, strict: bool, tol: float, nx: int, 
         t_q_hat=t_q_hat,
         t_eps_to_abq_stack=t_eps_to_abq_stack,
         l_ref=float(l_ref),
-        ip_j=ip_j,
+        ip_j=physical_fields["ip_J"],
         ip_j_hat=ip_j_hat,
-        ip_invj=ip_invj,
+        ip_invj=physical_fields["ip_invJ"],
         ip_invj_hat=ip_invj_hat,
-        ip_detj=ip_detj,
+        ip_detj=physical_fields["ip_detJ"],
         ip_detj_hat=ip_detj_hat,
         q_stack=q_stack,
         strict=strict,
@@ -315,8 +309,10 @@ def build_one(path: Path, out_root: Path, *, strict: bool, tol: float, nx: int, 
         "ad_target": "dLE_local_stack/dq_useful_hat",
         "raw_backprojection": "B_raw_hat = T_eps_to_abq_stack @ B_local_useful_stack_hat @ (T_q_raw_to_useful / L_ref)",
         "preprocess_B": "B_local_useful_stack_hat = L_ref * T_eps_from_abq_stack @ B_raw @ T_q_raw_to_useful.T",
-        "L_ref_definition": "max axis-aligned span of X_macro",
-        "Q_stack_definition": "columns [e1,e2,e3], e3=normalize(dX/dt)",
+        "geometry_feature_source": "GeometryMap(X_ref=X_macro, conn=CSS8, point_table=[cell_id,rst,xi_macro])",
+        "L_ref_definition": "GeometryMap max axis-aligned span of X_ref",
+        "Q_stack_definition": "reference shell-normal frame: e1=normalize(dX_hat/dr), e3=normalize(dX_hat/dr x dX_hat/ds), e2=e3 x e1",
+        "geometry_scaling": "X_hat=(X_ref-X_center)/L_ref, q_hat=q/L_ref, J_hat=J/L_ref, invJ_hat=L_ref*invJ, detJ_hat=detJ/L_ref^3, B_hat=L_ref*B_phys",
         "model_visible_fields": list(MODEL_VISIBLE_FIELDS),
         "audit_postprocess_only_fields": list(AUDIT_POSTPROCESS_FIELDS),
         "trained_model": False,
@@ -355,13 +351,13 @@ def build_one(path: Path, out_root: Path, *, strict: bool, tol: float, nx: int, 
         "X_center": x_center.astype(np.float64),
         "X_span": x_span.astype(np.float64),
         "L_ref": np.asarray(float(l_ref), dtype=np.float64),
-        "ip_J": ip_j.astype(np.float64),
+        "ip_J": physical_fields["ip_J"].astype(np.float64),
         "ip_J_hat": ip_j_hat.astype(np.float64),
-        "ip_invJ": ip_invj.astype(np.float64),
+        "ip_invJ": physical_fields["ip_invJ"].astype(np.float64),
         "ip_invJ_hat": ip_invj_hat.astype(np.float64),
-        "ip_detJ": ip_detj.astype(np.float64),
+        "ip_detJ": physical_fields["ip_detJ"].astype(np.float64),
         "ip_detJ_hat": ip_detj_hat.astype(np.float64),
-        "ip_xyz": ip_xyz.astype(np.float64),
+        "ip_xyz": physical_fields["ip_xyz"].astype(np.float64),
         "ip_xyz_hat": ip_xyz_hat.astype(np.float64),
         "css8_row_map": row_map.astype(np.float64),
         "case_id": np.asarray(case_id, dtype=np.int64),
@@ -378,6 +374,8 @@ def build_one(path: Path, out_root: Path, *, strict: bool, tol: float, nx: int, 
         "model_derivative": np.asarray("dLE_local_stack/dq_useful_hat", dtype=object),
         "raw_backprojection": np.asarray(metadata["raw_backprojection"], dtype=object),
         "preprocess_B_formula": np.asarray(metadata["preprocess_B"], dtype=object),
+        "geometry_feature_source": np.asarray(metadata["geometry_feature_source"], dtype=object),
+        "geometry_scaling": np.asarray(metadata["geometry_scaling"], dtype=object),
         "L_ref_definition": np.asarray(metadata["L_ref_definition"], dtype=object),
         "Q_stack_definition": np.asarray(metadata["Q_stack_definition"], dtype=object),
         "model_visible_fields": np.asarray(MODEL_VISIBLE_FIELDS, dtype=object),
@@ -410,6 +408,7 @@ def build_one(path: Path, out_root: Path, *, strict: bool, tol: float, nx: int, 
         "model_visible_fields": list(MODEL_VISIBLE_FIELDS),
         "audit_postprocess_only_fields": list(AUDIT_POSTPROCESS_FIELDS),
         "strict_requested": bool(strict),
+        **source_geometry_diffs,
         **audit,
         "trained_model": False,
         "used_old_true176_labels": False,

@@ -175,8 +175,9 @@ def audit_one(path: Path, *, strict: bool, tol: float) -> dict[str, Any]:
         t_roundtrip_local = np.einsum("pab,pbc->pac", t_eps_from_abq_stack, t_eps_to_abq_stack)
         qtq = np.einsum("pji,pjk->pik", q_stack, q_stack)
         q_det = np.linalg.det(q_stack)
-        gt_unit = ip_j[:, 2, :] / np.linalg.norm(ip_j[:, 2, :], axis=1, keepdims=True)
-        stack_e3_dot_gt = np.einsum("pi,pi->p", q_stack[:, :, 2], gt_unit)
+        normal = np.cross(ip_j[:, 0, :], ip_j[:, 1, :])
+        normal_unit = normal / np.linalg.norm(normal, axis=1, keepdims=True)
+        stack_e3_dot_normal = np.einsum("pi,pi->p", q_stack[:, :, 2], normal_unit)
         det_from_j = np.linalg.det(ip_j)
 
         metrics = {
@@ -193,7 +194,7 @@ def audit_one(path: Path, *, strict: bool, tol: float) -> dict[str, Any]:
             "Q_stack_orthonormal_max": max_abs(qtq - np.eye(3)),
             "Q_stack_det_min": float(np.min(q_det)),
             "Q_stack_det_max": float(np.max(q_det)),
-            "Q_stack_e3_dot_g_t_min": float(np.min(stack_e3_dot_gt)),
+            "Q_stack_e3_dot_reference_normal_min": float(np.min(stack_e3_dot_normal)),
             "ip_J_hat_scaling_rel": rel_norm(ip_j_hat - ip_j / l_ref, ip_j / l_ref),
             "ip_invJ_hat_scaling_rel": rel_norm(ip_invj_hat - ip_invj * l_ref, ip_invj * l_ref),
             "ip_detJ_hat_scaling_rel": rel_norm(ip_detj_hat - ip_detj / (l_ref**3), ip_detj / (l_ref**3)),
@@ -219,8 +220,8 @@ def audit_one(path: Path, *, strict: bool, tol: float) -> dict[str, Any]:
                 failures.append("Q_stack_not_orthonormal")
             if metrics["Q_stack_det_min"] < 1.0 - 5.0e-12:
                 failures.append("Q_stack_not_right_handed")
-            if metrics["Q_stack_e3_dot_g_t_min"] < 1.0 - 1.0e-12:
-                failures.append("Q_stack_e3_not_aligned_to_g_t")
+            if metrics["Q_stack_e3_dot_reference_normal_min"] < 1.0 - 1.0e-12:
+                failures.append("Q_stack_e3_not_aligned_to_reference_normal")
             if scalar_bool(z["uses_old_true176_labels_as_v3_labels"], False) if "uses_old_true176_labels_as_v3_labels" in z.files else False:
                 failures.append("uses_old_true176_labels_as_v3_labels_true")
             version = scalar_text(z["standard_operator_contract_version"], "unknown")

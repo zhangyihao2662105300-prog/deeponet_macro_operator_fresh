@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import math
 import os
@@ -36,6 +37,329 @@ MODEL_VISIBLE_FIELDS = (
     "LE_local_stack",
     "B_local_useful_stack_hat",
 )
+HEX8_NODE_SIGNS = np.asarray(
+    [
+        [-1.0, -1.0, -1.0],
+        [1.0, -1.0, -1.0],
+        [1.0, 1.0, -1.0],
+        [-1.0, 1.0, -1.0],
+        [-1.0, -1.0, 1.0],
+        [1.0, -1.0, 1.0],
+        [1.0, 1.0, 1.0],
+        [-1.0, 1.0, 1.0],
+    ],
+    dtype=np.float64,
+)
+
+
+@dataclass(frozen=True)
+class PointTable:
+    cell_id: np.ndarray
+    rst: np.ndarray
+    xi_macro: np.ndarray | None = None
+    row_map: np.ndarray | None = None
+
+    def __post_init__(self) -> None:
+        cell_id = np.asarray(self.cell_id, dtype=np.int64).reshape(-1)
+        rst = np.asarray(self.rst, dtype=np.float64)
+        if rst.ndim != 2 or rst.shape[1] != 3:
+            raise ValueError(f"rst must be [P,3], got {rst.shape}")
+        if cell_id.shape[0] != rst.shape[0]:
+            raise ValueError(f"cell_id length {cell_id.shape[0]} does not match rst rows {rst.shape[0]}")
+        if self.xi_macro is not None:
+            xi = np.asarray(self.xi_macro, dtype=np.float64)
+            if xi.shape != rst.shape:
+                raise ValueError(f"xi_macro must match rst shape {rst.shape}, got {xi.shape}")
+            object.__setattr__(self, "xi_macro", xi)
+        if self.row_map is not None:
+            object.__setattr__(self, "row_map", np.asarray(self.row_map, dtype=np.float64))
+        object.__setattr__(self, "cell_id", cell_id)
+        object.__setattr__(self, "rst", rst)
+
+
+def hex8_shape(rst: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return Hex8 shape values and dN/d(r,s,t) for one parent-domain point."""
+
+    r, s, t = [float(v) for v in np.asarray(rst, dtype=np.float64).reshape(3)]
+    n = np.empty(8, dtype=np.float64)
+    dndr = np.empty((8, 3), dtype=np.float64)
+    for a, (ra, sa, ta) in enumerate(HEX8_NODE_SIGNS):
+        n[a] = 0.125 * (1.0 + ra * r) * (1.0 + sa * s) * (1.0 + ta * t)
+        dndr[a, 0] = 0.125 * ra * (1.0 + sa * s) * (1.0 + ta * t)
+        dndr[a, 1] = 0.125 * sa * (1.0 + ra * r) * (1.0 + ta * t)
+        dndr[a, 2] = 0.125 * ta * (1.0 + ra * r) * (1.0 + sa * s)
+    return n, dndr
+
+
+def geometry_scale(
+    x_ref: np.ndarray,
+    *,
+    center: np.ndarray | None = None,
+    l_ref: float | None = None,
+) -> tuple[float, np.ndarray, np.ndarray]:
+    """Return the single reference-geometry center/span/scale convention."""
+
+    x = np.asarray(x_ref, dtype=np.float64).reshape(-1, 3)
+    if center is None or l_ref is None:
+        computed_l_ref, computed_center, span = characteristic_length(x)
+    else:
+        computed_center = np.asarray(center, dtype=np.float64).reshape(3)
+        span = np.max(x, axis=0) - np.min(x, axis=0)
+        computed_l_ref = float(l_ref)
+    if not math.isfinite(computed_l_ref) or computed_l_ref <= 1.0e-14:
+        raise ValueError(f"L_ref must be finite and positive, got {computed_l_ref:g}")
+    return float(computed_l_ref), computed_center.astype(np.float64), span.astype(np.float64)
+
+
+def scale_reference_geometry(
+    x_ref: np.ndarray,
+    *,
+    center: np.ndarray | None = None,
+    l_ref: float | None = None,
+) -> tuple[np.ndarray, float, np.ndarray, np.ndarray]:
+    """Normalize reference coordinates once as X_hat=(X_ref-X_center)/L_ref."""
+
+    l_scale, x_center, x_span = geometry_scale(x_ref, center=center, l_ref=l_ref)
+    x_hat = (np.asarray(x_ref, dtype=np.float64).reshape(-1, 3) - x_center.reshape(1, 3)) / l_scale
+    return x_hat, l_scale, x_center, x_span
+
+
+def css8_connectivity_zero_based(nx: int = 4, ny: int = 4) -> np.ndarray:
+    """Return structured CSS8 subcell connectivity as [nx*ny,8], zero-based."""
+
+    nx_i = int(nx)
+    ny_i = int(ny)
+    if nx_i < 1 or ny_i < 1:
+        raise ValueError("nx and ny must be positive")
+
+    def node_id(i: int, j: int, k: int) -> int:
+        return int(k) * (nx_i + 1) * (ny_i + 1) + int(j) * (nx_i + 1) + int(i)
+
+    cells: list[list[int]] = []
+    for j in range(ny_i):
+        for i in range(nx_i):
+            cells.append([
+                node_id(i, j, 0),
+                node_id(i + 1, j, 0),
+                node_id(i + 1, j + 1, 0),
+                node_id(i, j + 1, 0),
+                node_id(i, j, 1),
+                node_id(i + 1, j, 1),
+                node_id(i + 1, j + 1, 1),
+                node_id(i, j + 1, 1),
+            ])
+    return np.asarray(cells, dtype=np.int64)
+
+
+def css8_point_table(nx: int = 4, ny: int = 4) -> PointTable:
+    """Return the two-level CSS8 point table: macro xi plus local rst."""
+
+    row, ip_macro_xi, ip_local_rst = css8_standard_coordinates(nx=nx, ny=ny)
+    cell_id = row[:, 1].astype(np.int64) - 1
+    return PointTable(cell_id=cell_id, rst=ip_local_rst, xi_macro=ip_macro_xi, row_map=row)
+
+
+def shell_normal_frame_from_j(jmat: np.ndarray) -> np.ndarray:
+    """Return Q columns [e1,e2,e3] from the reference surface normal."""
+
+    j = np.asarray(jmat, dtype=np.float64).reshape(3, 3)
+    g1, g2, g3 = j[0], j[1], j[2]
+    e1 = normalize(g1)
+    normal = np.cross(g1, g2)
+    if float(np.linalg.norm(normal)) <= 1.0e-14:
+        normal = g3
+    e3 = normalize(normal)
+    e2 = normalize(np.cross(e3, e1))
+    e1 = normalize(np.cross(e2, e3))
+    return np.stack([e1, e2, e3], axis=1)
+
+
+def gram_schmidt_frame_from_j(jmat: np.ndarray) -> np.ndarray:
+    """Return an orthonormal frame from the reference Jacobian rows."""
+
+    j = np.asarray(jmat, dtype=np.float64).reshape(3, 3)
+    g1, g2, _g3 = j[0], j[1], j[2]
+    e1 = normalize(g1)
+    g2_projected = g2 - float(np.dot(g2, e1)) * e1
+    e2 = normalize(g2_projected)
+    e3 = normalize(np.cross(e1, e2))
+    return np.stack([e1, e2, e3], axis=1)
+
+
+def reference_frame_from_j(jmat: np.ndarray, *, mode: str) -> np.ndarray:
+    key = str(mode).strip().lower().replace("_", "-")
+    if key in {"shell-normal", "surface-normal", "shell"}:
+        return shell_normal_frame_from_j(jmat)
+    if key in {"stack-director", "css8-stack", "director"}:
+        return stack_director_frame_from_j(jmat)
+    if key in {"gram-schmidt", "hex8", "solid"}:
+        return gram_schmidt_frame_from_j(jmat)
+    raise ValueError(f"unknown reference frame mode {mode!r}")
+
+
+class GeometryMap:
+    """Reference-configuration isoparametric geometry map.
+
+    The map owns the single normalization convention for reference geometry and
+    builds both point-level trunk features and global geometry features from
+    ``X_hat``.  It does not depend on the current displacement state ``q``.
+    """
+
+    def __init__(
+        self,
+        X_ref: np.ndarray,
+        conn: np.ndarray,
+        *,
+        cell_type: str = "HEX8",
+        center: np.ndarray | None = None,
+        L_ref: float | None = None,
+        detj_scale_dim: int = 3,
+        frame_mode: str = "shell-normal",
+    ) -> None:
+        self.X_ref = np.asarray(X_ref, dtype=np.float64).reshape(-1, 3)
+        self.conn = np.asarray(conn, dtype=np.int64)
+        if self.conn.ndim != 2:
+            raise ValueError(f"conn must be [n_cell,n_enode], got {self.conn.shape}")
+        if int(np.min(self.conn)) < 0 or int(np.max(self.conn)) >= self.X_ref.shape[0]:
+            raise ValueError("conn indices must be zero-based and within X_ref")
+        self.cell_type = str(cell_type).upper().replace("-", "_")
+        if self.cell_type not in {"HEX8", "CSS8", "SHELL_LIKE"}:
+            raise ValueError("cell_type must be HEX8, CSS8, or shell-like")
+        if self.conn.shape[1] != 8:
+            raise ValueError(f"{self.cell_type} expects 8-node cells, got {self.conn.shape[1]}")
+        self.X_hat, self.L_ref, self.center, self.span = scale_reference_geometry(
+            self.X_ref,
+            center=center,
+            l_ref=L_ref,
+        )
+        self.span_hat = self.span / float(self.L_ref)
+        self.detj_scale_dim = int(detj_scale_dim)
+        self.frame_mode = str(frame_mode)
+
+    def shape(self, rst: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        return hex8_shape(rst)
+
+    def eval_point(
+        self,
+        cell_id: int,
+        rst: np.ndarray,
+        xi_macro: np.ndarray | None = None,
+    ) -> dict[str, np.ndarray | float | int]:
+        cell = int(cell_id)
+        if cell < 0 or cell >= self.conn.shape[0]:
+            raise IndexError(f"cell_id {cell} outside [0,{self.conn.shape[0]})")
+        n, dndr = self.shape(rst)
+        nodes_hat = self.X_hat[self.conn[cell]]
+        x_hat = np.asarray(n @ nodes_hat, dtype=np.float64)
+        j_hat = np.asarray(dndr.T @ nodes_hat, dtype=np.float64)
+        invj_hat = np.linalg.inv(j_hat)
+        detj_hat = float(np.linalg.det(j_hat))
+        q_ref = reference_frame_from_j(j_hat, mode=self.frame_mode)
+        metric = np.einsum("ij,kj->ik", j_hat, j_hat)
+        thickness_hat = 2.0 * float(np.linalg.norm(j_hat[2]))
+        return {
+            "cell_id": cell,
+            "rst": np.asarray(rst, dtype=np.float64).reshape(3),
+            "xi_macro": None if xi_macro is None else np.asarray(xi_macro, dtype=np.float64).reshape(3),
+            "x_hat": x_hat,
+            "J_hat": j_hat,
+            "invJ_hat": invj_hat,
+            "detJ_hat": detj_hat,
+            "Q": q_ref,
+            "metric_hat": metric,
+            "thickness_hat": thickness_hat,
+            "log_abs_detJ_hat": float(np.log(max(abs(detj_hat), 1.0e-30))),
+        }
+
+    def eval_points(self, point_table: PointTable | dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        table = coerce_point_table(point_table)
+        point_count = int(table.rst.shape[0])
+        x_hat = np.empty((point_count, 3), dtype=np.float64)
+        j_hat = np.empty((point_count, 3, 3), dtype=np.float64)
+        invj_hat = np.empty((point_count, 3, 3), dtype=np.float64)
+        detj_hat = np.empty(point_count, dtype=np.float64)
+        q_ref = np.empty((point_count, 3, 3), dtype=np.float64)
+        metric = np.empty((point_count, 3, 3), dtype=np.float64)
+        thickness = np.empty(point_count, dtype=np.float64)
+        for idx in range(point_count):
+            xi = None if table.xi_macro is None else table.xi_macro[idx]
+            rec = self.eval_point(int(table.cell_id[idx]), table.rst[idx], xi_macro=xi)
+            x_hat[idx] = np.asarray(rec["x_hat"], dtype=np.float64)
+            j_hat[idx] = np.asarray(rec["J_hat"], dtype=np.float64)
+            invj_hat[idx] = np.asarray(rec["invJ_hat"], dtype=np.float64)
+            detj_hat[idx] = float(rec["detJ_hat"])
+            q_ref[idx] = np.asarray(rec["Q"], dtype=np.float64)
+            metric[idx] = np.asarray(rec["metric_hat"], dtype=np.float64)
+            thickness[idx] = float(rec["thickness_hat"])
+        return {
+            "cell_id": table.cell_id.astype(np.int64),
+            "rst": table.rst.astype(np.float64),
+            "xi_macro": None if table.xi_macro is None else table.xi_macro.astype(np.float64),
+            "x_hat": x_hat,
+            "J_hat": j_hat,
+            "invJ_hat": invj_hat,
+            "detJ_hat": detj_hat,
+            "Q": q_ref,
+            "metric_hat": metric,
+            "thickness_hat": thickness,
+            "log_abs_detJ_hat": np.log(np.maximum(np.abs(detj_hat), 1.0e-30)),
+        }
+
+    def build_trunk_features(
+        self,
+        point_table: PointTable | dict[str, np.ndarray],
+    ) -> tuple[np.ndarray, list[str], np.ndarray, list[str], dict[str, np.ndarray]]:
+        table = coerce_point_table(point_table)
+        fields = self.eval_points(table)
+        local, local_names, trunk, trunk_names = local_geometry_features(
+            ip_macro_xi=np.zeros_like(table.rst) if table.xi_macro is None else table.xi_macro,
+            ip_local_rst=table.rst,
+            ip_xyz_hat=fields["x_hat"],
+            q_stack=fields["Q"],
+            ip_j_hat=fields["J_hat"],
+            ip_invj_hat=fields["invJ_hat"],
+            ip_detj_hat=fields["detJ_hat"],
+        )
+        return local, local_names, trunk, trunk_names, fields
+
+    def build_global_features(
+        self,
+        *,
+        shape_params: np.ndarray | None = None,
+        prefix: str = "X_macro_hat",
+        shape_prefix: str = "shape_param",
+    ) -> tuple[np.ndarray, list[str]]:
+        parts = [self.X_hat.reshape(-1)]
+        names = [f"{prefix}_{idx}_{axis}" for idx in range(self.X_hat.shape[0]) for axis in ("x", "y", "z")]
+        parts.append(self.span_hat.reshape(3))
+        names.extend(["span_hat_x", "span_hat_y", "span_hat_z"])
+        if shape_params is not None:
+            shape = np.asarray(shape_params, dtype=np.float64).reshape(-1)
+            parts.append(shape)
+            names.extend([f"{shape_prefix}_{idx}" for idx in range(shape.shape[0])])
+        return np.concatenate(parts, axis=0), names
+
+    def physical_point_fields(self, fields: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        l_ref = float(self.L_ref)
+        return {
+            "ip_xyz": fields["x_hat"] * l_ref + self.center.reshape(1, 3),
+            "ip_J": fields["J_hat"] * l_ref,
+            "ip_invJ": fields["invJ_hat"] / l_ref,
+            "ip_detJ": fields["detJ_hat"] * (l_ref ** self.detj_scale_dim),
+        }
+
+
+def coerce_point_table(point_table: PointTable | dict[str, np.ndarray]) -> PointTable:
+    if isinstance(point_table, PointTable):
+        return point_table
+    if not isinstance(point_table, dict):
+        raise TypeError("point_table must be a PointTable or dict")
+    return PointTable(
+        cell_id=np.asarray(point_table["cell_id"], dtype=np.int64),
+        rst=np.asarray(point_table["rst"], dtype=np.float64),
+        xi_macro=None if point_table.get("xi_macro") is None else np.asarray(point_table["xi_macro"], dtype=np.float64),
+        row_map=None if point_table.get("row_map") is None else np.asarray(point_table["row_map"], dtype=np.float64),
+    )
 AUDIT_POSTPROCESS_FIELDS = (
     "q48_raw",
     "q_useful",

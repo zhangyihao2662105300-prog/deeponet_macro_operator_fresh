@@ -8,10 +8,10 @@ This is the clean LE-primary gate for the v3 standard-operator route:
     output: LE_local_stack frame
     AD-B:   dLE_local_stack / dq_useful_hat
 
-The model has no direct B head, no radial loss, and no V + B @ q_perp
-decomposition.  It uses a DeepONet-style branch/trunk factorization where the
-branch consumes the normalized useful q plus global geometry, and the trunk
-consumes normalized point features.
+The default model has no direct B head, no radial loss, and no V + B @ q_perp
+decomposition.  It uses an FE-like linear-in-q baseline inside the LE operator
+plus a DeepONet residual.  The legacy pure DeepONet form is still available as
+an explicit ablation.
 
 The trainer is a smoke/gate script.  It writes JSON/CSV metrics but no
 checkpoint and makes no held-out generalization claim.
@@ -384,15 +384,31 @@ def make_tensors(data_np: dict[str, Any], *, device: torch.device) -> dict[str, 
 
 
 class MLP(nn.Module):
-    def __init__(self, in_dim: int, out_dim: int, hidden: int, depth: int) -> None:
+    def __init__(
+        self,
+        in_dim: int,
+        out_dim: int,
+        hidden: int,
+        depth: int,
+        *,
+        zero_last: bool = False,
+    ) -> None:
         super().__init__()
         if int(depth) < 1:
-            self.net = nn.Linear(in_dim, out_dim)
+            layer = nn.Linear(in_dim, out_dim)
+            if bool(zero_last):
+                nn.init.zeros_(layer.weight)
+                nn.init.zeros_(layer.bias)
+            self.net = layer
             return
         layers: list[nn.Module] = [nn.Linear(in_dim, hidden), nn.Tanh()]
         for _ in range(int(depth) - 1):
             layers.extend([nn.Linear(hidden, hidden), nn.Tanh()])
-        layers.append(nn.Linear(hidden, out_dim))
+        final = nn.Linear(hidden, out_dim)
+        if bool(zero_last):
+            nn.init.zeros_(final.weight)
+            nn.init.zeros_(final.bias)
+        layers.append(final)
         self.net = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -420,7 +436,15 @@ class LEPrimaryFullDirectionOperator(nn.Module):
         self.trunk = MLP(int(trunk_dim), out_dim, int(hidden), int(depth))
         self.bias = nn.Parameter(torch.zeros(self.strain_dim))
 
-    def forward(self, q_norm: torch.Tensor, geom_norm: torch.Tensor, trunk_norm: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        q_norm: torch.Tensor,
+        geom_norm: torch.Tensor,
+        trunk_norm: torch.Tensor,
+        *,
+        point_idx: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        del point_idx
         if q_norm.ndim == 1:
             q_norm = q_norm.unsqueeze(0)
         batch = int(q_norm.shape[0])
@@ -436,19 +460,131 @@ class LEPrimaryFullDirectionOperator(nn.Module):
         return le + self.bias.view(1, 1, self.strain_dim)
 
 
+class FELinearResidualLEOperator(nn.Module):
+    """LE operator with an explicit FE-like linear B baseline.
+
+    The model keeps the v3 output in unnormalized local LE coordinates but
+    writes the dominant q-dependence as
+
+        LE_local = B_base_hat(point_features) @ (q_useful_hat - mean_q) + residual.
+
+    ``B_base_hat`` is kept directly in the v3 physical/hat derivative scale.
+    The forward pass multiplies q_norm by q_std internally, so AD-B evaluation
+    still reports dLE/dq_useful_hat after dividing dLE/dq_norm by q_std.
+    """
+
+    def __init__(
+        self,
+        *,
+        q_dim: int,
+        geom_dim: int,
+        trunk_dim: int,
+        point_count: int,
+        hidden: int = 256,
+        basis: int = 96,
+        depth: int = 4,
+        q_std: torch.Tensor,
+        static_b_hat_init: torch.Tensor | None = None,
+        residual_scale: float = 1.0,
+        baseline_scale: float = 1.0,
+        train_static_baseline: bool = True,
+        train_point_baseline: bool = True,
+        zero_init_residual: bool = True,
+    ) -> None:
+        super().__init__()
+        self.q_dim = int(q_dim)
+        self.geom_dim = int(geom_dim)
+        self.trunk_dim = int(trunk_dim)
+        self.point_count = int(point_count)
+        self.hidden = int(hidden)
+        self.basis = int(basis)
+        self.strain_dim = 6
+        self.residual_scale = float(residual_scale)
+        self.baseline_scale = float(baseline_scale)
+        self.train_point_baseline = bool(train_point_baseline)
+        self.zero_init_residual = bool(zero_init_residual)
+        self.register_buffer("q_std", torch.as_tensor(q_std, dtype=torch.float32).reshape(self.q_dim))
+        out_dim = self.strain_dim * self.basis
+        self.branch = MLP(
+            self.q_dim + self.geom_dim,
+            out_dim,
+            int(hidden),
+            int(depth),
+            zero_last=self.zero_init_residual,
+        )
+        self.trunk = MLP(self.trunk_dim, out_dim, int(hidden), int(depth))
+        self.point_b_net = MLP(
+            self.trunk_dim,
+            self.strain_dim * self.q_dim,
+            int(hidden),
+            int(depth),
+            zero_last=True,
+        )
+        for param in self.point_b_net.parameters():
+            param.requires_grad_(self.train_point_baseline)
+        self.bias = nn.Parameter(torch.zeros(self.strain_dim))
+        if static_b_hat_init is None:
+            static = torch.zeros(self.point_count, self.strain_dim, self.q_dim, dtype=torch.float32)
+        else:
+            static = torch.as_tensor(static_b_hat_init, dtype=torch.float32).reshape(
+                self.point_count,
+                self.strain_dim,
+                self.q_dim,
+            )
+        self.static_b_hat = nn.Parameter(static, requires_grad=bool(train_static_baseline))
+
+    def linear_b_hat(self, trunk_norm: torch.Tensor, *, point_idx: torch.Tensor | None = None) -> torch.Tensor:
+        delta = self.point_b_net(trunk_norm).reshape(int(trunk_norm.shape[0]), self.strain_dim, self.q_dim)
+        if point_idx is None:
+            if int(trunk_norm.shape[0]) != self.point_count:
+                raise ValueError("point_idx is required when evaluating a subset of trunk points")
+            static = self.static_b_hat
+        else:
+            static = self.static_b_hat.index_select(0, point_idx)
+        return static + self.baseline_scale * delta
+
+    def linear_b_norm(self, trunk_norm: torch.Tensor, *, point_idx: torch.Tensor | None = None) -> torch.Tensor:
+        return self.linear_b_hat(trunk_norm, point_idx=point_idx) * self.q_std.reshape(1, 1, -1)
+
+    def forward(
+        self,
+        q_norm: torch.Tensor,
+        geom_norm: torch.Tensor,
+        trunk_norm: torch.Tensor,
+        *,
+        point_idx: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if q_norm.ndim == 1:
+            q_norm = q_norm.unsqueeze(0)
+        batch = int(q_norm.shape[0])
+        if geom_norm.ndim == 1:
+            geom_norm = geom_norm.unsqueeze(0)
+        if int(geom_norm.shape[0]) == 1 and batch != 1:
+            geom_norm = geom_norm.expand(batch, -1)
+        geom_flat = geom_norm.reshape(batch, -1)
+        q_delta_hat = q_norm * self.q_std.reshape(1, -1)
+        branch_in = torch.cat([q_delta_hat, geom_flat], dim=-1)
+        b_base = self.linear_b_hat(trunk_norm, point_idx=point_idx)
+        linear = torch.einsum("pak,nk->npa", b_base, q_delta_hat)
+        b = self.branch(branch_in).reshape(batch, self.strain_dim, self.basis)
+        t = self.trunk(trunk_norm).reshape(int(trunk_norm.shape[0]), self.strain_dim, self.basis)
+        residual = torch.einsum("nak,pak->npa", b, t) / (self.basis ** 0.5)
+        return linear + self.residual_scale * residual + self.bias.view(1, 1, self.strain_dim)
+
+
 def forward_sample(
-    model: LEPrimaryFullDirectionOperator,
+    model: nn.Module,
     q_norm: torch.Tensor,
     geom_norm: torch.Tensor,
     trunk_norm: torch.Tensor,
     point_idx: torch.Tensor | None = None,
 ) -> torch.Tensor:
     trunk_use = trunk_norm if point_idx is None else trunk_norm.index_select(0, point_idx)
-    return model(q_norm, geom_norm, trunk_use)
+    return model(q_norm, geom_norm, trunk_use, point_idx=point_idx)
 
 
 def jacobian_sample(
-    model: LEPrimaryFullDirectionOperator,
+    model: nn.Module,
     q_norm: torch.Tensor,
     geom_norm: torch.Tensor,
     trunk_norm: torch.Tensor,
@@ -460,6 +596,100 @@ def jacobian_sample(
 
     jac_norm = jacrev(one)(q_norm)
     return jac_norm / q_std.reshape(1, 1, -1)
+
+
+def component_scaled_b_loss(
+    pred_b_hat: torch.Tensor,
+    true_b_hat: torch.Tensor,
+    b_scale: torch.Tensor,
+) -> torch.Tensor:
+    return torch.mean(((pred_b_hat - true_b_hat) / b_scale) ** 2)
+
+
+def physical_action_b_loss(
+    pred_b_hat: torch.Tensor,
+    true_b_hat: torch.Tensor,
+    *,
+    b_global_scale: torch.Tensor,
+    rel_eps_scale: float,
+    abs_weight: float,
+    rel_weight: float,
+    action_weight: float,
+    action_directions: int,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    if pred_b_hat.ndim == 3:
+        pred = pred_b_hat.unsqueeze(0)
+        true = true_b_hat.unsqueeze(0)
+    elif pred_b_hat.ndim == 4:
+        pred = pred_b_hat
+        true = true_b_hat
+    else:
+        raise ValueError(f"pred_b_hat must be [P,6,Q] or [N,P,6,Q], got {tuple(pred_b_hat.shape)}")
+    b_scale = torch.clamp(b_global_scale.to(dtype=pred.dtype, device=pred.device), min=1.0e-30)
+    while b_scale.ndim < pred.ndim:
+        b_scale = b_scale.reshape(*b_scale.shape, 1)
+    eps_b = torch.clamp(float(rel_eps_scale) * b_scale, min=1.0e-30)
+    err = pred - true
+    abs_loss = torch.mean((err / b_scale) ** 2)
+    rel_eps_loss = torch.mean((err / (torch.abs(true) + eps_b)) ** 2)
+    if int(action_directions) > 0 and int(pred.shape[-1]) > 0:
+        dirs = torch.randn(
+            (int(pred.shape[0]), int(action_directions), int(pred.shape[-1])),
+            dtype=pred.dtype,
+            device=pred.device,
+        )
+        dirs = dirs / torch.clamp(torch.linalg.vector_norm(dirs, dim=-1, keepdim=True), min=1.0e-12)
+        err_v = torch.einsum("npak,ndk->npda", err, dirs)
+        true_v = torch.einsum("npak,ndk->npda", true, dirs)
+        action_loss = torch.mean((err_v * err_v) / (true_v * true_v + eps_b * eps_b))
+    else:
+        action_loss = torch.zeros((), dtype=pred.dtype, device=pred.device)
+    total = float(abs_weight) * abs_loss + float(rel_weight) * rel_eps_loss + float(action_weight) * action_loss
+    return total, {
+        "b_loss_abs_normed_mse": abs_loss,
+        "b_loss_rel_eps_mse": rel_eps_loss,
+        "b_loss_action_mse": action_loss,
+    }
+
+
+def b_loss_objective(
+    pred_b_hat: torch.Tensor,
+    true_b_hat: torch.Tensor,
+    *,
+    b_scale: torch.Tensor,
+    b_global_scale: torch.Tensor,
+    mode: str,
+    physical_aux_weight: float,
+    rel_eps_scale: float,
+    abs_weight: float,
+    rel_weight: float,
+    action_weight: float,
+    action_directions: int,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    component_loss = component_scaled_b_loss(pred_b_hat, true_b_hat, b_scale)
+    physical_loss, parts = physical_action_b_loss(
+        pred_b_hat,
+        true_b_hat,
+        b_global_scale=b_global_scale,
+        rel_eps_scale=rel_eps_scale,
+        abs_weight=abs_weight,
+        rel_weight=rel_weight,
+        action_weight=action_weight,
+        action_directions=action_directions,
+    )
+    if str(mode) == "component":
+        total = component_loss
+    elif str(mode) == "physical":
+        total = physical_loss
+    elif str(mode) == "component-plus-physical":
+        total = component_loss + float(physical_aux_weight) * physical_loss
+    else:
+        raise ValueError(f"unknown B loss mode: {mode}")
+    return total, {
+        "b_loss_component_scaled_mse": component_loss,
+        "b_loss_physical_objective": physical_loss,
+        **parts,
+    }
 
 
 def raw_project_b(ad_b_local_hat: torch.Tensor, t_eps: torch.Tensor, t_q_hat: torch.Tensor) -> torch.Tensor:
@@ -514,7 +744,7 @@ def accum_to_metrics(acc: dict[str, torch.Tensor]) -> dict[str, float]:
 
 
 def evaluate(
-    model: LEPrimaryFullDirectionOperator,
+    model: nn.Module,
     data: dict[str, torch.Tensor],
     case_ids: list[int],
     *,
@@ -619,6 +849,14 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "loss",
         "le_loss",
         "b_loss",
+        "b_loss_component_scaled_mse",
+        "b_loss_physical_objective",
+        "b_loss_abs_normed_mse",
+        "b_loss_rel_eps_mse",
+        "b_loss_action_mse",
+        "baseline_b_loss",
+        "baseline_b_loss_component_scaled_mse",
+        "baseline_b_loss_physical_objective",
         "b_weight_eff",
         "train_LE_local_stack_rel",
         "train_AD_B_local_useful_hat_rel",
@@ -643,11 +881,12 @@ def make_component_scales(
     *,
     eps: float = 1.0e-12,
     b_floor_frac: float = 1.0e-4,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     device = data["q"].device
     le_value = data["le_value"]
     le_scales: list[torch.Tensor] = []
     b_scales: list[torch.Tensor] = []
+    b_global_scales: list[torch.Tensor] = []
     for case_id in case_ids:
         mask = data["sample_case_ids"] == int(case_id)
         le_mask = data["le_sample_case_ids"] == int(case_id)
@@ -658,7 +897,42 @@ def make_component_scales(
         b_scale = torch.maximum(b_scale, b_floor)
         le_scales.append(torch.clamp(le_scale, min=float(eps)).reshape(1, 6))
         b_scales.append(torch.clamp(b_scale, min=float(eps)).reshape(1, 6, 42))
-    return torch.stack(le_scales, dim=0).to(device), torch.stack(b_scales, dim=0).to(device)
+        b_global_scales.append(torch.clamp(b_global_rms, min=float(eps)).reshape(()))
+    return (
+        torch.stack(le_scales, dim=0).to(device),
+        torch.stack(b_scales, dim=0).to(device),
+        torch.stack(b_global_scales, dim=0).to(device),
+    )
+
+
+def static_b_hat_init(data: dict[str, torch.Tensor]) -> torch.Tensor:
+    return torch.mean(data["b"], dim=0)
+
+
+def build_model(args: argparse.Namespace, data: dict[str, torch.Tensor]) -> nn.Module:
+    common = {
+        "q_dim": int(data["q"].shape[1]),
+        "geom_dim": int(data["geom_norm"].shape[1]),
+        "trunk_dim": int(data["trunk_norm_by_case"].shape[2]),
+        "hidden": int(args.hidden),
+        "basis": int(args.basis),
+        "depth": int(args.depth),
+    }
+    if str(args.model_style) == "deeponet":
+        return LEPrimaryFullDirectionOperator(**common)
+    if str(args.model_style) == "fe-linear-residual":
+        return FELinearResidualLEOperator(
+            **common,
+            point_count=int(data["le"].shape[1]),
+            q_std=data["q_std"],
+            static_b_hat_init=static_b_hat_init(data),
+            residual_scale=float(args.residual_scale),
+            baseline_scale=float(args.fe_baseline_scale),
+            train_static_baseline=not bool(args.freeze_static_baseline),
+            train_point_baseline=not bool(args.freeze_fe_point_baseline),
+            zero_init_residual=not bool(args.no_zero_init_residual),
+        )
+    raise ValueError(f"unknown model style: {args.model_style}")
 
 
 def b_weight_for_step(step: int, args: argparse.Namespace) -> float:
@@ -690,14 +964,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     device = torch.device(args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu"))
     data = make_tensors(data_np, device=device)
     case_ids = list(data_np["case_ids"])
-    model = LEPrimaryFullDirectionOperator(
-        q_dim=int(data["q"].shape[1]),
-        geom_dim=int(data["geom_norm"].shape[1]),
-        trunk_dim=int(data["trunk_norm_by_case"].shape[2]),
-        hidden=int(args.hidden),
-        basis=int(args.basis),
-        depth=int(args.depth),
-    ).to(device=device, dtype=torch.float32)
+    model = build_model(args, data).to(device=device, dtype=torch.float32)
     opt = torch.optim.AdamW(model.parameters(), lr=float(args.lr), weight_decay=float(args.weight_decay))
     sample_count = int(data["q"].shape[0])
     le_value_sample_count = int(data["le_value"].shape[0])
@@ -708,9 +975,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     ad_point_batch = min(int(args.ad_point_batch), point_count)
     use_le_loss = float(args.le_weight) != 0.0
     use_ad_loss = float(args.b_weight) != 0.0
-    if not (use_le_loss or use_ad_loss):
-        raise SystemExit("At least one of --le-weight or --b-weight must be non-zero")
-    le_scale_case, b_scale_case = make_component_scales(
+    use_baseline_loss = isinstance(model, FELinearResidualLEOperator) and float(args.baseline_jacobian_weight) != 0.0
+    if not (use_le_loss or use_ad_loss or use_baseline_loss):
+        raise SystemExit("At least one of --le-weight, --b-weight, or --baseline-jacobian-weight must be non-zero")
+    le_scale_case, b_scale_case, b_global_scale_case = make_component_scales(
         data,
         case_ids,
         eps=float(args.scale_eps),
@@ -730,9 +998,18 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         model.train()
         b_weight_eff = b_weight_for_step(step, args)
         sample_idx = torch.randperm(sample_count, device=device)[:sample_batch]
-        losses: list[torch.Tensor] = []
+        le_loss_terms: list[torch.Tensor] = []
+        sample_loss_terms: list[torch.Tensor] = []
         le_terms: list[torch.Tensor] = []
         b_terms: list[torch.Tensor] = []
+        b_component_terms: list[torch.Tensor] = []
+        b_physical_terms: list[torch.Tensor] = []
+        b_abs_terms: list[torch.Tensor] = []
+        b_rel_terms: list[torch.Tensor] = []
+        b_action_terms: list[torch.Tensor] = []
+        baseline_b_terms: list[torch.Tensor] = []
+        baseline_b_component_terms: list[torch.Tensor] = []
+        baseline_b_physical_terms: list[torch.Tensor] = []
         if use_le_loss:
             le_value_idx = torch.randperm(le_value_sample_count, device=device)[:le_value_batch]
             for le_sample_index in le_value_idx.tolist():
@@ -745,7 +1022,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 pred = forward_sample(model, q_norm, geom, trunk, point_idx=le_idx)[0]
                 le_target = data["le_value"][le_sample_index].index_select(0, le_idx)
                 le_loss = torch.mean(((pred - le_target) / le_scale_case[case_pos]) ** 2)
-                losses.append(float(args.le_weight) * le_loss)
+                le_loss_terms.append(le_loss)
                 le_terms.append(le_loss.detach())
         for sample_index in sample_idx.tolist():
             case_id = int(data["sample_case_ids"][sample_index].detach().cpu().item())
@@ -754,15 +1031,60 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             geom = data["geom_norm"][sample_index].reshape(1, -1)
             trunk = data["trunk_norm_by_case"][case_pos]
             sample_loss = torch.zeros((), device=device)
-            if use_ad_loss and b_weight_eff != 0.0:
+            if (use_ad_loss and b_weight_eff != 0.0) or use_baseline_loss:
                 ad_idx = torch.randperm(point_count, device=device)[:ad_point_batch]
                 b_target = data["b"][sample_index].index_select(0, ad_idx)
-                ad_b = jacobian_sample(model, q_norm, geom, trunk, data["q_std"], point_idx=ad_idx)
-                b_loss = torch.mean(((ad_b - b_target) / b_scale_case[case_pos]) ** 2)
-                sample_loss = sample_loss + float(b_weight_eff) * b_loss
-                b_terms.append(b_loss.detach())
-            losses.append(sample_loss)
-        loss = torch.stack(losses).mean()
+                if use_ad_loss and b_weight_eff != 0.0:
+                    ad_b = jacobian_sample(model, q_norm, geom, trunk, data["q_std"], point_idx=ad_idx)
+                    b_loss, b_parts = b_loss_objective(
+                        ad_b,
+                        b_target,
+                        b_scale=b_scale_case[case_pos],
+                        b_global_scale=b_global_scale_case[case_pos],
+                        mode=str(args.b_loss_mode),
+                        physical_aux_weight=float(args.physical_b_aux_weight),
+                        rel_eps_scale=float(args.physical_b_rel_eps_scale),
+                        abs_weight=float(args.physical_b_abs_weight),
+                        rel_weight=float(args.physical_b_rel_weight),
+                        action_weight=float(args.physical_b_action_weight),
+                        action_directions=int(args.physical_b_action_directions),
+                    )
+                    sample_loss = sample_loss + float(b_weight_eff) * b_loss
+                    b_terms.append(b_loss.detach())
+                    b_component_terms.append(b_parts["b_loss_component_scaled_mse"].detach())
+                    b_physical_terms.append(b_parts["b_loss_physical_objective"].detach())
+                    b_abs_terms.append(b_parts["b_loss_abs_normed_mse"].detach())
+                    b_rel_terms.append(b_parts["b_loss_rel_eps_mse"].detach())
+                    b_action_terms.append(b_parts["b_loss_action_mse"].detach())
+                if use_baseline_loss:
+                    baseline_b_hat = model.linear_b_hat(trunk.index_select(0, ad_idx), point_idx=ad_idx)
+                    baseline_loss, baseline_parts = b_loss_objective(
+                        baseline_b_hat,
+                        b_target,
+                        b_scale=b_scale_case[case_pos],
+                        b_global_scale=b_global_scale_case[case_pos],
+                        mode=str(args.baseline_b_loss_mode),
+                        physical_aux_weight=float(args.physical_b_aux_weight),
+                        rel_eps_scale=float(args.physical_b_rel_eps_scale),
+                        abs_weight=float(args.physical_b_abs_weight),
+                        rel_weight=float(args.physical_b_rel_weight),
+                        action_weight=float(args.physical_b_action_weight),
+                        action_directions=int(args.physical_b_action_directions),
+                    )
+                    sample_loss = sample_loss + float(args.baseline_jacobian_weight) * baseline_loss
+                    baseline_b_terms.append(baseline_loss.detach())
+                    baseline_b_component_terms.append(baseline_parts["b_loss_component_scaled_mse"].detach())
+                    baseline_b_physical_terms.append(baseline_parts["b_loss_physical_objective"].detach())
+            if sample_loss.requires_grad:
+                sample_loss_terms.append(sample_loss)
+        loss_parts: list[torch.Tensor] = []
+        if le_loss_terms:
+            loss_parts.append(float(args.le_weight) * torch.stack(le_loss_terms).mean())
+        if sample_loss_terms:
+            loss_parts.append(torch.stack(sample_loss_terms).mean())
+        if not loss_parts:
+            raise SystemExit("The effective loss has no gradient; check --le-weight, --b-weight, and baseline settings")
+        loss = torch.stack(loss_parts).sum()
         if not loss.requires_grad:
             raise SystemExit("The effective loss has no gradient; check --le-weight, --b-weight, and pretrain settings")
         opt.zero_grad(set_to_none=True)
@@ -776,6 +1098,18 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 "loss": scalar_float(loss.detach()),
                 "le_loss": scalar_float(torch.stack(le_terms).mean()) if le_terms else None,
                 "b_loss": scalar_float(torch.stack(b_terms).mean()) if b_terms else None,
+                "b_loss_component_scaled_mse": scalar_float(torch.stack(b_component_terms).mean()) if b_component_terms else None,
+                "b_loss_physical_objective": scalar_float(torch.stack(b_physical_terms).mean()) if b_physical_terms else None,
+                "b_loss_abs_normed_mse": scalar_float(torch.stack(b_abs_terms).mean()) if b_abs_terms else None,
+                "b_loss_rel_eps_mse": scalar_float(torch.stack(b_rel_terms).mean()) if b_rel_terms else None,
+                "b_loss_action_mse": scalar_float(torch.stack(b_action_terms).mean()) if b_action_terms else None,
+                "baseline_b_loss": scalar_float(torch.stack(baseline_b_terms).mean()) if baseline_b_terms else None,
+                "baseline_b_loss_component_scaled_mse": (
+                    scalar_float(torch.stack(baseline_b_component_terms).mean()) if baseline_b_component_terms else None
+                ),
+                "baseline_b_loss_physical_objective": (
+                    scalar_float(torch.stack(baseline_b_physical_terms).mean()) if baseline_b_physical_terms else None
+                ),
                 "b_weight_eff": float(b_weight_eff),
                 **metrics,
             }
@@ -805,23 +1139,50 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "q_useful_hat_dim": int(data["q"].shape[1]),
         "geometry_global_hat_dim": int(data["geom_norm"].shape[1]),
         "trunk_features_hat_dim": int(data["trunk_norm_by_case"].shape[2]),
-        "model_class": "LEPrimaryFullDirectionOperator",
+        "model_class": type(model).__name__,
         "model_inputs": ["q_useful_hat", "geometry_global_hat", "trunk_features_hat"],
         "model_output": "LE_local_stack",
         "ad_target": "dLE_local_stack/dq_useful_hat",
-        "operator_form": "DeepONet branch(q_norm,geometry_norm) dot trunk(point_norm)",
+        "model_style": str(args.model_style),
+        "operator_form": (
+            "LE = B_base_hat(point_features) @ (q_norm * q_std) + DeepONet residual"
+            if isinstance(model, FELinearResidualLEOperator)
+            else "DeepONet branch(q_norm,geometry_norm) dot trunk(point_norm)"
+        ),
+        "linear_baseline_relation": (
+            "B_base_hat = dLE_local_stack/dq_useful_hat; forward uses B_base_hat @ (q_norm * q_std)"
+            if isinstance(model, FELinearResidualLEOperator)
+            else None
+        ),
         "formal_training": False,
         "checkpoint_written": False,
         "held_out_split": False,
         "uses_case_id_anchor": False,
         "uses_direct_b_head": False,
+        "uses_fe_linear_b_baseline": isinstance(model, FELinearResidualLEOperator),
         "uses_radial_loss": False,
         "uses_plus_value_samples": bool(args.use_plus_samples),
         "uses_old_true176_labels_as_v3_labels": False,
         "loss_weights": {
             "le_weight": float(args.le_weight),
             "b_weight": float(args.b_weight),
+            "baseline_jacobian_weight": float(args.baseline_jacobian_weight),
             "le_value_batch": int(le_value_batch),
+            "b_loss_mode": str(args.b_loss_mode),
+            "baseline_b_loss_mode": str(args.baseline_b_loss_mode),
+            "physical_b_aux_weight": float(args.physical_b_aux_weight),
+            "physical_b_abs_weight": float(args.physical_b_abs_weight),
+            "physical_b_rel_weight": float(args.physical_b_rel_weight),
+            "physical_b_action_weight": float(args.physical_b_action_weight),
+            "physical_b_rel_eps_scale": float(args.physical_b_rel_eps_scale),
+            "physical_b_action_directions": int(args.physical_b_action_directions),
+        },
+        "model_options": {
+            "residual_scale": float(args.residual_scale),
+            "fe_baseline_scale": float(args.fe_baseline_scale),
+            "freeze_static_baseline": bool(args.freeze_static_baseline),
+            "freeze_fe_point_baseline": bool(args.freeze_fe_point_baseline),
+            "zero_init_residual": not bool(args.no_zero_init_residual),
         },
         "curriculum": {
             "le_pretrain_steps": int(args.le_pretrain_steps),
@@ -830,8 +1191,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "normalization": {
             "le_scale_case_shape": [len(case_ids), 1, 6],
             "b_scale_case_shape": [len(case_ids), 1, 6, 42],
+            "b_global_scale_case_shape": [len(case_ids)],
             "le_scale": "per case and strain component RMS",
             "b_scale": "max(per case/component/q-direction RMS, b_scale_floor_frac * case global B RMS)",
+            "static_b_hat_init": "mean over base frames of B_local_useful_stack_hat",
             "scale_eps": float(args.scale_eps),
             "b_scale_floor_frac": float(args.b_scale_floor_frac),
         },
@@ -839,6 +1202,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             "le_loss": use_le_loss,
             "plus_value_le_loss": bool(args.use_plus_samples) and use_le_loss,
             "ad_b_loss": use_ad_loss,
+            "baseline_b_loss": use_baseline_loss,
+            "physical_action_b_loss": str(args.b_loss_mode) != "component" or str(args.baseline_b_loss_mode) != "component",
             "direct_b_head_loss": False,
             "radial_loss": False,
         },
@@ -888,10 +1253,33 @@ def main() -> None:
     parser.add_argument("--hidden", type=int, default=None)
     parser.add_argument("--basis", type=int, default=None)
     parser.add_argument("--depth", type=int, default=4)
+    parser.add_argument("--model-style", default="fe-linear-residual", choices=["fe-linear-residual", "deeponet"])
+    parser.add_argument("--residual-scale", type=float, default=1.0)
+    parser.add_argument("--fe-baseline-scale", type=float, default=1.0)
+    parser.add_argument("--freeze-static-baseline", action="store_true")
+    parser.add_argument("--freeze-fe-point-baseline", action="store_true")
+    parser.add_argument("--no-zero-init-residual", action="store_true")
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--weight-decay", type=float, default=None)
     parser.add_argument("--le-weight", type=float, default=None)
     parser.add_argument("--b-weight", type=float, default=None)
+    parser.add_argument(
+        "--b-loss-mode",
+        default="component-plus-physical",
+        choices=["component", "physical", "component-plus-physical"],
+    )
+    parser.add_argument(
+        "--baseline-b-loss-mode",
+        default="component-plus-physical",
+        choices=["component", "physical", "component-plus-physical"],
+    )
+    parser.add_argument("--physical-b-aux-weight", type=float, default=0.05)
+    parser.add_argument("--physical-b-abs-weight", type=float, default=1.0)
+    parser.add_argument("--physical-b-rel-weight", type=float, default=0.02)
+    parser.add_argument("--physical-b-action-weight", type=float, default=0.05)
+    parser.add_argument("--physical-b-rel-eps-scale", type=float, default=0.02)
+    parser.add_argument("--physical-b-action-directions", type=int, default=4)
+    parser.add_argument("--baseline-jacobian-weight", type=float, default=1.0)
     parser.add_argument("--le-pretrain-steps", type=int, default=None)
     parser.add_argument("--b-ramp-steps", type=int, default=None)
     parser.add_argument("--sample-batch", type=int, default=None)
@@ -916,6 +1304,24 @@ def main() -> None:
         raise SystemExit("--eval-every must be positive")
     if int(args.basis) < 1:
         raise SystemExit("--basis must be positive")
+    if float(args.residual_scale) < 0.0:
+        raise SystemExit("--residual-scale must be non-negative")
+    if float(args.fe_baseline_scale) < 0.0:
+        raise SystemExit("--fe-baseline-scale must be non-negative")
+    if float(args.baseline_jacobian_weight) < 0.0:
+        raise SystemExit("--baseline-jacobian-weight must be non-negative")
+    if float(args.physical_b_aux_weight) < 0.0:
+        raise SystemExit("--physical-b-aux-weight must be non-negative")
+    if float(args.physical_b_abs_weight) < 0.0:
+        raise SystemExit("--physical-b-abs-weight must be non-negative")
+    if float(args.physical_b_rel_weight) < 0.0:
+        raise SystemExit("--physical-b-rel-weight must be non-negative")
+    if float(args.physical_b_action_weight) < 0.0:
+        raise SystemExit("--physical-b-action-weight must be non-negative")
+    if float(args.physical_b_rel_eps_scale) <= 0.0:
+        raise SystemExit("--physical-b-rel-eps-scale must be positive")
+    if int(args.physical_b_action_directions) < 0:
+        raise SystemExit("--physical-b-action-directions must be non-negative")
     if int(args.le_pretrain_steps) < 0:
         raise SystemExit("--le-pretrain-steps must be non-negative")
     if int(args.b_ramp_steps) < 0:

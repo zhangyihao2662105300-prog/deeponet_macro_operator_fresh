@@ -3,6 +3,162 @@
 This file records the route-level history for the Abaqus real-integration-point
 DeepONet/query-point training line.  Keep it updated whenever this route changes.
 
+## v3 CSS8 tangent-amplitude oracle - 2026-06-24 - B(s) explains case031 tangent
+
+Purpose:
+
+- Follow up the affine-quadratic value-anchor result.
+- Test whether the remaining `case031` AD-B error is caused by using a constant
+  `B_mean(case,point)` tangent on a high-amplitude scalar path.
+- Keep this as a training-pool tangent/objective diagnostic: no held-out split,
+  no checkpoint, and no generalization claim.
+
+Added / changed:
+
+- Added read-only tangent oracle:
+  `scripts/audit_v3_tangent_amplitude_oracle.py`
+- Extended `scripts/train_v3_css8_formal_objective_prototype.py` with:
+  `--anchor-mode tangent-cubic`
+- Added `--tangent-anchor-degree`, default `3`.
+
+Tangent path model:
+
+```text
+s = <q_useful_hat - q_mean(case), q_dir(case)>
+q_perp = q_useful_hat - q_mean(case) - s * q_dir(case)
+
+B_anchor(s) = B0(case,point)
+            + B1(case,point) * s
+            + B2(case,point) * s^2
+            + B3(case,point) * s^3
+
+LE_path(s) = C(case,point)
+           + integral( B_anchor(s) @ q_dir(case), ds )
+
+LE_anchor(q) = LE_path(s) + B_anchor(s) @ q_perp
+```
+
+On scalar paths, `q_perp ~= 0`, and autograd sees:
+
+```text
+dLE_anchor/dq_useful_hat = B_anchor(s)
+```
+
+Oracle command:
+
+```powershell
+py -3 scripts\audit_v3_tangent_amplitude_oracle.py `
+  --compact-list D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\multi_case_min10\v3_css8_standard_operator_compact_list.txt `
+  --focus-case 31 `
+  --max-degree 3 `
+  --out-root D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\tangent_amplitude_oracle_10case
+```
+
+Key oracle result:
+
+```text
+case031:
+  q_perp_rel_max = 1.6638293738e-07
+  Bmean_AD_B_rel = 0.1120560463
+  B_poly_deg1_AD_B_rel = 0.0310015948
+  B_poly_deg2_AD_B_rel = 0.0173812051
+  B_poly_deg3_AD_B_rel = 0.0103404544
+  B_poly_deg3_integrated_LE_rel = 0.0178418577
+  secant_Bproj_rel_mean = 0.0321930186
+
+non-case031:
+  B_poly_deg3_AD_B_rel is roughly 2e-5 to 1.85e-4
+```
+
+Anchor-only tangent-cubic prototype:
+
+```powershell
+py -3 scripts\train_v3_css8_formal_objective_prototype.py `
+  --compact-list D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\multi_case_min10\v3_css8_standard_operator_compact_list.txt `
+  --out-root D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\formal_objective_prototype_10case_tangent_cubic_anchor_only `
+  --steps 0 `
+  --eval-every 400 `
+  --hidden 128 `
+  --lr 1e-5 `
+  --case-batch 4 `
+  --frame-batch 10 `
+  --le-point-batch 128 `
+  --ad-point-batch 8 `
+  --eval-point-batch 16 `
+  --anchor-mode tangent-cubic `
+  --tangent-anchor-degree 3
+```
+
+Anchor-only result:
+
+```text
+train_LE_local_stack_rel = 0.0178092010
+train_AD_B_local_useful_hat_rel = 0.0021637613
+train_AD_B_local_useful_hat_cos = 0.9999976158
+B_model_raw_rel = 0.0022217832
+
+case031:
+  LE_rel = 0.0178418718
+  AD_B_rel = 0.0103404541
+```
+
+1600-step tangent-cubic prototype:
+
+```text
+train_LE_local_stack_rel = 0.0174125843
+train_AD_B_local_useful_hat_rel = 0.0022670364
+train_AD_B_local_useful_hat_cos = 0.9999972582
+B_model_raw_rel = 0.0023269854
+
+case031:
+  LE_rel = 0.0174451172
+  AD_B_rel = 0.0103776203
+```
+
+Comparison to affine-quadratic value anchor:
+
+```text
+affine-quadratic:
+  pooled LE_rel ~= 0.00988
+  pooled AD_B_rel ~= 0.02368
+  case031 LE_rel ~= 0.00991
+  case031 AD_B_rel ~= 0.11205
+
+tangent-cubic:
+  pooled LE_rel ~= 0.01741
+  pooled AD_B_rel ~= 0.00227
+  case031 LE_rel ~= 0.01745
+  case031 AD_B_rel ~= 0.01038
+```
+
+Interpretation:
+
+- The remaining `case031` AD-B error is not random.  It is largely explained by
+  tangent variation along scalar amplitude `s`.
+- `B(s)` cubic fitting reduces `case031` AD-B from about `0.112` to about
+  `0.010`.
+- The tangent-cubic anchor trades value accuracy for derivative accuracy:
+  LE is worse than affine-quadratic, while AD-B is much better.
+- Residual training did not remove this tradeoff at the current settings.
+
+Current v3 objective state:
+
+```text
+affine-quadratic = value-accurate anchor
+tangent-cubic    = derivative-accurate anchor
+```
+
+Next recommended gate:
+
+- Build a hybrid or constrained objective that keeps the affine-quadratic value
+  closure while adding tangent-cubic `B(s)` supervision/regularization.
+- Do not run held-out split claims until the training-pool anchor can keep both:
+
+```text
+LE_rel near 0.01
+AD_B_rel near 0.002--0.01
+```
+
 ## v3 CSS8 affine-quadratic anchor prototype - 2026-06-24 - Value map closes on 10-case pool
 
 Purpose:

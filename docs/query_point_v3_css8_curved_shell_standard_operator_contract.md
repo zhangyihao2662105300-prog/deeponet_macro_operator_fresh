@@ -889,3 +889,92 @@ B(s, point) audit on case031
 derivative-consistent cubic value anchor
 or q-dependent B anchor tied to the scalar amplitude path
 ```
+
+## Tangent-Amplitude Oracle
+
+The tangent-aware gate adds:
+
+```text
+scripts/audit_v3_tangent_amplitude_oracle.py
+```
+
+and the formal objective prototype now supports:
+
+```text
+--anchor-mode tangent-cubic
+--tangent-anchor-degree 3
+```
+
+The tangent path model is:
+
+```text
+s = <q_useful_hat - q_mean(case), q_dir(case)>
+q_perp = q_useful_hat - q_mean(case) - s * q_dir(case)
+
+B_anchor(s) = B0 + B1*s + B2*s^2 + B3*s^3
+
+LE_path(s) =
+  C + integral( B_anchor(s) @ q_dir(case), ds )
+
+LE_anchor(q) =
+  LE_path(s) + B_anchor(s) @ q_perp
+```
+
+For scalar amplitude paths, `q_perp` is nearly zero and autograd returns:
+
+```text
+dLE_anchor/dq_useful_hat = B_anchor(s)
+```
+
+Oracle result on the current 10-case pool:
+
+```text
+case031:
+  q_perp_rel_max = 1.6638293738e-07
+  Bmean_AD_B_rel = 0.1120560463
+  B_poly_deg1_AD_B_rel = 0.0310015948
+  B_poly_deg2_AD_B_rel = 0.0173812051
+  B_poly_deg3_AD_B_rel = 0.0103404544
+  B_poly_deg3_integrated_LE_rel = 0.0178418577
+```
+
+The `tangent-cubic` anchor-only prototype gives:
+
+```text
+train_LE_local_stack_rel = 0.0178092010
+train_AD_B_local_useful_hat_rel = 0.0021637613
+B_model_raw_rel = 0.0022217832
+
+case031:
+  LE_rel = 0.0178418718
+  AD_B_rel = 0.0103404541
+```
+
+After 1600 steps:
+
+```text
+train_LE_local_stack_rel = 0.0174125843
+train_AD_B_local_useful_hat_rel = 0.0022670364
+B_model_raw_rel = 0.0023269854
+
+case031:
+  LE_rel = 0.0174451172
+  AD_B_rel = 0.0103776203
+```
+
+Current interpretation:
+
+```text
+affine-quadratic anchor:
+  better LE value closure
+  weaker AD-B closure
+
+tangent-cubic anchor:
+  better AD-B closure
+  weaker LE value closure
+```
+
+This confirms that `case031` needs amplitude-aware tangent modeling.  It also
+shows that the next objective should combine the value accuracy of
+affine-quadratic with the tangent accuracy of tangent-cubic, instead of treating
+either anchor as the final formal objective.

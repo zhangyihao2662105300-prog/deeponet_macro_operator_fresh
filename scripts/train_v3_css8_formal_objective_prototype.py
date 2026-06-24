@@ -18,6 +18,11 @@ next objective design before any held-out split:
                           + C1(case,point) * s
                           + C2(case,point) * s^2
 
+  or a derivative-consistent tangent polynomial anchor:
+
+      B_anchor(s) = B0 + B1*s + B2*s^2 + B3*s^3
+      dLE_anchor/dq = B_anchor(s) on the scalar path
+
 * residual correction with q=0 anchoring
 * AD-B supervision with respect to q_useful_hat
 
@@ -205,6 +210,11 @@ def load_pool(args: argparse.Namespace) -> dict[str, Any]:
     q_case_dir = np.mean(q_frame_dir, axis=1)
     q_case_dir = q_case_dir / np.maximum(np.linalg.norm(q_case_dir, axis=1, keepdims=True), 1.0e-30)
     quadratic_coeff = np.zeros((len(rows), 3, le.shape[2], le.shape[3]), dtype=np.float64)
+    tangent_degree = int(getattr(args, "tangent_anchor_degree", 3))
+    if tangent_degree < 0:
+        raise ValueError("--tangent-anchor-degree must be non-negative")
+    tangent_b_coeff = np.zeros((len(rows), tangent_degree + 1, b.shape[2], b.shape[3], b.shape[4]), dtype=np.float64)
+    tangent_le_const = np.zeros((len(rows), le.shape[2], le.shape[3]), dtype=np.float64)
     for case_index in range(len(rows)):
         dq = q[case_index] - q_case_mean[case_index].reshape(1, -1)
         signed_amp = dq @ q_case_dir[case_index]
@@ -217,6 +227,15 @@ def load_pool(args: argparse.Namespace) -> dict[str, Any]:
         xmat = np.stack([np.ones_like(signed_amp), signed_amp, signed_amp * signed_amp], axis=1)
         coef = np.linalg.lstsq(xmat, residual.reshape(residual.shape[0], -1), rcond=None)[0]
         quadratic_coeff[case_index] = coef.reshape(3, le.shape[2], le.shape[3])
+        tmat = np.stack([signed_amp**power for power in range(tangent_degree + 1)], axis=1)
+        bcoef = np.linalg.lstsq(tmat, b[case_index].reshape(b.shape[1], -1), rcond=None)[0]
+        bcoef = bcoef.reshape(tangent_degree + 1, b.shape[2], b.shape[3], b.shape[4])
+        tangent_b_coeff[case_index] = bcoef
+        slope_coeff = np.einsum("mpak,k->mpa", bcoef, q_case_dir[case_index])
+        integ = np.zeros_like(le[case_index])
+        for power in range(tangent_degree + 1):
+            integ = integ + (signed_amp ** (power + 1)).reshape(-1, 1, 1) * slope_coeff[power].reshape(1, b.shape[2], b.shape[3]) / float(power + 1)
+        tangent_le_const[case_index] = np.mean(le[case_index] - integ, axis=0)
     return {
         "case_ids": [int(row["case_id"]) for row in rows],
         "compact_paths": [row["path"] for row in rows],
@@ -237,6 +256,9 @@ def load_pool(args: argparse.Namespace) -> dict[str, Any]:
         "le_case_mean": le_case_mean.astype(np.float32),
         "b_case_mean": b_case_mean.astype(np.float32),
         "quadratic_case_coeff": quadratic_coeff.astype(np.float32),
+        "tangent_b_coeff": tangent_b_coeff.astype(np.float32),
+        "tangent_le_const": tangent_le_const.astype(np.float32),
+        "tangent_anchor_degree": int(tangent_degree),
         "t_eps": t_eps.astype(np.float32),
         "t_q_hat": t_q_hat.astype(np.float32),
         "b_raw": b_raw.astype(np.float32),
@@ -259,6 +281,8 @@ def make_tensors(data_np: dict[str, Any], *, device: torch.device) -> dict[str, 
         "le_case_mean": torch.as_tensor(data_np["le_case_mean"], dtype=dtype, device=device),
         "b_case_mean": torch.as_tensor(data_np["b_case_mean"], dtype=dtype, device=device),
         "quadratic_case_coeff": torch.as_tensor(data_np["quadratic_case_coeff"], dtype=dtype, device=device),
+        "tangent_b_coeff": torch.as_tensor(data_np["tangent_b_coeff"], dtype=dtype, device=device),
+        "tangent_le_const": torch.as_tensor(data_np["tangent_le_const"], dtype=dtype, device=device),
         "t_eps": torch.as_tensor(data_np["t_eps"], dtype=dtype, device=device),
         "t_q_hat": torch.as_tensor(data_np["t_q_hat"], dtype=dtype, device=device),
         "b_raw": torch.as_tensor(data_np["b_raw"], dtype=dtype, device=device),
@@ -277,6 +301,8 @@ class V3FormalObjectivePrototype(nn.Module):
         q_case_mean: torch.Tensor,
         q_case_dir: torch.Tensor,
         quadratic_case_coeff: torch.Tensor,
+        tangent_b_coeff: torch.Tensor,
+        tangent_le_const: torch.Tensor,
         hidden: int,
         anchor_mode: str,
     ) -> None:
@@ -286,6 +312,8 @@ class V3FormalObjectivePrototype(nn.Module):
         self.register_buffer("q_case_mean", q_case_mean.clone())
         self.register_buffer("q_case_dir", q_case_dir.clone())
         self.register_buffer("quadratic_case_coeff", quadratic_case_coeff.clone())
+        self.register_buffer("tangent_b_coeff", tangent_b_coeff.clone())
+        self.register_buffer("tangent_le_const", tangent_le_const.clone())
         self.anchor_mode = str(anchor_mode)
         self.state_net = nn.Sequential(
             nn.Linear(q_dim + geom_dim, hidden),
@@ -335,6 +363,28 @@ class V3FormalObjectivePrototype(nn.Module):
         else:
             b_prior = self.b_case_mean[case_index].index_select(0, point_idx)
             le_mean = self.le_case_mean[case_index].index_select(0, point_idx)
+        if self.anchor_mode == "tangent-cubic":
+            q_base = q_raw - self.q_case_mean[case_index].reshape(1, -1)
+            q_dir = self.q_case_dir[case_index].reshape(1, -1)
+            signed_amp = torch.sum(q_base * q_dir, dim=1)
+            q_perp = q_base - signed_amp.reshape(-1, 1) * q_dir
+            if point_idx is None:
+                coeff = self.tangent_b_coeff[case_index]
+                const = self.tangent_le_const[case_index]
+            else:
+                coeff = self.tangent_b_coeff[case_index].index_select(1, point_idx)
+                const = self.tangent_le_const[case_index].index_select(0, point_idx)
+            powers = torch.stack([signed_amp**power for power in range(int(coeff.shape[0]))], dim=1)
+            b_poly = torch.einsum("nm,mpak->npak", powers, coeff)
+            integ = torch.zeros(
+                (q_raw.shape[0], coeff.shape[1], coeff.shape[2]),
+                dtype=q_raw.dtype,
+                device=q_raw.device,
+            )
+            slope_coeff = torch.einsum("mpak,k->mpa", coeff, self.q_case_dir[case_index])
+            for power in range(int(coeff.shape[0])):
+                integ = integ + (signed_amp ** (power + 1)).reshape(-1, 1, 1) * slope_coeff[power].reshape(1, coeff.shape[1], coeff.shape[2]) / float(power + 1)
+            return const.reshape(1, const.shape[0], 6) + integ + torch.einsum("npak,nk->npa", b_poly, q_perp)
         if self.anchor_mode == "linear":
             q_base = q_raw
             offset = 0.0
@@ -520,6 +570,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         q_case_mean=data["q_case_mean"],
         q_case_dir=data["q_case_dir"],
         quadratic_case_coeff=data["quadratic_case_coeff"],
+        tangent_b_coeff=data["tangent_b_coeff"],
+        tangent_le_const=data["tangent_le_const"],
         hidden=int(args.hidden),
         anchor_mode=str(args.anchor_mode),
     ).to(device=device, dtype=torch.float32)
@@ -620,6 +672,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "trunk_features_hat_dim": int(data["trunk_norm"].shape[2]),
         "anchor_mode": str(args.anchor_mode),
         "quadratic_anchor_coeff_source": "closed-form train-pool per case" if str(args.anchor_mode) == "affine-quadratic" else None,
+        "tangent_anchor_coeff_source": "closed-form train-pool per case" if str(args.anchor_mode) == "tangent-cubic" else None,
+        "tangent_anchor_degree": int(data_np.get("tangent_anchor_degree", -1)) if str(args.anchor_mode) == "tangent-cubic" else None,
         "b_anchor_trainable": bool(model.b_case_mean.requires_grad),
         "loss_scale_mode": "per-case",
         "model_inputs": ["q_useful_hat", "geometry_global_hat", "trunk_features_hat"],
@@ -664,7 +718,8 @@ def main() -> None:
     parser.add_argument("--eval-point-batch", type=int, default=16)
     parser.add_argument("--eval-every", type=int, default=300)
     parser.add_argument("--grad-clip", type=float, default=10.0)
-    parser.add_argument("--anchor-mode", choices=["linear", "affine", "affine-quadratic"], default="affine")
+    parser.add_argument("--anchor-mode", choices=["linear", "affine", "affine-quadratic", "tangent-cubic"], default="affine")
+    parser.add_argument("--tangent-anchor-degree", type=int, default=3)
     parser.add_argument("--freeze-b-anchor", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
     if int(args.steps) < 0:

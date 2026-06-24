@@ -1279,3 +1279,69 @@ Coupled LE/V + B + AD/radial objective: not solved.
 So the next design step should not simply enlarge the B-head.  It should define
 a coupling strategy that preserves the directly learnable tangent field while
 also producing a consistent `LE_hat` value field.
+
+### Full-Direction B Boundary
+
+The final v3 route remains LE-primary:
+
+```text
+LE_hat = F(q_useful_hat, geometry_global_hat, trunk_features_hat)
+B_hat  = AD(LE_hat, q_useful_hat)
+```
+
+The v3 useful displacement coordinate has 42 effective DOFs after rigid-mode
+removal.  Therefore the target tangent is not a scalar path derivative:
+
+```text
+B_local_useful_stack_hat:
+  dLE_local_stack / dq_useful_hat
+  shape = frame x point x strain_component x 42
+```
+
+A radial/amplitude representation:
+
+```text
+s = ||q_useful_hat||
+d = q_useful_hat / ||q_useful_hat||
+```
+
+is useful but incomplete.  It directly describes the derivative along the
+current loading direction:
+
+```text
+AD(LE_hat, q) @ d
+```
+
+but the full Sobolev label also requires sensitivity to direction changes:
+
+```text
+AD(LE_hat, q)
+  = dLE/ds * ds/dq
+  + dLE/dd * dd/dq
+```
+
+Consequently:
+
+```text
+Radial cubic / amplitude-aware value models can help the loading path.
+They do not alone guarantee the full 42-direction B field.
+```
+
+Current diagnostic interpretation:
+
+```text
+B-only direct supervision:
+  B_hat can learn the current pool's full-direction tangent to about 0.18 rel.
+
+Coupled LE-primary objective:
+  not solved.
+
+Main blocker:
+  construct an LE_hat that matches values and whose autograd derivative matches
+  the full 42-direction B, including transverse useful-DOF directions.
+```
+
+This prevents a route drift into "predict B first and integrate LE" as the final
+method.  B-first/integration ideas may still be used for diagnostics or
+initialization, but the formal operator should predict strain and obtain B by
+autograd.

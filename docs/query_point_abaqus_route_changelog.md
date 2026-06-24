@@ -3,6 +3,88 @@
 This file records the route-level history for the Abaqus real-integration-point
 DeepONet/query-point training line.  Keep it updated whenever this route changes.
 
+## v3 full-direction B interpretation note - 2026-06-24 - Radial is not enough
+
+Purpose:
+
+- Freeze the current interpretation after the B-head-only capacity diagnosis.
+- Clarify that the final route remains LE-primary:
+
+```text
+LE_hat = F(q_useful_hat, geometry_global_hat, trunk_features_hat)
+B_hat  = dLE_hat / dq_useful_hat
+```
+
+- Clarify why a scalar radial/amplitude model alone cannot solve the full
+  Sobolev constraint.
+
+Current code state:
+
+- Latest committed script:
+  `scripts/train_v3_single_frame_radial_operator_smoke.py`
+- Current diagnostic capabilities:
+  - `--filter-case`
+  - `--filter-frame`
+  - `B_hat_direct_rel`
+  - `B_hat_direct_cos`
+  - `--direct-b-head-weight`
+  - disabled losses are skipped when their weights are zero
+
+Important distinction:
+
+```text
+q_useful_hat has 42 effective DOFs after removing rigid modes.
+B_local_useful_stack_hat is full-direction:
+  dLE_local_stack / dq_useful_hat
+  shape: frame x point x strain_component x 42
+```
+
+Therefore, a scalar radial path:
+
+```text
+s = ||q||
+d = q / ||q||
+LE_hat = P(s, d, geometry, point)
+```
+
+only directly controls the radial derivative:
+
+```text
+dLE/ds = AD(LE, q) @ d
+```
+
+The full B label also requires transverse direction sensitivity:
+
+```text
+dLE/dq = (dLE/ds) * ds/dq + (dLE/dd) * dd/dq
+```
+
+So a radial cubic / amplitude polynomial can help the loading-path value and
+the directional derivative along `d`, but it does not by itself guarantee the
+remaining 41 transverse useful-DOF directions.
+
+Updated problem statement:
+
+```text
+B-only direct supervision shows B_hat can learn the full 42-direction tangent
+field on the current pool to roughly 0.18 relative error.
+
+The unsolved problem is not raw-B projection and not basic B-head capacity.
+The unsolved problem is LE-primary full-direction consistency:
+  design LE_hat(q,g,x) so that
+    LE_hat matches LE labels
+    AD(LE_hat,q) matches the full 42-direction B labels
+  without falling back to a non-deployable per-case oracle.
+```
+
+Boundary:
+
+- Do not reinterpret the route as "predict B, then integrate LE" for the final
+  method.  That is only a possible diagnostic or initialization trick.
+- The final operator should still predict strain and obtain B by autograd.
+- Next modeling work should separate radial and transverse B errors before
+  introducing a new LE-primary architecture.
+
 ## v3 B-head-only capacity diagnosis - 2026-06-24 - Direct B is learnable
 
 Purpose:

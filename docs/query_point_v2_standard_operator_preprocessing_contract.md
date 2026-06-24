@@ -184,6 +184,61 @@ B_rigid_residual_rel:
 The rigid residual is recorded but is not a strict failure, because the useful
 coordinate intentionally removes rigid modes.
 
+## Random-Geometry Isoparametric Invariance Audit
+
+The fixed 10-case audit only proves closure on existing fresh compacts.  A
+separate random-geometry audit checks that the underlying Hex8 isoparametric
+and scaling relations are not tied to those 10 geometries.
+
+Script:
+
+```powershell
+py -3 scripts\test_random_geometry_isoparametric_scaling.py `
+  --out D:\IS-FEM\outputs\query_point_v2_standard_operator\random_geometry_isoparametric_invariance.json
+```
+
+The audit samples random positive-orientation Hex8 geometries and random
+interior `ip_xi` points, then checks:
+
+```text
+partition of unity
+natural-gradient sum
+inverse-map ip_xi invariance after translation / rotation / scaling
+J, invJ, detJ transform under geometry scaling
+dN/dx and B scale as 1 / length
+scaled displacement keeps LE invariant
+local-frame Q orthonormality
+T_eps_from_abq / T_eps_to_abq roundtrip
+LE_local -> LE_abq roundtrip
+B_local_useful -> projected raw B closure through T_eps_to_abq and T_q
+```
+
+Result:
+
+```text
+passed = true
+trials = 64
+total_points = 512
+detJ_min = 0.29031834735368334
+
+ip_xi_invariance_abs = 5.384581669432009e-14
+rotation_scale_J_abs = 2.6645352591003757e-15
+rotation_scale_invJ_abs = 1.687538997430238e-14
+rotation_scale_detJ_abs = 3.410605131648481e-13
+B_scaling_abs = 1.1102230246251565e-15
+B_scaling_rel = 8.403417513265492e-16
+LE_scaled_similarity_abs = 1.7763568394002505e-15
+T_eps_roundtrip_abq_rel = 7.168741415637943e-15
+T_eps_roundtrip_local_rel = 7.060577084968476e-15
+LE_local_to_abq_roundtrip_rel = 3.2594517417223477e-16
+B_raw_projected_rel = 5.627036520025794e-16
+B_rigid_residual_rel = 0.35443953847154996
+```
+
+`B_rigid_residual_rel` is informational and not a strict failure.  The useful
+q-coordinate intentionally projects out raw rigid modes, so the projected raw
+B closure is the strict quantity.
+
 ## Boundaries
 
 This step did not train a model.

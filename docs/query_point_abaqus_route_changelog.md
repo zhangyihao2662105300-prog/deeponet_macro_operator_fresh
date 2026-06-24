@@ -81,6 +81,47 @@ Validation boundary:
 - No tag was moved.
 - Generated `.npz` outputs remain outside git and must not be committed.
 
+Follow-up random-geometry audit:
+
+- Added `scripts/test_random_geometry_isoparametric_scaling.py`.
+- Purpose: verify random positive-orientation Hex8 geometries under
+  translation, rotation, scaling, and small distortion, rather than only fixed
+  10-case fresh compacts.
+- Report:
+
+```text
+D:\IS-FEM\outputs\query_point_v2_standard_operator\random_geometry_isoparametric_invariance.json
+```
+
+Result:
+
+```text
+passed = true
+trials = 64
+total_points = 512
+detJ_min = 0.29031834735368334
+ip_xi_invariance_abs = 5.384581669432009e-14
+rotation_scale_J_abs = 2.6645352591003757e-15
+rotation_scale_invJ_abs = 1.687538997430238e-14
+rotation_scale_detJ_abs = 3.410605131648481e-13
+B_scaling_abs = 1.1102230246251565e-15
+B_scaling_rel = 8.403417513265492e-16
+LE_scaled_similarity_abs = 1.7763568394002505e-15
+T_eps_roundtrip_abq_rel = 7.168741415637943e-15
+T_eps_roundtrip_local_rel = 7.060577084968476e-15
+LE_local_to_abq_roundtrip_rel = 3.2594517417223477e-16
+B_raw_projected_rel = 5.627036520025794e-16
+B_rigid_residual_rel = 0.35443953847154996
+```
+
+Interpretation:
+
+- The random-geometry isoparametric/scaling contract passes.
+- `B_rigid_residual_rel` is informational only; the strict projected raw-B
+  closure is `B_raw_projected_rel`.
+- This strengthens the preprocessing/postprocessing contract but still does
+  not establish model performance.
+
 ## v2k - 2026-06-24 - Tangent / training-schedule diagnostic
 
 Purpose:

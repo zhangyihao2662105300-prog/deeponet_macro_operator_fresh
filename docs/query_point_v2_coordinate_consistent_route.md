@@ -96,6 +96,37 @@ B_rigid_residual_rel = 0.00010968263851608675 to 0.0012638931647260517
 The rigid residual is reported only.  It is not a strict failure because the
 standard operator intentionally removes rigid q modes.
 
+Random-geometry isoparametric invariance audit:
+
+```text
+script =
+  scripts/test_random_geometry_isoparametric_scaling.py
+
+report =
+  D:\IS-FEM\outputs\query_point_v2_standard_operator\random_geometry_isoparametric_invariance.json
+
+passed = true
+trials = 64
+total_points = 512
+detJ_min = 0.29031834735368334
+ip_xi_invariance_abs = 5.384581669432009e-14
+rotation_scale_J_abs = 2.6645352591003757e-15
+rotation_scale_invJ_abs = 1.687538997430238e-14
+rotation_scale_detJ_abs = 3.410605131648481e-13
+B_scaling_abs = 1.1102230246251565e-15
+B_scaling_rel = 8.403417513265492e-16
+LE_scaled_similarity_abs = 1.7763568394002505e-15
+T_eps_roundtrip_abq_rel = 7.168741415637943e-15
+T_eps_roundtrip_local_rel = 7.060577084968476e-15
+LE_local_to_abq_roundtrip_rel = 3.2594517417223477e-16
+B_raw_projected_rel = 5.627036520025794e-16
+```
+
+This extends the standard-operator audit from fixed fresh compacts to random
+positive-orientation Hex8 geometries under translation, rotation, scaling, and
+small geometric distortion.  It is still a geometry/contract audit, not a model
+learning result.
+
 Boundary:
 
 ```text

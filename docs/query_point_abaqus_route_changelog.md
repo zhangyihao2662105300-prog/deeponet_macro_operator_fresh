@@ -3,6 +3,97 @@
 This file records the route-level history for the Abaqus real-integration-point
 DeepONet/query-point training line.  Keep it updated whenever this route changes.
 
+## v3 CSS8 one-case smoke - 2026-06-24 - Loader and AD overfit gate
+
+Purpose:
+
+- Verify that the new v3 CSS8 standard-operator compact can be loaded by a
+  script-local model using the intended model-visible fields:
+
+```text
+q_useful_hat + geometry_global_hat + trunk_features_hat -> LE_local_stack
+```
+
+- Verify that autograd can differentiate the model output with respect to
+  `q_useful_hat` and compare against `B_local_useful_stack_hat`.
+- Keep this as a one-case loader/overfit smoke, not formal training and not a
+  multi-case generalization claim.
+
+Added:
+
+- `scripts/train_v3_css8_one_case_overfit_smoke.py`
+
+Smoke model form:
+
+```text
+LE_hat =
+  B_prior(point) @ q_useful_hat
+  + R(q_useful_hat, geometry_global_hat, trunk_features_hat)
+  - R(0, geometry_global_hat, trunk_features_hat)
+```
+
+`B_prior(point)` is initialized from the one-case mean
+`B_local_useful_stack_hat`.  This is a smoke-test anchor so the gate checks the
+v3 compact loader, normalization, AD path, and raw-B backprojection rather than
+asking a tiny MLP to rediscover the finite-element tangent from scratch.
+
+Command:
+
+```powershell
+py -3 scripts\train_v3_css8_one_case_overfit_smoke.py `
+  --compact D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\multi_case_min10\case050\case050_v3_css8_standard_operator.npz `
+  --out-root D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\one_case_overfit_smoke_case050 `
+  --steps 800 `
+  --eval-every 200 `
+  --hidden 96 `
+  --ad-point-batch 16 `
+  --eval-point-batch 16
+```
+
+Result:
+
+```text
+case_id = 50
+frame_count = 10
+point_count = 128
+q_useful_hat_dim = 42
+geometry_global_hat_dim = 157
+trunk_features_hat_dim = 48
+
+initial train_LE_local_stack_rel = 0.0361400433
+initial train_AD_B_local_useful_hat_rel = 0.0037798325
+initial train_AD_B_local_useful_hat_cos = 0.9999928474
+initial B_model_raw_rel = 0.0037848030
+
+best/latest step = 800
+train_LE_local_stack_rel = 0.0062978775
+train_AD_B_local_useful_hat_rel = 0.0078215189
+train_AD_B_local_useful_hat_cos = 0.9999694824
+B_model_raw_projected_rel = 0.0079457052
+B_model_raw_rel = 0.0079470677
+```
+
+Output:
+
+```text
+D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\one_case_overfit_smoke_case050\v3_one_case_overfit_summary.json
+D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\one_case_overfit_smoke_case050\v3_one_case_overfit_history.csv
+```
+
+Interpretation:
+
+- The v3 one-case loader/contract/AD smoke passes on case050.
+- The script reads `q_useful_hat`, `geometry_global_hat`,
+  `trunk_features_hat`, `LE_local_stack`, and `B_local_useful_stack_hat`.
+- The AD output is mapped back by
+  `B_raw_hat = T_eps_to_abq_stack @ AD_B_local_hat @ T_q_raw_to_useful_hat`.
+- No checkpoint is written.
+- No formal model structure, split, loss, learning-rate, or epoch policy was
+  changed.
+- No old TRUE176 `LE/B` labels were used as v3 labels.
+- No generated `.npz`, `.pt`, `.pth`, or other large data artifact was
+  committed.
+
 ## v3 CSS8 standard-operator compact builder - 2026-06-24 - Contract implementation
 
 Purpose:

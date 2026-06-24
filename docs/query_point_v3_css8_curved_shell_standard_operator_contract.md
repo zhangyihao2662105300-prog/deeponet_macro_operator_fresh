@@ -468,3 +468,46 @@ No training was run.
 ```
 
 Only after this compact contract passes should v3 training be considered.
+
+## One-Case Loader / AD Smoke
+
+After the 10-case compact audit, a one-case loader/overfit smoke was run on
+`case050` to check that the model-visible v3 fields are directly consumable:
+
+```text
+q_useful_hat + geometry_global_hat + trunk_features_hat -> LE_local_stack
+```
+
+The smoke script is:
+
+```text
+scripts/train_v3_css8_one_case_overfit_smoke.py
+```
+
+It uses a script-local anchored model:
+
+```text
+LE_hat =
+  B_prior(point) @ q_useful_hat
+  + R(q_useful_hat, geometry_global_hat, trunk_features_hat)
+  - R(0, geometry_global_hat, trunk_features_hat)
+```
+
+and differentiates the result with respect to `q_useful_hat`:
+
+```text
+AD_B_local_hat = dLE_local_stack_hat / dq_useful_hat
+B_raw_hat = T_eps_to_abq_stack @ AD_B_local_hat @ T_q_raw_to_useful_hat
+```
+
+The case050 smoke reached:
+
+```text
+train_LE_local_stack_rel = 0.0062978775
+train_AD_B_local_useful_hat_rel = 0.0078215189
+train_AD_B_local_useful_hat_cos = 0.9999694824
+B_model_raw_rel = 0.0079470677
+```
+
+This passes the v3 loader/contract/autograd smoke gate.  It is not formal
+training, not a multi-case split result, and not a model-performance claim.

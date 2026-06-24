@@ -511,3 +511,73 @@ B_model_raw_rel = 0.0079470677
 
 This passes the v3 loader/contract/autograd smoke gate.  It is not formal
 training, not a multi-case split result, and not a model-performance claim.
+
+## Multi-Case Loader / AD Smoke
+
+The next gate was a multi-case loader/overfit smoke.  Its first useful result
+was a contract issue, not a training result: older compacts stored constant
+`shape4` as `[4]`, while newer compacts stored it as `[N,4]`.  The original v3
+builder treated `shape4[0]` as the compact-level geometry descriptor, which
+accidentally turned old `[4]` values into a scalar.  This made
+`geometry_global_hat` cross-case inconsistent:
+
+```text
+old cases: geometry_global_hat = [154]
+new cases: geometry_global_hat = [157]
+```
+
+The builder now normalizes both shape encodings to one fixed 4-vector before
+constructing `geometry_global_hat`, and the audit reports/fails cross-case
+shape inconsistency for key model-visible fields.
+
+After rebuilding the v3 compacts, strict audit reports:
+
+```text
+compact_count = 10
+strict_pass_count = 10
+strict_fail_count = 0
+strict_pass = true
+
+q_useful_hat = [10,42]
+geometry_global_hat = [157]
+trunk_features_hat = [128,48]
+LE_local_stack = [10,128,6]
+B_local_useful_stack_hat = [10,128,6,42]
+```
+
+The multi-case smoke script is:
+
+```text
+scripts/train_v3_css8_multi_case_overfit_smoke.py
+```
+
+It uses a script-local case-indexed B-prior anchor:
+
+```text
+LE_hat =
+  B_prior(case, point) @ q_useful_hat
+  + R(q_useful_hat, geometry_global_hat, trunk_features_hat)
+  - R(0, geometry_global_hat, trunk_features_hat)
+```
+
+The 3-case smoke on cases `[41,45,50]` reached:
+
+```text
+train_LE_local_stack_rel = 0.0256929491
+train_AD_B_local_useful_hat_rel = 0.0035731499
+train_AD_B_local_useful_hat_cos = 0.9999935627
+B_model_raw_rel = 0.0036204634
+```
+
+The full 10-case smoke runs end-to-end and differentiates the complete pool, but
+the LE overfit remains uneven by case:
+
+```text
+train_LE_local_stack_rel = 0.2310481668
+train_AD_B_local_useful_hat_rel = 0.0303847101
+train_AD_B_local_useful_hat_cos = 0.9995383620
+B_model_raw_rel = 0.0308490749
+```
+
+This passes the multi-case loader/shape/autograd gate.  It does not prove v3
+model performance or held-out generalization.

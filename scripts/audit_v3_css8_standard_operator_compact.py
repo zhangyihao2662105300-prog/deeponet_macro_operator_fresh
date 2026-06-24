@@ -274,6 +274,32 @@ def write_outputs(out_root: Path, rows: list[dict[str, Any]], *, strict: bool, t
     for row in rows:
         for failure in row.get("strict_failures", []):
             failure_counts[str(failure)] = failure_counts.get(str(failure), 0) + 1
+    shape_keys = (
+        "q_useful_hat",
+        "geometry_global_hat",
+        "trunk_features_hat",
+        "LE_local_stack",
+        "B_local_useful_stack_hat",
+    )
+    cross_case_shape_values: dict[str, list[list[int]]] = {}
+    cross_case_shape_consistent: dict[str, bool] = {}
+    for key in shape_keys:
+        values: list[list[int]] = []
+        seen: set[tuple[int, ...]] = set()
+        for row in rows:
+            shape = row.get("shapes", {}).get(key)
+            if shape is None:
+                continue
+            tup = tuple(int(v) for v in shape)
+            if tup not in seen:
+                values.append(list(tup))
+                seen.add(tup)
+        cross_case_shape_values[key] = values
+        cross_case_shape_consistent[key] = len(values) <= 1
+    if strict:
+        for key, ok in cross_case_shape_consistent.items():
+            if not ok:
+                failure_counts[f"cross_case_{key}_shape_inconsistent"] = 1
     summary = {
         "audit_name": "v3_css8_standard_operator_compact",
         "standard_operator_contract_version": CONTRACT_VERSION,
@@ -281,9 +307,11 @@ def write_outputs(out_root: Path, rows: list[dict[str, Any]], *, strict: bool, t
         "strict_requested": bool(strict),
         "strict_pass_count": int(pass_count),
         "strict_fail_count": int(len(rows) - pass_count),
-        "strict_pass": bool(rows and pass_count == len(rows)),
+        "strict_pass": bool(rows and pass_count == len(rows) and all(cross_case_shape_consistent.values())),
         "tolerance": float(tol),
         "failure_counts": dict(sorted(failure_counts.items())),
+        "cross_case_shape_consistent": cross_case_shape_consistent,
+        "cross_case_shape_values": cross_case_shape_values,
         "trained_model": False,
         "used_old_true176_labels": False,
     }

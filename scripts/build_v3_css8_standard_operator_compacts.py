@@ -69,6 +69,32 @@ def build_geometry_global_hat(
     return np.concatenate(parts, axis=0), names
 
 
+def normalize_shape4_for_global_geometry(shape4: np.ndarray | None, *, frame_count: int) -> np.ndarray | None:
+    """Return one fixed 4-vector shape descriptor for the compact.
+
+    Older fresh/v2b compacts may store constant geometry as ``shape4=[4]`` while
+    newer ones store frame-aligned ``shape4=[N,4]``.  The v3 global geometry
+    input must have a stable dimension across cases, so both encodings are
+    normalized to one 4-vector here.
+    """
+
+    if shape4 is None:
+        return None
+    vals = np.asarray(shape4, dtype=np.float64)
+    if vals.shape == (4,):
+        return vals
+    if vals.shape == (1, 4):
+        return vals.reshape(4)
+    if vals.shape == (frame_count, 4):
+        first = vals[0]
+        if np.max(np.abs(vals - first.reshape(1, 4))) > 1.0e-12:
+            raise ValueError("v3 global geometry expects constant shape4 within one compact")
+        return first
+    if vals.size == 4:
+        return vals.reshape(4)
+    raise ValueError(f"shape4 must be [4], [1,4], or [N,4], got {vals.shape}")
+
+
 def audit_arrays(
     *,
     q48_raw: np.ndarray,
@@ -206,7 +232,10 @@ def build_one(path: Path, out_root: Path, *, strict: bool, tol: float, nx: int, 
         ip_invj = as_float64(z, "ip_invJ")
         ip_detj = as_float64(z, "ip_detJ").reshape(-1)
         ip_xyz = as_float64(z, "ip_xyz")
-        shape4 = as_float64(z, "shape4")[0] if "shape4" in files else None
+        shape4 = normalize_shape4_for_global_geometry(
+            as_float64(z, "shape4") if "shape4" in files else None,
+            frame_count=int(q48_raw.shape[0]),
+        )
 
     if q48_raw.ndim != 2 or q48_raw.shape[1] != 48:
         raise ValueError(f"{path}: q48_raw must be [N,48], got {q48_raw.shape}")

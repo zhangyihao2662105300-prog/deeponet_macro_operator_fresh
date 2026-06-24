@@ -3,6 +3,168 @@
 This file records the route-level history for the Abaqus real-integration-point
 DeepONet/query-point training line.  Keep it updated whenever this route changes.
 
+## v3 CSS8 multi-case smoke - 2026-06-24 - Loader, shape, and AD gate
+
+Purpose:
+
+- Move from the one-case v3 loader/overfit smoke to a multi-case smoke on the
+  same standard-operator compact contract.
+- Verify that multiple v3 CSS8 compacts can be loaded together, normalized over
+  the selected smoke pool, batched by case/frame/point, and differentiated with
+  respect to `q_useful_hat`.
+- Keep this as a loader/contract/AD smoke, not formal training and not a
+  held-out generalization result.
+
+Added:
+
+- `scripts/train_v3_css8_multi_case_overfit_smoke.py`
+
+Contract fix found by the multi-case gate:
+
+- The first 10-case attempt failed before training because
+  `geometry_global_hat` was not cross-case shape-consistent:
+
+```text
+case019/case025/case031 geometry_global_hat = [154]
+case041+ geometry_global_hat = [157]
+```
+
+- Root cause: older compacts stored constant `shape4` as `[4]`, while newer
+  compacts stored frame-aligned `shape4` as `[N,4]`.  The v3 builder used
+  `shape4[0]`, which turned old `[4]` values into a scalar and dropped three
+  geometry components.
+- `scripts/build_v3_css8_standard_operator_compacts.py` now normalizes both
+  encodings to one fixed 4-vector before constructing `geometry_global_hat`.
+- `scripts/audit_v3_css8_standard_operator_compact.py` now reports cross-case
+  shape consistency for key model-visible tensors and fails strict audit if
+  they are inconsistent.
+
+Rebuilt/audited compact result:
+
+```text
+compact_count = 10
+strict_pass_count = 10
+strict_fail_count = 0
+strict_pass = true
+
+cross_case_shape_consistent:
+  q_useful_hat = true
+  geometry_global_hat = true
+  trunk_features_hat = true
+  LE_local_stack = true
+  B_local_useful_stack_hat = true
+
+geometry_global_hat shape = [157] for all 10 cases
+```
+
+Smoke model form:
+
+```text
+LE_hat =
+  B_prior(case, point) @ q_useful_hat
+  + R(q_useful_hat, geometry_global_hat, trunk_features_hat)
+  - R(0, geometry_global_hat, trunk_features_hat)
+```
+
+`B_prior(case, point)` is initialized from each case's mean
+`B_local_useful_stack_hat` and frozen by default.  This is a smoke-test anchor,
+not a final model architecture.
+
+Three-case command:
+
+```powershell
+py -3 scripts\train_v3_css8_multi_case_overfit_smoke.py `
+  --compact-list D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\multi_case_min10\v3_css8_standard_operator_compact_list.txt `
+  --case-ids 041,045,050 `
+  --out-root D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\multi_case_overfit_smoke_3case_lr1e5 `
+  --steps 800 `
+  --eval-every 200 `
+  --hidden 96 `
+  --lr 1e-5 `
+  --case-batch 3 `
+  --frame-batch 10 `
+  --le-point-batch 128 `
+  --ad-point-batch 8 `
+  --eval-point-batch 16
+```
+
+Three-case result:
+
+```text
+case_ids = [41,45,50]
+case_count = 3
+frame_count_per_case = 10
+point_count = 128
+q_useful_hat_dim = 42
+geometry_global_hat_dim = 157
+trunk_features_hat_dim = 48
+b_prior_trainable = false
+
+initial train_LE_local_stack_rel = 0.0374424942
+initial train_AD_B_local_useful_hat_rel = 0.0026580677
+initial train_AD_B_local_useful_hat_cos = 0.9999965429
+
+best/latest step = 800
+train_LE_local_stack_rel = 0.0256929491
+train_AD_B_local_useful_hat_rel = 0.0035731499
+train_AD_B_local_useful_hat_cos = 0.9999935627
+B_model_raw_rel = 0.0036204634
+```
+
+Ten-case command:
+
+```powershell
+py -3 scripts\train_v3_css8_multi_case_overfit_smoke.py `
+  --compact-list D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\multi_case_min10\v3_css8_standard_operator_compact_list.txt `
+  --out-root D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\multi_case_overfit_smoke_10case_lr1e5 `
+  --steps 800 `
+  --eval-every 200 `
+  --hidden 128 `
+  --lr 1e-5 `
+  --case-batch 4 `
+  --frame-batch 10 `
+  --le-point-batch 128 `
+  --ad-point-batch 8 `
+  --eval-point-batch 16
+```
+
+Ten-case result:
+
+```text
+case_ids = [19,25,31,41,43,44,45,46,49,50]
+case_count = 10
+frame_count_per_case = 10
+point_count = 128
+q_useful_hat_dim = 42
+geometry_global_hat_dim = 157
+trunk_features_hat_dim = 48
+b_prior_trainable = false
+
+initial train_LE_local_stack_rel = 0.2930527627
+initial train_AD_B_local_useful_hat_rel = 0.0236806050
+initial train_AD_B_local_useful_hat_cos = 0.9997195601
+
+best/latest step = 800
+train_LE_local_stack_rel = 0.2310481668
+train_AD_B_local_useful_hat_rel = 0.0303847101
+train_AD_B_local_useful_hat_cos = 0.9995383620
+B_model_raw_rel = 0.0308490749
+```
+
+Interpretation:
+
+- The multi-case v3 loader/contract/AD gate is now executable on both a 3-case
+  subset and the full 10-case v3 compact pool.
+- The gate caught and fixed a real compact contract issue:
+  `geometry_global_hat` must be dimension-stable across cases.
+- The 3-case subset shows stable residual overfit without breaking AD-B.
+- The 10-case run loads and differentiates the full pool, but LE overfit remains
+  uneven by case.  That is a modeling/optimization signal for a later step, not
+  a compact-contract failure.
+- No formal split, checkpoint, tag move, or generated `.npz/.pt/.pth` artifact
+  is part of this commit.
+- No old TRUE176 `LE/B` labels were used as v3 labels.
+
 ## v3 CSS8 one-case smoke - 2026-06-24 - Loader and AD overfit gate
 
 Purpose:

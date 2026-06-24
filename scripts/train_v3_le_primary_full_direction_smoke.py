@@ -15,8 +15,9 @@ default, so AD-B sees the local tangent itself rather than an extra dB_state/dq
 term.  The legacy point-only FE baseline and pure DeepONet forms are still
 available as explicit ablations.
 
-The trainer is a smoke/gate script.  It writes JSON/CSV metrics but no
-checkpoint and makes no held-out generalization claim.
+The trainer writes JSON/CSV metrics for smoke/gate runs.  The formal-long
+preset also writes latest/best checkpoints; no held-out generalization claim is
+made unless the input compact list and filters define that split externally.
 """
 
 from __future__ import annotations
@@ -56,6 +57,8 @@ PRESETS: dict[str, dict[str, int | float]] = {
         "grad_clip": 1.0,
         "le_pretrain_steps": 500,
         "b_ramp_steps": 1500,
+        "state_baseline_rank": 16,
+        "residual_jacobian_weight": 0.0,
     },
     "one-case": {
         "steps": 15000,
@@ -73,6 +76,8 @@ PRESETS: dict[str, dict[str, int | float]] = {
         "grad_clip": 1.0,
         "le_pretrain_steps": 1000,
         "b_ramp_steps": 3000,
+        "state_baseline_rank": 32,
+        "residual_jacobian_weight": 0.25,
     },
     "training-pool": {
         "steps": 30000,
@@ -90,6 +95,27 @@ PRESETS: dict[str, dict[str, int | float]] = {
         "grad_clip": 1.0,
         "le_pretrain_steps": 2000,
         "b_ramp_steps": 5000,
+        "state_baseline_rank": 64,
+        "residual_jacobian_weight": 0.5,
+    },
+    "formal-long": {
+        "steps": 80000,
+        "hidden": 512,
+        "basis": 192,
+        "lr": 8.0e-5,
+        "weight_decay": 1.0e-6,
+        "le_weight": 1.0,
+        "b_weight": 1.0,
+        "sample_batch": 10,
+        "le_point_batch": 128,
+        "ad_point_batch": 128,
+        "eval_point_batch": 128,
+        "eval_every": 5000,
+        "grad_clip": 1.0,
+        "le_pretrain_steps": 2000,
+        "b_ramp_steps": 8000,
+        "state_baseline_rank": 64,
+        "residual_jacobian_weight": 1.0,
     },
 }
 PRESET_KEYS = tuple(PRESETS["one-frame"].keys())
@@ -461,6 +487,16 @@ class LEPrimaryFullDirectionOperator(nn.Module):
         le = torch.einsum("nak,pak->npa", b, t) / (self.basis ** 0.5)
         return le + self.bias.view(1, 1, self.strain_dim)
 
+    def residual_forward(
+        self,
+        q_norm: torch.Tensor,
+        geom_norm: torch.Tensor,
+        trunk_norm: torch.Tensor,
+        *,
+        point_idx: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.forward(q_norm, geom_norm, trunk_norm, point_idx=point_idx)
+
 
 class FELinearResidualLEOperator(nn.Module):
     """LE operator with an explicit FE-like linear B baseline.
@@ -551,6 +587,28 @@ class FELinearResidualLEOperator(nn.Module):
     def linear_b_norm(self, trunk_norm: torch.Tensor, *, point_idx: torch.Tensor | None = None) -> torch.Tensor:
         return self.linear_b_hat(trunk_norm, point_idx=point_idx) * self.q_std.reshape(1, 1, -1)
 
+    def residual_forward(
+        self,
+        q_norm: torch.Tensor,
+        geom_norm: torch.Tensor,
+        trunk_norm: torch.Tensor,
+        *,
+        point_idx: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if q_norm.ndim == 1:
+            q_norm = q_norm.unsqueeze(0)
+        batch = int(q_norm.shape[0])
+        if geom_norm.ndim == 1:
+            geom_norm = geom_norm.unsqueeze(0)
+        if int(geom_norm.shape[0]) == 1 and batch != 1:
+            geom_norm = geom_norm.expand(batch, -1)
+        geom_flat = geom_norm.reshape(batch, -1)
+        q_delta_hat = q_norm * self.q_std.reshape(1, -1)
+        branch_in = torch.cat([q_delta_hat, geom_flat], dim=-1)
+        b = self.branch(branch_in).reshape(batch, self.strain_dim, self.basis)
+        t = self.trunk(trunk_norm).reshape(int(trunk_norm.shape[0]), self.strain_dim, self.basis)
+        return self.residual_scale * torch.einsum("nak,pak->npa", b, t) / (self.basis ** 0.5)
+
     def forward(
         self,
         q_norm: torch.Tensor,
@@ -569,13 +627,10 @@ class FELinearResidualLEOperator(nn.Module):
         geom_flat = geom_norm.reshape(batch, -1)
         q_delta_hat = q_norm * self.q_std.reshape(1, -1)
         q_hat = q_delta_hat + self.q_mean.reshape(1, -1)
-        branch_in = torch.cat([q_delta_hat, geom_flat], dim=-1)
         b_base = self.linear_b_hat(trunk_norm, point_idx=point_idx)
         linear = torch.einsum("pak,nk->npa", b_base, q_hat)
-        b = self.branch(branch_in).reshape(batch, self.strain_dim, self.basis)
-        t = self.trunk(trunk_norm).reshape(int(trunk_norm.shape[0]), self.strain_dim, self.basis)
-        residual = torch.einsum("nak,pak->npa", b, t) / (self.basis ** 0.5)
-        return linear + self.residual_scale * residual + self.bias.view(1, 1, self.strain_dim)
+        residual = self.residual_forward(q_norm, geom_flat, trunk_norm)
+        return linear + residual + self.bias.view(1, 1, self.strain_dim)
 
 
 class FEStateLinearResidualLEOperator(nn.Module):
@@ -744,6 +799,29 @@ class FEStateLinearResidualLEOperator(nn.Module):
             return b_hat * self.q_std.reshape(1, 1, -1)
         return b_hat * self.q_std.reshape(1, 1, 1, -1)
 
+    def residual_forward(
+        self,
+        q_norm: torch.Tensor,
+        geom_norm: torch.Tensor,
+        trunk_norm: torch.Tensor,
+        *,
+        point_idx: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        del point_idx
+        if q_norm.ndim == 1:
+            q_norm = q_norm.unsqueeze(0)
+        batch = int(q_norm.shape[0])
+        if geom_norm.ndim == 1:
+            geom_norm = geom_norm.unsqueeze(0)
+        if int(geom_norm.shape[0]) == 1 and batch != 1:
+            geom_norm = geom_norm.expand(batch, -1)
+        geom_flat = geom_norm.reshape(batch, -1)
+        q_delta_hat, _q_hat = self._q_hat(q_norm)
+        branch_in = torch.cat([q_delta_hat, geom_flat], dim=-1)
+        b = self.branch(branch_in).reshape(batch, self.strain_dim, self.basis)
+        t = self.trunk(trunk_norm).reshape(int(trunk_norm.shape[0]), self.strain_dim, self.basis)
+        return self.residual_scale * torch.einsum("nak,pak->npa", b, t) / (self.basis ** 0.5)
+
     def forward(
         self,
         q_norm: torch.Tensor,
@@ -761,7 +839,6 @@ class FEStateLinearResidualLEOperator(nn.Module):
             geom_norm = geom_norm.expand(batch, -1)
         geom_flat = geom_norm.reshape(batch, -1)
         q_delta_hat, q_hat = self._q_hat(q_norm)
-        branch_in = torch.cat([q_delta_hat, geom_flat], dim=-1)
         b_base = self.linear_b_hat(
             trunk_norm,
             q_norm=q_norm,
@@ -769,10 +846,8 @@ class FEStateLinearResidualLEOperator(nn.Module):
             point_idx=point_idx,
         )
         linear = torch.einsum("npak,nk->npa", b_base, q_hat)
-        b = self.branch(branch_in).reshape(batch, self.strain_dim, self.basis)
-        t = self.trunk(trunk_norm).reshape(int(trunk_norm.shape[0]), self.strain_dim, self.basis)
-        residual = torch.einsum("nak,pak->npa", b, t) / (self.basis ** 0.5)
-        return linear + self.residual_scale * residual + self.bias.view(1, 1, self.strain_dim)
+        residual = self.residual_forward(q_norm, geom_flat, trunk_norm)
+        return linear + residual + self.bias.view(1, 1, self.strain_dim)
 
 
 FE_BASELINE_OPERATOR_TYPES = (FELinearResidualLEOperator, FEStateLinearResidualLEOperator)
@@ -799,6 +874,25 @@ def jacobian_sample(
 ) -> torch.Tensor:
     def one(q_single_norm: torch.Tensor) -> torch.Tensor:
         return forward_sample(model, q_single_norm, geom_norm, trunk_norm, point_idx=point_idx)[0]
+
+    jac_norm = jacrev(one)(q_norm)
+    return jac_norm / q_std.reshape(1, 1, -1)
+
+
+def jacobian_residual_sample(
+    model: nn.Module,
+    q_norm: torch.Tensor,
+    geom_norm: torch.Tensor,
+    trunk_norm: torch.Tensor,
+    q_std: torch.Tensor,
+    point_idx: torch.Tensor | None = None,
+) -> torch.Tensor:
+    if not hasattr(model, "residual_forward"):
+        raise TypeError("model must expose residual_forward for residual Jacobian training")
+    trunk_use = trunk_norm if point_idx is None else trunk_norm.index_select(0, point_idx)
+
+    def one(q_single_norm: torch.Tensor) -> torch.Tensor:
+        return model.residual_forward(q_single_norm, geom_norm, trunk_use, point_idx=point_idx)[0]
 
     jac_norm = jacrev(one)(q_norm)
     return jac_norm / q_std.reshape(1, 1, -1)
@@ -1060,10 +1154,14 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "b_loss_abs_normed_mse",
         "b_loss_rel_eps_mse",
         "b_loss_action_mse",
+        "residual_b_loss",
+        "residual_b_loss_component_scaled_mse",
+        "residual_b_loss_physical_objective",
         "baseline_b_loss",
         "baseline_b_loss_component_scaled_mse",
         "baseline_b_loss_physical_objective",
         "b_weight_eff",
+        "residual_jacobian_weight_eff",
         "train_LE_local_stack_rel",
         "train_AD_B_local_useful_hat_rel",
         "train_AD_B_local_useful_hat_cos",
@@ -1193,6 +1291,19 @@ def b_weight_for_step(step: int, args: argparse.Namespace) -> float:
     return float(args.b_weight) * tau
 
 
+def residual_jacobian_weight_for_step(step: int, args: argparse.Namespace) -> float:
+    if float(args.residual_jacobian_weight) == 0.0:
+        return 0.0
+    pretrain = int(args.le_pretrain_steps)
+    ramp = int(args.b_ramp_steps)
+    if step <= pretrain:
+        return 0.0
+    if ramp <= 0:
+        return float(args.residual_jacobian_weight)
+    tau = min(1.0, float(step - pretrain) / float(ramp))
+    return float(args.residual_jacobian_weight) * tau
+
+
 def apply_preset_defaults(args: argparse.Namespace) -> argparse.Namespace:
     preset = PRESETS[str(args.preset)]
     for key in PRESET_KEYS:
@@ -1211,6 +1322,9 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     case_ids = list(data_np["case_ids"])
     model = build_model(args, data).to(device=device, dtype=torch.float32)
     opt = torch.optim.AdamW(model.parameters(), lr=float(args.lr), weight_decay=float(args.weight_decay))
+    checkpoint_enabled = bool(args.save_checkpoints or str(args.preset) == "formal-long")
+    latest_checkpoint_path = out_root / "latest.pt"
+    best_checkpoint_path = out_root / "best.pt"
     sample_count = int(data["q"].shape[0])
     le_value_sample_count = int(data["le_value"].shape[0])
     point_count = int(data["le"].shape[1])
@@ -1221,8 +1335,15 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     use_le_loss = float(args.le_weight) != 0.0
     use_ad_loss = float(args.b_weight) != 0.0
     use_baseline_loss = isinstance(model, FE_BASELINE_OPERATOR_TYPES) and float(args.baseline_jacobian_weight) != 0.0
-    if not (use_le_loss or use_ad_loss or use_baseline_loss):
-        raise SystemExit("At least one of --le-weight, --b-weight, or --baseline-jacobian-weight must be non-zero")
+    use_residual_jacobian_loss = (
+        isinstance(model, FE_BASELINE_OPERATOR_TYPES)
+        and float(args.residual_jacobian_weight) != 0.0
+    )
+    if not (use_le_loss or use_ad_loss or use_baseline_loss or use_residual_jacobian_loss):
+        raise SystemExit(
+            "At least one of --le-weight, --b-weight, --baseline-jacobian-weight, "
+            "or --residual-jacobian-weight must be non-zero"
+        )
     le_scale_case, b_scale_case, b_global_scale_case = make_component_scales(
         data,
         case_ids,
@@ -1233,7 +1354,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     history: list[dict[str, Any]] = []
     case_history: list[dict[str, Any]] = []
     initial, initial_cases = evaluate(model, data, case_ids, point_chunk=int(args.eval_point_batch))
-    best = {"step": 0, "b_weight_eff": 0.0, **initial}
+    best = {"step": 0, "b_weight_eff": 0.0, "residual_jacobian_weight_eff": 0.0, **initial}
+    best_state: dict[str, torch.Tensor] | None = None
+    if checkpoint_enabled:
+        best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
     history.append(best)
     for row in initial_cases:
         case_history.append({"step": 0, **row})
@@ -1242,6 +1366,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     for step in range(1, int(args.steps) + 1):
         model.train()
         b_weight_eff = b_weight_for_step(step, args)
+        residual_jacobian_weight_eff = residual_jacobian_weight_for_step(step, args)
         sample_idx = torch.randperm(sample_count, device=device)[:sample_batch]
         le_loss_terms: list[torch.Tensor] = []
         sample_loss_terms: list[torch.Tensor] = []
@@ -1252,6 +1377,9 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         b_abs_terms: list[torch.Tensor] = []
         b_rel_terms: list[torch.Tensor] = []
         b_action_terms: list[torch.Tensor] = []
+        residual_b_terms: list[torch.Tensor] = []
+        residual_b_component_terms: list[torch.Tensor] = []
+        residual_b_physical_terms: list[torch.Tensor] = []
         baseline_b_terms: list[torch.Tensor] = []
         baseline_b_component_terms: list[torch.Tensor] = []
         baseline_b_physical_terms: list[torch.Tensor] = []
@@ -1276,7 +1404,11 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             geom = data["geom_norm"][sample_index].reshape(1, -1)
             trunk = data["trunk_norm_by_case"][case_pos]
             sample_loss = torch.zeros((), device=device)
-            if (use_ad_loss and b_weight_eff != 0.0) or use_baseline_loss:
+            if (
+                (use_ad_loss and b_weight_eff != 0.0)
+                or use_baseline_loss
+                or (use_residual_jacobian_loss and residual_jacobian_weight_eff != 0.0)
+            ):
                 ad_idx = torch.randperm(point_count, device=device)[:ad_point_batch]
                 b_target = data["b"][sample_index].index_select(0, ad_idx)
                 if use_ad_loss and b_weight_eff != 0.0:
@@ -1301,7 +1433,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                     b_abs_terms.append(b_parts["b_loss_abs_normed_mse"].detach())
                     b_rel_terms.append(b_parts["b_loss_rel_eps_mse"].detach())
                     b_action_terms.append(b_parts["b_loss_action_mse"].detach())
-                if use_baseline_loss:
+                baseline_b_hat: torch.Tensor | None = None
+                if use_baseline_loss or (use_residual_jacobian_loss and residual_jacobian_weight_eff != 0.0):
                     baseline_b_hat = linear_b_hat_for_loss(
                         model,
                         q_norm,
@@ -1309,6 +1442,34 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                         trunk.index_select(0, ad_idx),
                         ad_idx,
                     )
+                if use_residual_jacobian_loss and residual_jacobian_weight_eff != 0.0:
+                    residual_target = b_target - baseline_b_hat.detach()
+                    residual_ad_b = jacobian_residual_sample(
+                        model,
+                        q_norm,
+                        geom,
+                        trunk,
+                        data["q_std"],
+                        point_idx=ad_idx,
+                    )
+                    residual_loss, residual_parts = b_loss_objective(
+                        residual_ad_b,
+                        residual_target,
+                        b_scale=b_scale_case[case_pos],
+                        b_global_scale=b_global_scale_case[case_pos],
+                        mode=str(args.residual_b_loss_mode),
+                        physical_aux_weight=float(args.physical_b_aux_weight),
+                        rel_eps_scale=float(args.physical_b_rel_eps_scale),
+                        abs_weight=float(args.physical_b_abs_weight),
+                        rel_weight=float(args.physical_b_rel_weight),
+                        action_weight=float(args.physical_b_action_weight),
+                        action_directions=int(args.physical_b_action_directions),
+                    )
+                    sample_loss = sample_loss + float(residual_jacobian_weight_eff) * residual_loss
+                    residual_b_terms.append(residual_loss.detach())
+                    residual_b_component_terms.append(residual_parts["b_loss_component_scaled_mse"].detach())
+                    residual_b_physical_terms.append(residual_parts["b_loss_physical_objective"].detach())
+                if use_baseline_loss:
                     baseline_loss, baseline_parts = b_loss_objective(
                         baseline_b_hat,
                         b_target,
@@ -1354,6 +1515,13 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 "b_loss_abs_normed_mse": scalar_float(torch.stack(b_abs_terms).mean()) if b_abs_terms else None,
                 "b_loss_rel_eps_mse": scalar_float(torch.stack(b_rel_terms).mean()) if b_rel_terms else None,
                 "b_loss_action_mse": scalar_float(torch.stack(b_action_terms).mean()) if b_action_terms else None,
+                "residual_b_loss": scalar_float(torch.stack(residual_b_terms).mean()) if residual_b_terms else None,
+                "residual_b_loss_component_scaled_mse": (
+                    scalar_float(torch.stack(residual_b_component_terms).mean()) if residual_b_component_terms else None
+                ),
+                "residual_b_loss_physical_objective": (
+                    scalar_float(torch.stack(residual_b_physical_terms).mean()) if residual_b_physical_terms else None
+                ),
                 "baseline_b_loss": scalar_float(torch.stack(baseline_b_terms).mean()) if baseline_b_terms else None,
                 "baseline_b_loss_component_scaled_mse": (
                     scalar_float(torch.stack(baseline_b_component_terms).mean()) if baseline_b_component_terms else None
@@ -1362,6 +1530,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                     scalar_float(torch.stack(baseline_b_physical_terms).mean()) if baseline_b_physical_terms else None
                 ),
                 "b_weight_eff": float(b_weight_eff),
+                "residual_jacobian_weight_eff": float(residual_jacobian_weight_eff),
                 **metrics,
             }
             history.append(row)
@@ -1369,7 +1538,33 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 case_history.append({"step": int(step), **case_row})
             if float(row["selection_score"]) < float(best["selection_score"]):
                 best = dict(row)
+                if checkpoint_enabled:
+                    best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
             print(json.dumps(row, sort_keys=True), flush=True)
+    if checkpoint_enabled:
+        latest_payload = {
+            "model_state_dict": model.state_dict(),
+            "model_class": type(model).__name__,
+            "model_style": str(args.model_style),
+            "preset": str(args.preset),
+            "steps": int(args.steps),
+            "best_metrics": best,
+            "latest_metrics": history[-1],
+            "case_ids": case_ids,
+            "q_mean": data_np["q_mean"],
+            "q_std": data_np["q_std"],
+            "geom_mean": data_np["geom_mean"],
+            "geom_std": data_np["geom_std"],
+            "trunk_mean": data_np["trunk_mean"],
+            "trunk_std": data_np["trunk_std"],
+            "args": vars(args),
+        }
+        torch.save(latest_payload, latest_checkpoint_path)
+        if best_state is not None:
+            best_payload = dict(latest_payload)
+            best_payload["model_state_dict"] = best_state
+            best_payload["latest_metrics"] = best
+            torch.save(best_payload, best_checkpoint_path)
     latest = history[-1]
     latest_cases = [row for row in case_history if int(row["step"]) == int(latest["step"])]
     case031_latest = next((row for row in latest_cases if int(row["case_id"]) == 31), None)
@@ -1413,8 +1608,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 else None
             )
         ),
-        "formal_training": False,
-        "checkpoint_written": False,
+        "formal_training": str(args.preset) == "formal-long",
+        "checkpoint_written": checkpoint_enabled,
+        "latest_checkpoint_path": str(latest_checkpoint_path) if checkpoint_enabled else None,
+        "best_checkpoint_path": str(best_checkpoint_path) if checkpoint_enabled else None,
         "held_out_split": False,
         "uses_case_id_anchor": False,
         "uses_direct_b_head": False,
@@ -1427,9 +1624,11 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             "le_weight": float(args.le_weight),
             "b_weight": float(args.b_weight),
             "baseline_jacobian_weight": float(args.baseline_jacobian_weight),
+            "residual_jacobian_weight": float(args.residual_jacobian_weight),
             "le_value_batch": int(le_value_batch),
             "b_loss_mode": str(args.b_loss_mode),
             "baseline_b_loss_mode": str(args.baseline_b_loss_mode),
+            "residual_b_loss_mode": str(args.residual_b_loss_mode),
             "physical_b_aux_weight": float(args.physical_b_aux_weight),
             "physical_b_abs_weight": float(args.physical_b_abs_weight),
             "physical_b_rel_weight": float(args.physical_b_rel_weight),
@@ -1466,7 +1665,12 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             "plus_value_le_loss": bool(args.use_plus_samples) and use_le_loss,
             "ad_b_loss": use_ad_loss,
             "baseline_b_loss": use_baseline_loss,
-            "physical_action_b_loss": str(args.b_loss_mode) != "component" or str(args.baseline_b_loss_mode) != "component",
+            "residual_jacobian_loss": use_residual_jacobian_loss,
+            "physical_action_b_loss": (
+                str(args.b_loss_mode) != "component"
+                or str(args.baseline_b_loss_mode) != "component"
+                or str(args.residual_b_loss_mode) != "component"
+            ),
             "direct_b_head_loss": False,
             "radial_loss": False,
         },
@@ -1523,7 +1727,7 @@ def main() -> None:
     )
     parser.add_argument("--residual-scale", type=float, default=1.0)
     parser.add_argument("--fe-baseline-scale", type=float, default=1.0)
-    parser.add_argument("--state-baseline-rank", type=int, default=16)
+    parser.add_argument("--state-baseline-rank", type=int, default=None)
     parser.add_argument("--state-baseline-scale", type=float, default=1.0)
     parser.add_argument(
         "--no-detach-state-baseline",
@@ -1547,6 +1751,11 @@ def main() -> None:
         default="component-plus-physical",
         choices=["component", "physical", "component-plus-physical"],
     )
+    parser.add_argument(
+        "--residual-b-loss-mode",
+        default="component-plus-physical",
+        choices=["component", "physical", "component-plus-physical"],
+    )
     parser.add_argument("--physical-b-aux-weight", type=float, default=0.05)
     parser.add_argument("--physical-b-abs-weight", type=float, default=1.0)
     parser.add_argument("--physical-b-rel-weight", type=float, default=0.02)
@@ -1554,6 +1763,12 @@ def main() -> None:
     parser.add_argument("--physical-b-rel-eps-scale", type=float, default=0.02)
     parser.add_argument("--physical-b-action-directions", type=int, default=4)
     parser.add_argument("--baseline-jacobian-weight", type=float, default=1.0)
+    parser.add_argument(
+        "--residual-jacobian-weight",
+        type=float,
+        default=None,
+        help="Extra Sobolev loss on d(residual)/dq against B_target - B_baseline.",
+    )
     parser.add_argument("--le-pretrain-steps", type=int, default=None)
     parser.add_argument("--b-ramp-steps", type=int, default=None)
     parser.add_argument("--sample-batch", type=int, default=None)
@@ -1571,6 +1786,7 @@ def main() -> None:
     parser.add_argument("--grad-clip", type=float, default=None)
     parser.add_argument("--scale-eps", type=float, default=1.0e-12)
     parser.add_argument("--b-scale-floor-frac", type=float, default=1.0e-4)
+    parser.add_argument("--save-checkpoints", action="store_true", help="Write latest.pt and best.pt checkpoints.")
     args = apply_preset_defaults(parser.parse_args())
     if int(args.steps) < 0:
         raise SystemExit("--steps must be non-negative")
@@ -1588,6 +1804,8 @@ def main() -> None:
         raise SystemExit("--state-baseline-scale must be non-negative")
     if float(args.baseline_jacobian_weight) < 0.0:
         raise SystemExit("--baseline-jacobian-weight must be non-negative")
+    if float(args.residual_jacobian_weight) < 0.0:
+        raise SystemExit("--residual-jacobian-weight must be non-negative")
     if float(args.physical_b_aux_weight) < 0.0:
         raise SystemExit("--physical-b-aux-weight must be non-negative")
     if float(args.physical_b_abs_weight) < 0.0:

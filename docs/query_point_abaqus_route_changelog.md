@@ -3,6 +3,141 @@
 This file records the route-level history for the Abaqus real-integration-point
 DeepONet/query-point training line.  Keep it updated whenever this route changes.
 
+## v3 CSS8 affine-quadratic anchor prototype - 2026-06-24 - Value map closes on 10-case pool
+
+Purpose:
+
+- Follow up the `case031` amplitude/nonlinearity audit.
+- Test whether the remaining high-amplitude `case031` LE error is primarily a
+  value-anchor issue.
+- Keep this as a training-pool objective prototype only: no held-out split, no
+  checkpoint, and no generalization claim.
+
+Added / changed:
+
+- Added read-only oracle:
+  `scripts/audit_v3_affine_quadratic_anchor_oracle.py`
+- Extended `scripts/train_v3_css8_formal_objective_prototype.py` with:
+  `--anchor-mode affine-quadratic`
+- Added `--steps 0` support so the closed-form anchor can be evaluated without
+  residual training.
+
+Anchor:
+
+```text
+s = <q_useful_hat - q_mean(case), q_dir(case)>
+
+LE_hat =
+  LE_mean(case,point)
+  + B_mean(case,point) @ (q_useful_hat - q_mean(case))
+  + C0(case,point)
+  + C1(case,point) * s
+  + C2(case,point) * s^2
+  + R(q, geometry, trunk)
+  - R(0, geometry, trunk)
+```
+
+The `C0/C1/C2` coefficients are fitted in closed form per case from the current
+training pool.  They are part of this prototype anchor, not a held-out
+generalization result.
+
+Oracle command:
+
+```powershell
+py -3 scripts\audit_v3_affine_quadratic_anchor_oracle.py `
+  --compact-list D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\multi_case_min10\v3_css8_standard_operator_compact_list.txt `
+  --focus-case 31 `
+  --out-root D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\affine_quadratic_anchor_oracle_10case
+```
+
+Oracle result:
+
+```text
+pooled linear B_mean @ q LE_rel = 0.2930525351
+pooled affine LE_rel = 0.0973463091
+pooled affine-quadratic LE_rel = 0.0098883569
+
+pooled affine AD_B_rel = 0.0236806057
+pooled affine-quadratic AD_B_rel = 0.0236802581
+
+case031:
+  affine LE_rel = 0.0976020099
+  affine-quadratic LE_rel = 0.0099147393
+  affine AD_B_rel = 0.1120560463
+  affine-quadratic AD_B_rel = 0.1120542138
+```
+
+Anchor-only prototype command:
+
+```powershell
+py -3 scripts\train_v3_css8_formal_objective_prototype.py `
+  --compact-list D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\multi_case_min10\v3_css8_standard_operator_compact_list.txt `
+  --out-root D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\formal_objective_prototype_10case_affine_quadratic_anchor_only `
+  --steps 0 `
+  --eval-every 400 `
+  --hidden 128 `
+  --lr 1e-5 `
+  --case-batch 4 `
+  --frame-batch 10 `
+  --le-point-batch 128 `
+  --ad-point-batch 8 `
+  --eval-point-batch 16 `
+  --anchor-mode affine-quadratic
+```
+
+Anchor-only result:
+
+```text
+train_LE_local_stack_rel = 0.0098883007
+train_AD_B_local_useful_hat_rel = 0.0236802567
+train_AD_B_local_useful_hat_cos = 0.9997195601
+B_model_raw_rel = 0.0240008552
+
+case031:
+  LE_rel = 0.0099146822
+  AD_B_rel = 0.1120542139
+```
+
+1600-step prototype result:
+
+```text
+train_LE_local_stack_rel = 0.0098798191
+train_AD_B_local_useful_hat_rel = 0.0236802325
+train_AD_B_local_useful_hat_cos = 0.9997195005
+B_model_raw_rel = 0.0240008291
+
+case031:
+  LE_rel = 0.0099061737
+  AD_B_rel = 0.1120538861
+
+non-case031 latest LE_rel range:
+  about 0.000059 to 0.000453
+```
+
+Interpretation:
+
+- The `case031` value-map problem is largely closed by a scalar
+  amplitude-aware anchor.
+- The full `C0 + C1*s + C2*s^2` correction is required.  A bare `C2*s^2`
+  correction was too weak (`case031 LE_rel` only reached about `0.0752`).
+- The anchor does not hide an AD-B regression: pooled AD-B stays at about
+  `0.02368`, and `case031` AD-B stays at about `0.11205`.
+- Residual training adds little after this anchor; the closed-form anchor
+  already explains the current 10-case value field.
+
+Remaining blocker:
+
+- `case031` still has high AD-B error (`~0.112`) even when its LE value error is
+  low.  The next issue is therefore q-dependent B / tangent modeling, not LE
+  value reconstruction.
+
+Next recommended gate:
+
+- Add a tangent-aware audit/prototype for the affine-quadratic anchor, e.g.
+  inspect whether `B_local_useful_stack_hat` is also a scalar-amplitude function
+  on `case031`, and prototype `B(s,point)` or derivative-consistent cubic value
+  anchors before held-out split claims.
+
 ## v3 CSS8 case031 nonlinearity audit - 2026-06-24 - Amplitude path isolated
 
 Purpose:
@@ -96,6 +231,8 @@ s = <q_useful_hat - q_mean, q_dir_case>
 LE_hat =
   LE_mean(case,point)
   + B_mean(case,point) @ (q_useful_hat - q_mean(case))
+  + C0(case,point)
+  + C1(case,point) * s
   + C2(case,point) * s^2
   + residual(q, geometry, trunk)
   - residual(q_mean or zero anchor)

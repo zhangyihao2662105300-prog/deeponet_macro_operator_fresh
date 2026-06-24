@@ -798,3 +798,94 @@ and should next test:
   amplitude-aware or q-dependent value anchor
   before held-out generalization claims
 ```
+
+## Affine-Quadratic Value Anchor Prototype
+
+The next gate tested the amplitude-aware anchor implied by the case031 audit.
+The read-only oracle is:
+
+```text
+scripts/audit_v3_affine_quadratic_anchor_oracle.py
+```
+
+The formal objective prototype now supports:
+
+```text
+--anchor-mode affine-quadratic
+```
+
+and can run anchor-only evaluation with:
+
+```text
+--steps 0
+```
+
+The prototype anchor is:
+
+```text
+s = <q_useful_hat - q_mean(case), q_dir(case)>
+
+LE_hat =
+  LE_mean(case,point)
+  + B_mean(case,point) @ (q_useful_hat - q_mean(case))
+  + C0(case,point)
+  + C1(case,point) * s
+  + C2(case,point) * s^2
+  + R(q, geometry, trunk)
+  - R(0, geometry, trunk)
+```
+
+The `C0/C1/C2` terms are fitted in closed form per case from the current
+10-case training pool.  They are a prototype value anchor, not a held-out
+generalization mechanism.
+
+Oracle result:
+
+```text
+pooled affine LE_rel = 0.0973463091
+pooled affine-quadratic LE_rel = 0.0098883569
+
+pooled affine AD_B_rel = 0.0236806057
+pooled affine-quadratic AD_B_rel = 0.0236802581
+
+case031:
+  affine LE_rel = 0.0976020099
+  affine-quadratic LE_rel = 0.0099147393
+  affine AD_B_rel = 0.1120560463
+  affine-quadratic AD_B_rel = 0.1120542138
+```
+
+Formal prototype result after 1600 steps:
+
+```text
+train_LE_local_stack_rel = 0.0098798191
+train_AD_B_local_useful_hat_rel = 0.0236802325
+train_AD_B_local_useful_hat_cos = 0.9997195005
+B_model_raw_rel = 0.0240008291
+
+case031:
+  LE_rel = 0.0099061737
+  AD_B_rel = 0.1120538861
+
+non-case031 latest LE_rel range:
+  about 0.000059 to 0.000453
+```
+
+Interpretation:
+
+```text
+The v3 LE value-map issue on the 10-case pool is largely closed by an
+amplitude-aware scalar anchor.
+
+The remaining case031 problem is no longer LE value reconstruction.
+It is the tangent / AD-B side: case031 AD_B_rel remains about 0.112.
+```
+
+Therefore the next v3 gate should not be a held-out split yet.  It should first
+test tangent-aware value/derivative consistency, for example:
+
+```text
+B(s, point) audit on case031
+derivative-consistent cubic value anchor
+or q-dependent B anchor tied to the scalar amplitude path
+```

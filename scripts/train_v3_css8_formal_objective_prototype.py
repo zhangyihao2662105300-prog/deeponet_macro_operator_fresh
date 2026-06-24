@@ -7,10 +7,16 @@ next objective design before any held-out split:
 
 * train-only multi-case normalization
 * per-case/relative LE and B scaling
-* an affine value anchor:
+* an affine or affine-quadratic value anchor:
 
       LE_anchor = LE_mean(case,point)
                 + B_mean(case,point) @ (q_useful_hat - q_mean(case))
+
+      s = <q_useful_hat - q_mean(case), q_dir(case)>
+      LE_anchor_quadratic = LE_anchor
+                          + C0(case,point)
+                          + C1(case,point) * s
+                          + C2(case,point) * s^2
 
 * residual correction with q=0 anchoring
 * AD-B supervision with respect to q_useful_hat
@@ -191,6 +197,26 @@ def load_pool(args: argparse.Namespace) -> dict[str, Any]:
     q_norm, q_mean_global, q_std = standardize_np(q, axis=(0, 1))
     geom_norm, geom_mean, geom_std = standardize_np(geom, axis=0)
     trunk_norm, trunk_mean, trunk_std = standardize_np(trunk, axis=(0, 1))
+    le_case_mean = np.mean(le, axis=1)
+    b_case_mean = np.mean(b, axis=1)
+    q_case_mean = np.mean(q, axis=1)
+    q_dir_norm = np.linalg.norm(q, axis=2)
+    q_frame_dir = q / np.maximum(q_dir_norm[:, :, None], 1.0e-30)
+    q_case_dir = np.mean(q_frame_dir, axis=1)
+    q_case_dir = q_case_dir / np.maximum(np.linalg.norm(q_case_dir, axis=1, keepdims=True), 1.0e-30)
+    quadratic_coeff = np.zeros((len(rows), 3, le.shape[2], le.shape[3]), dtype=np.float64)
+    for case_index in range(len(rows)):
+        dq = q[case_index] - q_case_mean[case_index].reshape(1, -1)
+        signed_amp = dq @ q_case_dir[case_index]
+        affine = le_case_mean[case_index].reshape(1, le.shape[2], le.shape[3]) + np.einsum(
+            "pak,nk->npa",
+            b_case_mean[case_index],
+            dq,
+        )
+        residual = le[case_index] - affine
+        xmat = np.stack([np.ones_like(signed_amp), signed_amp, signed_amp * signed_amp], axis=1)
+        coef = np.linalg.lstsq(xmat, residual.reshape(residual.shape[0], -1), rcond=None)[0]
+        quadratic_coeff[case_index] = coef.reshape(3, le.shape[2], le.shape[3])
     return {
         "case_ids": [int(row["case_id"]) for row in rows],
         "compact_paths": [row["path"] for row in rows],
@@ -198,7 +224,8 @@ def load_pool(args: argparse.Namespace) -> dict[str, Any]:
         "q_norm": q_norm.astype(np.float32),
         "q_mean_global": q_mean_global.astype(np.float64),
         "q_std": q_std.astype(np.float64),
-        "q_case_mean": np.mean(q, axis=1).astype(np.float32),
+        "q_case_mean": q_case_mean.astype(np.float32),
+        "q_case_dir": q_case_dir.astype(np.float32),
         "geom_norm": geom_norm.astype(np.float32),
         "geom_mean": geom_mean.astype(np.float64),
         "geom_std": geom_std.astype(np.float64),
@@ -207,8 +234,9 @@ def load_pool(args: argparse.Namespace) -> dict[str, Any]:
         "trunk_std": trunk_std.astype(np.float64),
         "le": le.astype(np.float32),
         "b": b.astype(np.float32),
-        "le_case_mean": np.mean(le, axis=1).astype(np.float32),
-        "b_case_mean": np.mean(b, axis=1).astype(np.float32),
+        "le_case_mean": le_case_mean.astype(np.float32),
+        "b_case_mean": b_case_mean.astype(np.float32),
+        "quadratic_case_coeff": quadratic_coeff.astype(np.float32),
         "t_eps": t_eps.astype(np.float32),
         "t_q_hat": t_q_hat.astype(np.float32),
         "b_raw": b_raw.astype(np.float32),
@@ -223,12 +251,14 @@ def make_tensors(data_np: dict[str, Any], *, device: torch.device) -> dict[str, 
         "q_mean_global": torch.as_tensor(data_np["q_mean_global"], dtype=dtype, device=device),
         "q_std": torch.as_tensor(data_np["q_std"], dtype=dtype, device=device),
         "q_case_mean": torch.as_tensor(data_np["q_case_mean"], dtype=dtype, device=device),
+        "q_case_dir": torch.as_tensor(data_np["q_case_dir"], dtype=dtype, device=device),
         "geom_norm": torch.as_tensor(data_np["geom_norm"], dtype=dtype, device=device),
         "trunk_norm": torch.as_tensor(data_np["trunk_norm"], dtype=dtype, device=device),
         "le": torch.as_tensor(data_np["le"], dtype=dtype, device=device),
         "b": torch.as_tensor(data_np["b"], dtype=dtype, device=device),
         "le_case_mean": torch.as_tensor(data_np["le_case_mean"], dtype=dtype, device=device),
         "b_case_mean": torch.as_tensor(data_np["b_case_mean"], dtype=dtype, device=device),
+        "quadratic_case_coeff": torch.as_tensor(data_np["quadratic_case_coeff"], dtype=dtype, device=device),
         "t_eps": torch.as_tensor(data_np["t_eps"], dtype=dtype, device=device),
         "t_q_hat": torch.as_tensor(data_np["t_q_hat"], dtype=dtype, device=device),
         "b_raw": torch.as_tensor(data_np["b_raw"], dtype=dtype, device=device),
@@ -245,6 +275,8 @@ class V3FormalObjectivePrototype(nn.Module):
         le_case_mean: torch.Tensor,
         b_case_mean: torch.Tensor,
         q_case_mean: torch.Tensor,
+        q_case_dir: torch.Tensor,
+        quadratic_case_coeff: torch.Tensor,
         hidden: int,
         anchor_mode: str,
     ) -> None:
@@ -252,6 +284,8 @@ class V3FormalObjectivePrototype(nn.Module):
         self.register_buffer("le_case_mean", le_case_mean.clone())
         self.b_case_mean = nn.Parameter(b_case_mean.clone())
         self.register_buffer("q_case_mean", q_case_mean.clone())
+        self.register_buffer("q_case_dir", q_case_dir.clone())
+        self.register_buffer("quadratic_case_coeff", quadratic_case_coeff.clone())
         self.anchor_mode = str(anchor_mode)
         self.state_net = nn.Sequential(
             nn.Linear(q_dim + geom_dim, hidden),
@@ -304,12 +338,21 @@ class V3FormalObjectivePrototype(nn.Module):
         if self.anchor_mode == "linear":
             q_base = q_raw
             offset = 0.0
-        elif self.anchor_mode == "affine":
+        elif self.anchor_mode in {"affine", "affine-quadratic"}:
             q_base = q_raw - self.q_case_mean[case_index].reshape(1, -1)
             offset = le_mean.reshape(1, le_mean.shape[0], 6)
         else:
             raise ValueError(f"unknown anchor_mode {self.anchor_mode!r}")
-        return offset + torch.einsum("pak,nk->npa", b_prior, q_base)
+        anchor = offset + torch.einsum("pak,nk->npa", b_prior, q_base)
+        if self.anchor_mode == "affine-quadratic":
+            if point_idx is None:
+                coeff = self.quadratic_case_coeff[case_index]
+            else:
+                coeff = self.quadratic_case_coeff[case_index].index_select(1, point_idx)
+            signed_amp = torch.sum(q_base * self.q_case_dir[case_index].reshape(1, -1), dim=1)
+            powers = torch.stack([torch.ones_like(signed_amp), signed_amp, signed_amp * signed_amp], dim=1)
+            anchor = anchor + torch.einsum("nm,mpa->npa", powers, coeff)
+        return anchor
 
     def forward_case(
         self,
@@ -475,6 +518,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         le_case_mean=data["le_case_mean"],
         b_case_mean=data["b_case_mean"],
         q_case_mean=data["q_case_mean"],
+        q_case_dir=data["q_case_dir"],
+        quadratic_case_coeff=data["quadratic_case_coeff"],
         hidden=int(args.hidden),
         anchor_mode=str(args.anchor_mode),
     ).to(device=device, dtype=torch.float32)
@@ -574,6 +619,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "geometry_global_hat_dim": int(data["geom_norm"].shape[1]),
         "trunk_features_hat_dim": int(data["trunk_norm"].shape[2]),
         "anchor_mode": str(args.anchor_mode),
+        "quadratic_anchor_coeff_source": "closed-form train-pool per case" if str(args.anchor_mode) == "affine-quadratic" else None,
         "b_anchor_trainable": bool(model.b_case_mean.requires_grad),
         "loss_scale_mode": "per-case",
         "model_inputs": ["q_useful_hat", "geometry_global_hat", "trunk_features_hat"],
@@ -618,11 +664,11 @@ def main() -> None:
     parser.add_argument("--eval-point-batch", type=int, default=16)
     parser.add_argument("--eval-every", type=int, default=300)
     parser.add_argument("--grad-clip", type=float, default=10.0)
-    parser.add_argument("--anchor-mode", choices=["linear", "affine"], default="affine")
+    parser.add_argument("--anchor-mode", choices=["linear", "affine", "affine-quadratic"], default="affine")
     parser.add_argument("--freeze-b-anchor", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
-    if int(args.steps) < 1:
-        raise SystemExit("--steps must be positive")
+    if int(args.steps) < 0:
+        raise SystemExit("--steps must be non-negative")
     if int(args.eval_every) < 1:
         raise SystemExit("--eval-every must be positive")
     train(args)

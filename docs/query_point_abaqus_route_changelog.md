@@ -3,6 +3,143 @@
 This file records the route-level history for the Abaqus real-integration-point
 DeepONet/query-point training line.  Keep it updated whenever this route changes.
 
+## v3 CSS8 formal objective prototype - 2026-06-24 - Affine anchor and per-case scaling
+
+Purpose:
+
+- Move from diagnostic smoke scripts toward a formal v3 objective prototype.
+- Test whether the 10-case training pool can be stably overfit using:
+  train-only normalization, per-case relative LE/B scaling, AD-B supervision,
+  and a stronger value anchor.
+- Keep this as a prototype only: no held-out split, no checkpoint, no formal
+  generalization claim.
+
+Added:
+
+- `scripts/train_v3_css8_formal_objective_prototype.py`
+
+Objective prototype:
+
+```text
+LE_hat =
+  LE_mean(case,point)
+  + B_mean(case,point) @ (q_useful_hat - q_mean(case))
+  + R(q_useful_hat, geometry_global_hat, trunk_features_hat)
+  - R(0, geometry_global_hat, trunk_features_hat)
+```
+
+The objective uses per-case/relative scaling for both LE and B losses:
+
+```text
+LE loss scale = rms(LE_local_stack for that case)
+B  loss scale = rms(B_local_useful_stack_hat for that case)
+```
+
+Affine-anchor command:
+
+```powershell
+py -3 scripts\train_v3_css8_formal_objective_prototype.py `
+  --compact-list D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\multi_case_min10\v3_css8_standard_operator_compact_list.txt `
+  --out-root D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\formal_objective_prototype_10case_affine `
+  --steps 1600 `
+  --eval-every 400 `
+  --hidden 128 `
+  --lr 1e-5 `
+  --case-batch 4 `
+  --frame-batch 10 `
+  --le-point-batch 128 `
+  --ad-point-batch 8 `
+  --eval-point-batch 16 `
+  --anchor-mode affine
+```
+
+Affine-anchor result with frozen B anchor:
+
+```text
+initial train_LE_local_stack_rel = 0.0973462090
+initial train_AD_B_local_useful_hat_rel = 0.0236806050
+
+latest step = 1600
+train_LE_local_stack_rel = 0.0958199650
+train_AD_B_local_useful_hat_rel = 0.0237608757
+train_AD_B_local_useful_hat_cos = 0.9997175932
+B_model_raw_rel = 0.0240830462
+
+case031:
+  train_LE_local_stack_rel = 0.0960717276
+  train_AD_B_local_useful_hat_rel = 0.1120867655
+```
+
+Comparison with the previous value anchor:
+
+```text
+B_mean(case,point) @ q_useful_hat:
+  case031 LE_rel ~= 0.2938258832
+
+LE_mean + B_mean @ (q - q_mean):
+  case031 LE_rel ~= 0.0976 initially
+```
+
+Thus the affine anchor fixes a large part of the case031 value error before
+residual training begins.
+
+Trainable-B-anchor command:
+
+```powershell
+py -3 scripts\train_v3_css8_formal_objective_prototype.py `
+  --compact-list D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\multi_case_min10\v3_css8_standard_operator_compact_list.txt `
+  --out-root D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\formal_objective_prototype_10case_affine_trainableB `
+  --steps 1600 `
+  --eval-every 400 `
+  --hidden 128 `
+  --lr 1e-5 `
+  --case-batch 4 `
+  --frame-batch 10 `
+  --le-point-batch 128 `
+  --ad-point-batch 8 `
+  --eval-point-batch 16 `
+  --anchor-mode affine `
+  --no-freeze-b-anchor
+```
+
+Trainable-B-anchor result:
+
+```text
+latest step = 1600
+train_LE_local_stack_rel = 0.0934077054
+train_AD_B_local_useful_hat_rel = 0.0237150602
+train_AD_B_local_useful_hat_cos = 0.9997186661
+B_model_raw_rel = 0.0240362827
+
+case031:
+  train_LE_local_stack_rel = 0.0936552733
+  train_AD_B_local_useful_hat_rel = 0.1120703891
+
+9/10 non-case031 cases:
+  train_LE_local_stack_rel ranges roughly 0.0019--0.0091
+  train_AD_B_local_useful_hat_rel remains roughly 0.0017--0.0118
+```
+
+Interpretation:
+
+- The formal-objective prototype confirms the next objective direction:
+  per-case/relative scaling plus affine value anchor.
+- Low-amplitude cases are no longer sacrificed.
+- A trainable B anchor improves the 9 non-case031 cases substantially while
+  keeping AD-B stable.
+- `case031` remains a hard case even with affine anchor and trainable B anchor:
+  its LE improves from ~0.294 to ~0.094, but does not fall to the 0.001--0.01
+  range of the other cases.
+- The next issue is therefore not compact data coverage.  It is `case031`
+  value-map nonlinearity / q-dependent anchor / amplitude-path behavior.
+
+Next recommended gate:
+
+- Add a q-dependent or small nonlinear value anchor for the v3 formal objective,
+  or run a focused case031 amplitude/path audit before held-out splits.
+- Do not judge v3 held-out generalization until the 10-case training pool is
+  stable under the formal objective.
+
 ## v3 CSS8 overfit diagnosis - 2026-06-24 - Case scale and value-anchor audit
 
 Purpose:

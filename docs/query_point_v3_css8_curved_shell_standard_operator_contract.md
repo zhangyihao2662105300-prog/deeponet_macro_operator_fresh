@@ -651,3 +651,76 @@ The next blocker is formal training objective design:
 Therefore the next gate should refine the formal v3 objective/value anchor on
 the existing 10-case training pool before adding more data or judging held-out
 generalization.
+
+## Formal Objective Prototype
+
+The refined objective prototype uses an affine case-wise value anchor:
+
+```text
+LE_hat =
+  LE_mean(case,point)
+  + B_mean(case,point) @ (q_useful_hat - q_mean(case))
+  + R(q_useful_hat, geometry_global_hat, trunk_features_hat)
+  - R(0, geometry_global_hat, trunk_features_hat)
+```
+
+and per-case relative scaling:
+
+```text
+LE loss scale = rms(LE_local_stack for that case)
+B  loss scale = rms(B_local_useful_stack_hat for that case)
+```
+
+The prototype script is:
+
+```text
+scripts/train_v3_css8_formal_objective_prototype.py
+```
+
+With frozen B anchor on the current 10-case training pool:
+
+```text
+train_LE_local_stack_rel = 0.0958199650
+train_AD_B_local_useful_hat_rel = 0.0237608757
+train_AD_B_local_useful_hat_cos = 0.9997175932
+B_model_raw_rel = 0.0240830462
+
+case031 LE_rel = 0.0960717276
+case031 AD_B_rel = 0.1120867655
+```
+
+With trainable B anchor:
+
+```text
+train_LE_local_stack_rel = 0.0934077054
+train_AD_B_local_useful_hat_rel = 0.0237150602
+train_AD_B_local_useful_hat_cos = 0.9997186661
+B_model_raw_rel = 0.0240362827
+
+case031 LE_rel = 0.0936552733
+case031 AD_B_rel = 0.1120703891
+```
+
+The important interpretation is case-wise:
+
+```text
+9/10 non-case031 cases:
+  LE_rel roughly 0.0019--0.0091 under trainable B anchor
+  AD_B_rel remains low
+
+case031:
+  B_mean @ q gave LE_rel about 0.294
+  affine anchor improves this to about 0.096
+  trainable B anchor only improves it to about 0.094
+```
+
+This means the v3 formal objective should keep:
+
+```text
+per-case / relative scaling
+affine value anchor
+explicit AD-B supervision
+```
+
+but `case031` still needs a stronger q-dependent/nonlinear value anchor or a
+focused amplitude-path audit before held-out split results should be trusted.

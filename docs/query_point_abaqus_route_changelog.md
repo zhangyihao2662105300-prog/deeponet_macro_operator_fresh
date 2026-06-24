@@ -3,6 +3,105 @@
 This file records the route-level history for the Abaqus real-integration-point
 DeepONet/query-point training line.  Keep it updated whenever this route changes.
 
+## v3 single-frame radial operator smoke - 2026-06-24 - Deployable interface runs, learning not closed
+
+Purpose:
+
+- Move one step away from the successful `hybrid-cubic` per-case oracle.
+- Test the intended deployment interface on the current 10-case training pool:
+
+```text
+input:
+  one current q_useful_hat frame
+  geometry_global_hat
+  trunk_features_hat / query point
+
+output:
+  LE_local_stack
+
+AD target:
+  dLE_local_stack / dq_useful_hat
+```
+
+- Keep this as a training-pool smoke only: no held-out split, no checkpoint,
+  and no final performance claim.
+
+Added:
+
+- `scripts/train_v3_single_frame_radial_operator_smoke.py`
+
+Single-frame radial form:
+
+```text
+s = ||q_useful_hat||
+d = stop_gradient(q_useful_hat / (s + eps))
+q_perp = q_useful_hat - s * d
+
+LE_hat(q, point) = V_hat(s, d, geometry, point)
+                 + B_hat(s, d, geometry, point) @ q_perp
+```
+
+The radial consistency loss enforces:
+
+```text
+dV_hat/ds ~= B_hat @ d
+```
+
+so that autograd at the current single frame can recover both the radial and
+transverse tangent contributions.
+
+Command:
+
+```powershell
+py -3 scripts\train_v3_single_frame_radial_operator_smoke.py `
+  --compact-list D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\multi_case_min10\v3_css8_standard_operator_compact_list.txt `
+  --out-root D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\single_frame_radial_operator_smoke_10case `
+  --steps 600 `
+  --eval-every 200 `
+  --hidden 128 `
+  --lr 1e-4 `
+  --sample-batch 8 `
+  --le-point-batch 128 `
+  --ad-point-batch 8 `
+  --eval-point-batch 16 `
+  --le-weight 1.0 `
+  --b-weight 0.1 `
+  --radial-weight 0.1
+```
+
+Result after 600 steps:
+
+```text
+overall:
+  train_LE_local_stack_rel = 1.0012407303
+  train_AD_B_local_useful_hat_rel = 0.9635614157
+  train_AD_B_local_useful_hat_cos = 0.3446145356
+  B_model_raw_rel = 0.9650352597
+
+case031:
+  LE_rel = 1.0011492968
+  AD_B_rel = 0.9606473446
+  B_model_raw_rel = 0.9617090225
+```
+
+Interpretation:
+
+- The single-frame/radial code path is executable end to end:
+  loader, normalized `q_useful_hat`, geometry/trunk inputs, `LE_local_stack`
+  output, autograd `AD-B`, and raw-B back projection all run.
+- The model does not yet reproduce the current training pool.  `LE_rel` stays
+  near `1.0`, while `AD_B_rel` only improves mildly from `1.0` to about `0.96`.
+- This is therefore a useful negative smoke result: the final single-frame
+  interface is now testable, but the current naive radial network has not
+  replaced the per-case `hybrid-cubic` oracle.
+
+Boundary:
+
+- No `case_id`, `q_mean(case)`, or multi-frame case anchor is used as an input.
+- No old true176 labels are used.
+- No checkpoint or large data artifact is written to the repository.
+- This is not a held-out generalization result and not a final v3 model.
+
 ## v3 CSS8 hybrid-cubic anchor prototype - 2026-06-24 - Value and tangent close together
 
 Purpose:

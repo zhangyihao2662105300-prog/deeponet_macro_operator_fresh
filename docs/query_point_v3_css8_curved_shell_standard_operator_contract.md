@@ -1049,3 +1049,92 @@ This is not a held-out or deployable generalization result.
 The next model-design step is to make the hybrid anchor coefficients
 predictable from geometry/load-direction features, or to run a cautious
 leave-one-case diagnostic with the limitation explicitly stated.
+
+## Single-Frame Radial Operator Smoke
+
+The next deployable-interface smoke removes the per-case anchor inputs used by
+the hybrid oracle.  Each frame is treated as an independent sample:
+
+```text
+input:
+  q_useful_hat for the current frame
+  geometry_global_hat
+  trunk_features_hat for the query point
+
+output:
+  LE_local_stack for the current frame/query point
+
+AD:
+  dLE_local_stack / dq_useful_hat
+```
+
+Prototype script:
+
+```text
+scripts/train_v3_single_frame_radial_operator_smoke.py
+```
+
+The model decomposes the current displacement into a radial state and an
+infinitesimal transverse perturbation:
+
+```text
+s = ||q_useful_hat||
+d = stop_gradient(q_useful_hat / (s + eps))
+q_perp = q_useful_hat - s * d
+
+LE_hat(q, point) = V_hat(s, d, geometry, point)
+                 + B_hat(s, d, geometry, point) @ q_perp
+```
+
+The radial consistency term checks that the scalar-path value head and the
+tangent head agree along the current direction:
+
+```text
+dV_hat/ds ~= B_hat @ d
+```
+
+The smoke command used on the 10-case pool was:
+
+```powershell
+py -3 scripts\train_v3_single_frame_radial_operator_smoke.py `
+  --compact-list D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\multi_case_min10\v3_css8_standard_operator_compact_list.txt `
+  --out-root D:\IS-FEM\outputs\query_point_v3_css8_standard_operator\single_frame_radial_operator_smoke_10case `
+  --steps 600 `
+  --eval-every 200 `
+  --hidden 128 `
+  --lr 1e-4 `
+  --sample-batch 8 `
+  --le-point-batch 128 `
+  --ad-point-batch 8 `
+  --eval-point-batch 16 `
+  --le-weight 1.0 `
+  --b-weight 0.1 `
+  --radial-weight 0.1
+```
+
+Observed result:
+
+```text
+train_LE_local_stack_rel = 1.0012407303
+train_AD_B_local_useful_hat_rel = 0.9635614157
+train_AD_B_local_useful_hat_cos = 0.3446145356
+B_model_raw_rel = 0.9650352597
+
+case031:
+  LE_rel = 1.0011492968
+  AD_B_rel = 0.9606473446
+  B_model_raw_rel = 0.9617090225
+```
+
+Interpretation:
+
+```text
+Executable path: yes.
+Training-pool closure: no.
+Held-out/generalization claim: no.
+```
+
+This smoke is useful because it matches the intended one-frame inference
+interface and proves that the v3 compact fields are sufficient for the
+deployable path.  It also shows that a naive single-frame radial network has
+not yet replaced the non-deployable per-case hybrid-cubic oracle.

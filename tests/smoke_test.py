@@ -946,7 +946,9 @@ def test_macro16_source128_teacher_builder_writes_force_closing_compact() -> Non
         b128_macro[:, :, 1, 1] = np.linspace(0.1, 0.2, p).reshape(1, p)
         b128_source = np.zeros_like(b128_macro)
         b128_source[..., TRUE176_MACRO_TO_KEEP_FLAT] = b128_macro
-        ivol = np.full((1, p), 0.01 / p, dtype=np.float64)
+        geom = Macro16GeometryMap(x16)
+        fields = geom.eval_points(macro16_source128_point_table())
+        ivol = (np.asarray(fields["integration_weight_hat"], dtype=np.float64) * float(geom.l_ref) ** 3).reshape(1, p)
         stress = np.einsum("ab,npb->npa", elastic_d, le128)
         force_macro = np.einsum("npaj,npa,np->nj", b128_macro, stress, np.broadcast_to(ivol, (n, p)))
         stiffness_macro = np.einsum("npaj,ab,npbk,np->njk", b128_macro, elastic_d, b128_macro, np.broadcast_to(ivol, (n, p)))
@@ -1002,7 +1004,9 @@ def test_macro16_source128_teacher_builder_writes_force_closing_compact() -> Non
             assert z["LE_macro"].shape == (n, 128, 6)
             assert z["B_macro"].shape == (n, 128, 6, 48)
             assert z["integration_weight_hat"].shape == (n, 128)
-            assert str(np.asarray(z["integration_weight_coordinate"]).reshape(-1)[0]) == "physical-volume"
+            assert z["integration_weight_phys"].shape == (n, 128)
+            assert str(np.asarray(z["integration_weight_coordinate"]).reshape(-1)[0]) == "hat-dimensionless"
+            assert str(np.asarray(z["integration_weight_phys_coordinate"]).reshape(-1)[0]) == "physical-volume"
             assert "X_macro" not in z.files
         audit_args = SimpleNamespace(
             compact=[compact],
@@ -1026,6 +1030,66 @@ def test_macro16_source128_teacher_builder_writes_force_closing_compact() -> Non
         assert row["weight"]["weight_mode"] == "as-stored"
         assert row["force"]["rel"] < 1.0e-6
         assert row["stiffness"]["rel"] < 1.0e-6
+
+
+def test_macro16_source128_compact_separates_raw_hat_scale_contract() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        source = root / "complete_case009_scaled_source128.npz"
+        out_root = root / "source128_scaled"
+        n = 2
+        p = 128
+        x16 = (2.5 * macro16_flat_x16()).astype(np.float32)
+        q48 = np.zeros((n, 48), dtype=np.float32)
+        q48[1, 3] = 0.75
+        le128 = np.zeros((n, p, 6), dtype=np.float32)
+        b128 = np.zeros((n, p, 6, 48), dtype=np.float32)
+        b128[:, :, 0, 3] = 2.0
+        ivol = np.full((1, p), 0.123 / p, dtype=np.float64)
+        np.savez(
+            source,
+            q48_raw=q48,
+            X16=x16,
+            LE128_base=le128,
+            B_LE128_forward=b128,
+            ip_IVOL_abaqus=ivol,
+            ip_keys=np.asarray([[elem, ip, 0] for elem in range(1, 17) for ip in range(1, 9)], dtype=np.int64),
+            case_id=np.asarray([9, 9], dtype=np.int64),
+            strain_field=np.asarray("LE", dtype=object),
+            B_label_strain_field=np.asarray("LE", dtype=object),
+        )
+        build_args = SimpleNamespace(
+            compact=[source],
+            compact_list=[],
+            out_root=out_root,
+            case_limit=0,
+            frame_stride=1,
+            max_frames_per_compact=0,
+            allow_missing_ip_keys=False,
+            strain_coordinate_mode="global-to-macro-local",
+            source_node_order="macro16",
+            volume_weight_mode="ip-ivol",
+        )
+        summary = build_macro16_source128_teacher(build_args)
+        compact = Path(summary["cases"][0]["macro16_compact"])
+        with np.load(compact, allow_pickle=True) as z:
+            l_ref = np.asarray(z["L_ref"], dtype=np.float64)
+            assert z["X16_raw"].shape == (n, 16, 3)
+            assert z["X_center"].shape == (n, 3)
+            assert z["X16_hat"].shape == (n, 16, 3)
+            assert np.allclose(np.asarray(z["q48_hat"], dtype=np.float64) * l_ref, z["q48_raw"])
+            assert np.allclose(np.asarray(z["B_macro_qhat"], dtype=np.float64), np.asarray(z["B_macro_qraw"], dtype=np.float64) * l_ref.reshape(n, 1, 1, 1))
+            assert np.allclose(np.asarray(z["integration_weight_phys"], dtype=np.float64), np.asarray(z["integration_weight_hat"], dtype=np.float64) * l_ref**3)
+            assert str(np.asarray(z["integration_weight_coordinate"]).reshape(-1)[0]) == "hat-dimensionless"
+            assert str(np.asarray(z["integration_weight_phys_coordinate"]).reshape(-1)[0]) == "physical-volume"
+            assert not np.allclose(z["requested_integration_weight_phys"], z["integration_weight_phys"])
+
+        point_table = macro16_standard_point_table(plane_order=3, thickness_order=2)
+        data = load_macro16_compacts([str(compact)], point_table=point_table)
+        with np.load(compact, allow_pickle=True) as z:
+            assert np.allclose(data.q48_hat, z["q48_hat"])
+            assert np.allclose(data.b, z["B_macro_qhat"])
+            assert np.allclose(data.weights, z["integration_weight_hat"])
 
 
 def test_macro16_source128_generality_planner_writes_three_worker_manifest() -> None:

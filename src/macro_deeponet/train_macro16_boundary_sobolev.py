@@ -30,7 +30,9 @@ from .macro16_geometry import (
     MACRO16_CONTRACT_VERSION,
     Macro16PointTable,
     build_macro16_feature_batch,
+    macro16_source128_point_table,
     macro16_standard_point_table,
+    scale_consistency_report,
 )
 from .models import Macro16BoundaryDeepONet, Macro16BoundaryDeepONetWithLE0
 from .train_true176_deeponet_sobolev import ad_jacobian, cos_np, rel_np, write_json
@@ -115,6 +117,7 @@ def _case_id_from_path(path: Path) -> int:
 
 def _as_frame_x16(z: np.lib.npyio.NpzFile, path: Path, n_total: int, rows: np.ndarray) -> np.ndarray:
     candidates = (
+        "X16_raw",
         "X16",
         "X16_ref",
         "X_keep",
@@ -135,17 +138,51 @@ def _as_frame_x16(z: np.lib.npyio.NpzFile, path: Path, n_total: int, rows: np.nd
     raise KeyError(f"{path}: missing X16 or X_keep. Macro16 training must not use X_macro or CSS8 internal nodes.")
 
 
-def _as_q48(z: np.lib.npyio.NpzFile, path: Path, n_total: int, rows: np.ndarray) -> np.ndarray:
-    for key in ("q48_raw", "q48_hat", "q_boundary"):
+def _frame_array(
+    z: np.lib.npyio.NpzFile,
+    path: Path,
+    n_total: int,
+    rows: np.ndarray,
+    key: str,
+    tail: tuple[int, ...],
+) -> np.ndarray:
+    vals = np.asarray(z[key], dtype=np.float32)
+    if vals.shape == (n_total,) + tuple(tail):
+        return vals[rows]
+    raise ValueError(f"{path}: {key} must have shape [{n_total},{','.join(str(v) for v in tail)}], got {vals.shape}")
+
+
+def _as_optional_q48(z: np.lib.npyio.NpzFile, path: Path, n_total: int, rows: np.ndarray, keys: tuple[str, ...]) -> tuple[np.ndarray | None, str]:
+    for key in keys:
         if key not in z.files:
             continue
         vals = np.asarray(z[key], dtype=np.float32)
         if vals.shape == (n_total, 48):
-            return vals[rows]
+            return vals[rows], key
         if vals.shape == (n_total, 16, 3):
-            return vals[rows].reshape(rows.size, 48)
+            return vals[rows].reshape(rows.size, 48), key
         raise ValueError(f"{path}: {key} must have shape [{n_total},48] or [{n_total},16,3], got {vals.shape}")
-    raise KeyError(f"{path}: missing q48_raw q48_hat or q_boundary")
+    return None, ""
+
+
+def _as_q48_hat(
+    z: np.lib.npyio.NpzFile,
+    path: Path,
+    n_total: int,
+    rows: np.ndarray,
+    l_ref: np.ndarray,
+    *,
+    scale_mode: str,
+) -> tuple[np.ndarray, np.ndarray | None, str, str]:
+    q_hat, q_hat_key = _as_optional_q48(z, path, n_total, rows, ("q48_hat",))
+    q_raw, q_raw_key = _as_optional_q48(z, path, n_total, rows, ("q48_raw", "q_boundary"))
+    if q_hat is not None:
+        return q_hat.astype(np.float32), q_raw, q_hat_key, q_raw_key
+    if q_raw is None:
+        raise KeyError(f"{path}: missing q48_hat or legacy q48_raw/q_boundary")
+    if str(scale_mode).strip().lower() == "physical":
+        return (q_raw / np.maximum(l_ref, 1.0e-12)).astype(np.float32), q_raw, "q48_raw/L_ref", q_raw_key
+    return q_raw.astype(np.float32), None, f"legacy_{q_raw_key}_as_hat", q_raw_key
 
 
 def _as_le(z: np.lib.npyio.NpzFile, path: Path, n_total: int, rows: np.ndarray, point_count: int) -> np.ndarray:
@@ -162,30 +199,119 @@ def _as_le(z: np.lib.npyio.NpzFile, path: Path, n_total: int, rows: np.ndarray, 
     raise KeyError(f"{path}: missing LE_macro or compatible LE label")
 
 
-def _as_b(z: np.lib.npyio.NpzFile, path: Path, n_total: int, rows: np.ndarray, point_count: int) -> np.ndarray:
-    for key in ("B_macro", "B_macro_q48", "B_LE_macro", "B_LE128_forward", "b"):
+def _as_optional_b(
+    z: np.lib.npyio.NpzFile,
+    path: Path,
+    n_total: int,
+    rows: np.ndarray,
+    point_count: int,
+    keys: tuple[str, ...],
+) -> tuple[np.ndarray | None, str]:
+    for key in keys:
         if key not in z.files:
             continue
         vals = np.asarray(z[key], dtype=np.float32)
         if vals.shape == (n_total, point_count, 6, 48):
-            return vals[rows]
+            return vals[rows], key
         raise ValueError(f"{path}: {key} must have shape [{n_total},{point_count},6,48], got {vals.shape}")
-    raise KeyError(f"{path}: missing B_macro or compatible B label with 48 q columns")
+    return None, ""
 
 
-def _length_scale(z: np.lib.npyio.NpzFile, n_total: int, rows: np.ndarray) -> np.ndarray:
-    for key in ("H", "length_scale", "length_scale_H", "macro_length_scale"):
+def _as_b_qhat(
+    z: np.lib.npyio.NpzFile,
+    path: Path,
+    n_total: int,
+    rows: np.ndarray,
+    point_count: int,
+    l_ref: np.ndarray,
+    *,
+    scale_mode: str,
+    b_label_coordinate: str,
+) -> tuple[np.ndarray, np.ndarray | None, str, str]:
+    b_hat, b_hat_key = _as_optional_b(z, path, n_total, rows, point_count, ("B_macro_qhat",))
+    b_raw, b_raw_key = _as_optional_b(
+        z,
+        path,
+        n_total,
+        rows,
+        point_count,
+        ("B_macro_qraw", "B_macro", "B_macro_q48", "B_LE_macro", "B_LE128_forward", "b"),
+    )
+    if b_hat is not None:
+        return b_hat.astype(np.float32), b_raw, b_hat_key, b_raw_key
+    if b_raw is None:
+        raise KeyError(f"{path}: missing B_macro_qhat or compatible legacy B label with 48 q columns")
+    coord = str(b_label_coordinate).strip().lower().replace("_", "-")
+    if coord == "auto":
+        coord = "physical" if str(scale_mode).strip().lower() == "physical" else "dimensionless"
+    if coord in {"physical", "dimensional", "q-phys"} and str(scale_mode).strip().lower() == "physical":
+        return (b_raw * l_ref.reshape(l_ref.shape[0], 1, 1, 1)).astype(np.float32), b_raw, f"{b_raw_key}*L_ref", b_raw_key
+    if coord in {"dimensionless", "normalized", "hat", "q-hat"}:
+        return b_raw.astype(np.float32), None, f"legacy_{b_raw_key}_as_qhat", b_raw_key
+    if coord in {"physical", "dimensional", "q-phys"}:
+        return b_raw.astype(np.float32), None, f"legacy_{b_raw_key}_as_qhat", b_raw_key
+    raise ValueError("b_label_coordinate must be auto physical or dimensionless")
+
+
+def _length_scale(z: np.lib.npyio.NpzFile, n_total: int, rows: np.ndarray) -> tuple[np.ndarray | None, str]:
+    for key in ("L_ref", "H", "length_scale", "length_scale_H", "macro_length_scale"):
         if key not in z.files:
             continue
         vals = np.asarray(z[key], dtype=np.float32)
         if vals.ndim == 0 or vals.shape == (1,):
-            return np.full((rows.size, 1), float(vals.reshape(-1)[0]), dtype=np.float32)
+            return np.full((rows.size, 1), float(vals.reshape(-1)[0]), dtype=np.float32), key
         if vals.shape == (n_total,):
-            return vals[rows].reshape(-1, 1).astype(np.float32)
+            return vals[rows].reshape(-1, 1).astype(np.float32), key
         if vals.shape == (n_total, 1):
-            return vals[rows].astype(np.float32)
+            return vals[rows].astype(np.float32), key
         raise ValueError(f"{key} must be scalar [N] or [N,1], got {vals.shape}")
-    return np.ones((rows.size, 1), dtype=np.float32)
+    return None, ""
+
+
+def _point_table_from_compact(z: np.lib.npyio.NpzFile, path: Path, default: Macro16PointTable, point_count: int) -> Macro16PointTable:
+    if default.xi.shape[0] == point_count:
+        return default
+    if "macro16_point_xi" in z.files:
+        xi = np.asarray(z["macro16_point_xi"], dtype=np.float64)
+        source128 = macro16_source128_point_table()
+        if xi.shape == source128.xi.shape and np.allclose(xi, source128.xi, atol=1.0e-7):
+            return source128
+    raise ValueError(
+        f"{path}: compact has {point_count} Macro16 points, but the selected point table has {default.xi.shape[0]}. "
+        "For source128 compacts, keep macro16_point_xi from the builder so the loader can select the 128-point rule."
+    )
+
+
+def _as_weights_hat(
+    z: np.lib.npyio.NpzFile,
+    path: Path,
+    n_total: int,
+    rows: np.ndarray,
+    point_count: int,
+    l_ref: np.ndarray,
+    geometry_weights_hat: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray | None, str, str]:
+    weight_hat: np.ndarray | None = None
+    weight_hat_key = ""
+    weight_phys: np.ndarray | None = None
+    weight_phys_key = ""
+    if "integration_weight_hat" in z.files:
+        weight_hat = _frame_array(z, path, n_total, rows, "integration_weight_hat", (point_count,))
+        weight_hat_key = "integration_weight_hat"
+    if "integration_weight_phys" in z.files:
+        weight_phys = _frame_array(z, path, n_total, rows, "integration_weight_phys", (point_count,))
+        weight_phys_key = "integration_weight_phys"
+    coord = _scalar_text(z, "integration_weight_coordinate", "").strip().lower().replace("_", "-")
+    if weight_hat is not None and coord in {"physical-volume", "physical", "ivol", "abaqus-ivol"} and weight_phys is None:
+        weight_phys = weight_hat
+        weight_phys_key = "legacy_integration_weight_hat_physical_volume"
+        weight_hat = weight_phys / np.maximum(l_ref, 1.0e-12) ** 3
+        weight_hat_key = "legacy_integration_weight_hat/L_ref^3"
+    if weight_hat is not None:
+        return weight_hat.astype(np.float32), weight_phys, weight_hat_key, weight_phys_key
+    if weight_phys is not None:
+        return (weight_phys / np.maximum(l_ref, 1.0e-12) ** 3).astype(np.float32), weight_phys, "integration_weight_phys/L_ref^3", weight_phys_key
+    return geometry_weights_hat.astype(np.float32), None, "generated_from_X16", ""
 
 
 def _rows(n_total: int, *, frame_stride: int, max_frames: int) -> np.ndarray:
@@ -251,29 +377,62 @@ def load_macro16_compacts(
             n_total = _infer_n(z, path)
             rows = _rows(n_total, frame_stride=frame_stride, max_frames=max_frames_per_compact)
             x16_raw = _as_frame_x16(z, path, n_total, rows)
-            q_raw = _as_q48(z, path, n_total, rows)
-            le = _as_le(z, path, n_total, rows, point_table.xi.shape[0])
-            b_raw = _as_b(z, path, n_total, rows, point_table.xi.shape[0])
-            h = _length_scale(z, n_total, rows)
-            if mode == "physical":
-                if np.allclose(h, 1.0) and not any(k in z.files for k in ("H", "length_scale", "length_scale_H", "macro_length_scale")):
+            point_count = int(np.asarray(z["LE_macro"]).shape[1]) if "LE_macro" in z.files else int(point_table.xi.shape[0])
+            cur_point_table = _point_table_from_compact(z, path, point_table, point_count)
+            le = _as_le(z, path, n_total, rows, cur_point_table.xi.shape[0])
+            x16_hat, point_features, geometry_weights_hat, computed_l_ref, meta = build_macro16_feature_batch(x16_raw, cur_point_table)
+            l_ref_file, l_ref_key = _length_scale(z, n_total, rows)
+            l_ref = l_ref_file if l_ref_file is not None else computed_l_ref
+            if mode == "physical" and l_ref_file is None:
+                if not any(k in z.files for k in ("L_ref", "H", "length_scale", "length_scale_H", "macro_length_scale")):
                     raise ValueError(f"{path}: scale_mode=physical requires explicit H or length_scale")
-            x16_hat, point_features, weights, l_ref, meta = build_macro16_feature_batch(x16_raw, point_table)
-            if mode == "physical":
-                q_hat = q_raw / np.maximum(l_ref, 1.0e-12)
-            else:
-                q_hat = q_raw
-            coord = str(b_label_coordinate).strip().lower().replace("_", "-")
-            if coord == "auto":
-                coord = "physical" if mode == "physical" else "dimensionless"
-            if coord in {"physical", "dimensional", "q-phys"} and mode == "physical":
-                b = b_raw * l_ref.reshape(l_ref.shape[0], 1, 1, 1)
-            elif coord in {"dimensionless", "normalized", "hat", "q-hat"}:
-                b = b_raw
-            elif coord in {"physical", "dimensional", "q-phys"} and mode == "normalized":
-                b = b_raw
-            else:
-                raise ValueError("b_label_coordinate must be auto physical or dimensionless")
+            if "X16_hat" in z.files:
+                compact_x16_hat = _frame_array(z, path, n_total, rows, "X16_hat", (16, 3))
+                if not np.allclose(compact_x16_hat, x16_hat, rtol=1.0e-5, atol=1.0e-6):
+                    raise ValueError(f"{path}: X16_hat is inconsistent with X16_raw/X16 and L_ref")
+                x16_hat = compact_x16_hat.astype(np.float32)
+            if "X_center" in z.files:
+                compact_center = _frame_array(z, path, n_total, rows, "X_center", (3,))
+                meta["X_center"] = compact_center.astype(np.float32)
+            q_hat, q_raw_for_audit, q_hat_source, q_raw_source = _as_q48_hat(
+                z,
+                path,
+                n_total,
+                rows,
+                l_ref,
+                scale_mode=mode,
+            )
+            b, b_raw_for_audit, b_hat_source, b_raw_source = _as_b_qhat(
+                z,
+                path,
+                n_total,
+                rows,
+                cur_point_table.xi.shape[0],
+                l_ref,
+                scale_mode=mode,
+                b_label_coordinate=b_label_coordinate,
+            )
+            weights, weight_phys_for_audit, weight_hat_source, weight_phys_source = _as_weights_hat(
+                z,
+                path,
+                n_total,
+                rows,
+                cur_point_table.xi.shape[0],
+                l_ref,
+                geometry_weights_hat,
+            )
+            scale_audit = scale_consistency_report(
+                q48_raw=q_raw_for_audit,
+                q48_hat=q_hat,
+                b_macro_qraw=b_raw_for_audit,
+                b_macro_qhat=b,
+                integration_weight_hat=weights,
+                integration_weight_phys=weight_phys_for_audit,
+                l_ref=l_ref,
+            )
+            for key, value in scale_audit.items():
+                if key.endswith("_rel") and float(value) > 1.0e-4:
+                    raise ValueError(f"{path}: Macro16 scale contract check {key}={float(value):.6g} failed")
             case_id = np.full(rows.size, _case_id_from_path(path), dtype=np.int64)
             if "case_id" in z.files:
                 vals = np.asarray(z["case_id"], dtype=np.int64)
@@ -293,6 +452,19 @@ def load_macro16_compacts(
             case_chunks.append(case_id)
             source_chunks.append(np.full(rows.size, int(source_id), dtype=np.int64))
             row_chunks.append(rows.astype(np.int64))
+            meta = dict(meta)
+            meta.update(
+                {
+                    "q48_hat_source": q_hat_source,
+                    "q48_raw_source_for_audit": q_raw_source,
+                    "B_macro_qhat_source": b_hat_source,
+                    "B_macro_qraw_source_for_audit": b_raw_source,
+                    "integration_weight_hat_source": weight_hat_source,
+                    "integration_weight_phys_source_for_audit": weight_phys_source,
+                    "L_ref_source": l_ref_key or "computed_from_X16",
+                    "scale_consistency": scale_audit,
+                }
+            )
             point_meta = meta
             version = _scalar_text(z, "standard_operator_contract_version", "")
             if version and version != MACRO16_CONTRACT_VERSION:

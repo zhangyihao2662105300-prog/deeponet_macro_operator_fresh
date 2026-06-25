@@ -40,10 +40,16 @@ from build_macro16_from_128_teacher import (  # noqa: E402
     scalar_text,
     validate_ip_keys,
 )
-from macro_deeponet.macro16_geometry import MACRO16_CONTRACT_VERSION, Macro16GeometryMap, macro16_source128_point_table  # noqa: E402
+from macro_deeponet.macro16_geometry import (  # noqa: E402
+    MACRO16_CONTRACT_VERSION,
+    Macro16GeometryMap,
+    macro16_source128_point_table,
+    normalize_macro16_x16_batch,
+    scale_consistency_report,
+)
 from macro_deeponet.true176_data import standard_css8_row_map  # noqa: E402
 
-SOURCE128_CONTRACT_VERSION = "macro16-source128-teacher-physical-volume-001"
+SOURCE128_CONTRACT_VERSION = "macro16-source128-teacher-scale-contract-002"
 
 
 def json_default(obj: Any) -> Any:
@@ -113,6 +119,16 @@ def macro16_x16_source128_weights(x16: np.ndarray) -> np.ndarray:
     return weights
 
 
+def macro16_source128_geometry_scale(x16_raw: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    x16_hat, x_center, l_ref = normalize_macro16_x16_batch(x16_raw)
+    point_table = macro16_source128_point_table()
+    weights_hat = np.empty((x16_hat.shape[0], point_table.xi.shape[0]), dtype=np.float64)
+    for i, frame_nodes in enumerate(np.asarray(x16_raw, dtype=np.float64).reshape(-1, 16, 3)):
+        fields = Macro16GeometryMap(frame_nodes).eval_points(point_table)
+        weights_hat[i] = np.asarray(fields["integration_weight_hat"], dtype=np.float64)
+    return x16_hat, x_center, l_ref, weights_hat
+
+
 def build_one(
     path: Path,
     out_root: Path,
@@ -157,10 +173,23 @@ def build_one(
         b128=b128,
         source_node_order=resolved_node_order,
     )
-    if str(volume_weight_mode).strip().lower().replace("_", "-") == "macro16-x16":
-        weights = macro16_x16_source128_weights(x16)
     if not np.all(np.isfinite(le128)) or not np.all(np.isfinite(b128)):
         raise ValueError(f"{path}: non-finite source128 teacher labels")
+    x16_hat, x_center, l_ref, weights_hat = macro16_source128_geometry_scale(x16)
+    q48_hat = q48 / np.maximum(l_ref, 1.0e-12)
+    b128_qraw = b128
+    b128_qhat = b128_qraw * l_ref.reshape(l_ref.shape[0], 1, 1, 1)
+    weights_phys = weights_hat * (l_ref**3)
+    requested_weight_phys = weights_phys.copy() if weight_key == "macro16_x16_source128_standard_rule" else weights
+    scale_audit = scale_consistency_report(
+        q48_raw=q48,
+        q48_hat=q48_hat,
+        b_macro_qraw=b128_qraw,
+        b_macro_qhat=b128_qhat,
+        integration_weight_hat=weights_hat,
+        integration_weight_phys=weights_phys,
+        l_ref=l_ref,
+    )
     first_case = int(case_id[0]) if case_id.size else -1
     case_name = f"case{first_case:03d}" if first_case >= 0 else "case_unknown"
     out_root.mkdir(parents=True, exist_ok=True)
@@ -171,10 +200,19 @@ def build_one(
         standard_operator_contract_version=np.asarray(MACRO16_CONTRACT_VERSION, dtype=object),
         macro16_teacher_contract_version=np.asarray(SOURCE128_CONTRACT_VERSION, dtype=object),
         q48_raw=q48.astype(np.float32),
+        q48_hat=q48_hat.astype(np.float32),
+        X16_raw=x16.astype(np.float32),
+        X_center=x_center.astype(np.float32),
+        L_ref=l_ref.astype(np.float32),
+        X16_hat=x16_hat.astype(np.float32),
         X16=x16.astype(np.float32),
         LE_macro=le128.astype(np.float32),
-        B_macro=b128.astype(np.float32),
-        integration_weight_hat=weights.astype(np.float32),
+        B_macro_qraw=b128_qraw.astype(np.float32),
+        B_macro_qhat=b128_qhat.astype(np.float32),
+        B_macro=b128_qraw.astype(np.float32),
+        integration_weight_hat=weights_hat.astype(np.float32),
+        integration_weight_phys=weights_phys.astype(np.float32),
+        requested_integration_weight_phys=requested_weight_phys.astype(np.float32),
         case_id=case_id.astype(np.int64),
         source_compact=np.asarray(str(path), dtype=object),
         source_index=np.full(rows.size, int(source_index), dtype=np.int64),
@@ -190,13 +228,28 @@ def build_one(
         macro16_point_xi=point_xi.astype(np.float32),
         macro16_point_set=np.asarray("source128_css8_gauss_points", dtype=object),
         macro16_parent_interpolation_from_128=np.asarray("none_source_128_points_kept", dtype=object),
-        integration_weight_source=np.asarray(weight_key, dtype=object),
-        integration_weight_coordinate=np.asarray("physical-volume", dtype=object),
-        integration_weight_rule=np.asarray("macro16_x16_standard_source128" if weight_key == "macro16_x16_source128_standard_rule" else "source_teacher_volume", dtype=object),
+        integration_weight_source=np.asarray("macro16_x16_source128_standard_rule", dtype=object),
+        requested_integration_weight_source=np.asarray(weight_key, dtype=object),
+        integration_weight_coordinate=np.asarray("hat-dimensionless", dtype=object),
+        integration_weight_phys_coordinate=np.asarray("physical-volume", dtype=object),
+        integration_weight_rule=np.asarray("macro16_x16_standard_source128", dtype=object),
+        requested_integration_weight_rule=np.asarray(
+            "macro16_x16_standard_source128" if weight_key == "macro16_x16_source128_standard_rule" else "source_teacher_volume",
+            dtype=object,
+        ),
         strain_output_coordinate=np.asarray(strain_meta["strain_output_coordinate"], dtype=object),
         strain_field=np.asarray(strain_field, dtype=object),
         B_label_strain_field=np.asarray(b_strain_field, dtype=object),
         B_label_q_coordinate=np.asarray("q48_raw", dtype=object),
+        B_macro_qraw_label_q_coordinate=np.asarray("q48_raw", dtype=object),
+        B_macro_qhat_label_q_coordinate=np.asarray("q48_hat", dtype=object),
+        compatibility_alias_B_macro=np.asarray("B_macro_qraw", dtype=object),
+        compatibility_alias_X16=np.asarray("X16_raw", dtype=object),
+        compatibility_note=np.asarray(
+            "New readers prefer X16_hat/q48_hat/B_macro_qhat/integration_weight_hat for training and "
+            "B_macro_qraw/integration_weight_phys for physical force audits; legacy X16 and B_macro are raw aliases.",
+            dtype=object,
+        ),
         fine_grid_geometry_visible_to_model=np.asarray(False),
         prepared_from=np.asarray("scripts/build_macro16_source128_teacher.py", dtype=object),
     )
@@ -214,22 +267,35 @@ def build_one(
         "source_le128_key": le_key,
         "source_b128_key": b_key,
         **strain_meta,
-        "integration_weight_source": weight_key,
-        "integration_weight_coordinate": "physical-volume",
-        "integration_weight_rule": "macro16_x16_standard_source128" if weight_key == "macro16_x16_source128_standard_rule" else "source_teacher_volume",
+        "integration_weight_source": "macro16_x16_source128_standard_rule",
+        "requested_integration_weight_source": weight_key,
+        "integration_weight_coordinate": "hat-dimensionless",
+        "integration_weight_phys_coordinate": "physical-volume",
+        "integration_weight_rule": "macro16_x16_standard_source128",
+        "requested_integration_weight_rule": "macro16_x16_standard_source128" if weight_key == "macro16_x16_source128_standard_rule" else "source_teacher_volume",
         "label_source": "128-IP TRUE176/CSS8 teacher labels kept as Macro16 source128 point set",
-        "model_visible_arrays": ["q48_raw", "X16", "macro16_point_xi/source128 point features"],
+        "model_visible_arrays": ["q48_hat", "X16_hat", "macro16_point_xi/source128 point features"],
+        "force_audit_arrays": ["B_macro_qraw", "integration_weight_phys"],
         "fine_grid_geometry_visible_to_model": False,
         "writes_X_macro": False,
         "writes_css8_internal_geometry": False,
         "case_ids": sorted(np.unique(case_id).astype(np.int64).tolist()),
         "q48_shape": list(q48.shape),
-        "X16_shape": list(x16.shape),
+        "q48_hat_shape": list(q48_hat.shape),
+        "X16_raw_shape": list(x16.shape),
+        "X16_hat_shape": list(x16_hat.shape),
         "LE_macro_shape": list(le128.shape),
-        "B_macro_shape": list(b128.shape),
-        "integration_weight_shape": list(weights.shape),
-        "weight_sum_min": float(np.min(np.sum(weights, axis=1))),
-        "weight_sum_max": float(np.max(np.sum(weights, axis=1))),
+        "B_macro_qraw_shape": list(b128_qraw.shape),
+        "B_macro_qhat_shape": list(b128_qhat.shape),
+        "integration_weight_hat_shape": list(weights_hat.shape),
+        "integration_weight_phys_shape": list(weights_phys.shape),
+        "integration_weight_hat_sum_min": float(np.min(np.sum(weights_hat, axis=1))),
+        "integration_weight_hat_sum_max": float(np.max(np.sum(weights_hat, axis=1))),
+        "integration_weight_phys_sum_min": float(np.min(np.sum(weights_phys, axis=1))),
+        "integration_weight_phys_sum_max": float(np.max(np.sum(weights_phys, axis=1))),
+        "L_ref_min": float(np.min(l_ref)),
+        "L_ref_max": float(np.max(l_ref)),
+        "scale_consistency": scale_audit,
         **ip_key_meta,
     }
     summary_path = out_path.with_suffix(".summary.json")

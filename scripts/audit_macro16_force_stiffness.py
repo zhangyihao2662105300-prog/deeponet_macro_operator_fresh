@@ -14,6 +14,7 @@ import glob
 import json
 import math
 import os
+import sys
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -22,6 +23,11 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 
 import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from macro_deeponet.macro16_geometry import scale_consistency_report  # noqa: E402
 
 TRUE176_SURFACE_MACRO_TO_KEEP = np.asarray([0, 1, 2, 4, 7, 6, 5, 3], dtype=np.int64)
 TRUE176_MACRO_TO_KEEP_NODE = np.concatenate([TRUE176_SURFACE_MACRO_TO_KEEP, TRUE176_SURFACE_MACRO_TO_KEEP + 8])
@@ -136,6 +142,21 @@ def characteristic_length(x16: np.ndarray) -> float:
     return l_ref
 
 
+def frame_array(z: np.lib.npyio.NpzFile, path: Path, n_total: int, rows: np.ndarray, key: str, tail: tuple[int, ...]) -> np.ndarray:
+    arr = np.asarray(z[key], dtype=np.float64)
+    if tail == (1,) and (arr.ndim == 0 or arr.shape == (1,)):
+        return np.full((rows.size, 1), float(arr.reshape(-1)[0]), dtype=np.float64)
+    if tail == (1,) and arr.shape == (n_total,):
+        return arr[rows].reshape(rows.size, 1)
+    if arr.shape == tuple(tail):
+        return np.broadcast_to(arr.reshape((1,) + tuple(tail)), (rows.size,) + tuple(tail)).copy()
+    if arr.shape == (1,) + tuple(tail):
+        return np.broadcast_to(arr.reshape((1,) + tuple(tail)), (rows.size,) + tuple(tail)).copy()
+    if arr.shape == (n_total,) + tuple(tail):
+        return arr[rows]
+    raise ValueError(f"{path}: {key} must have shape {tail}, [1,{tail}], or [{n_total},{tail}], got {arr.shape}")
+
+
 def macro_to_source_order(source_node_order: str) -> np.ndarray:
     order = str(source_node_order).strip().lower().replace("_", "-")
     if order == "true176-keep":
@@ -202,15 +223,20 @@ def row_select_or_broadcast(vals: np.ndarray, rows: np.ndarray, tail: tuple[int,
 
 def load_macro(path: Path) -> dict[str, Any]:
     with np.load(str(path), allow_pickle=True) as z:
-        required = {"q48_raw", "X16", "LE_macro", "B_macro", "integration_weight_hat", "source_compact", "source_row"}
+        required = {"q48_raw", "LE_macro", "source_compact", "source_row"}
         missing = sorted(required.difference(z.files))
         if missing:
             raise KeyError(f"{path}: missing Macro16 fields {missing}")
         q = np.asarray(z["q48_raw"], dtype=np.float64)
-        x16 = np.asarray(z["X16"], dtype=np.float64)
+        x_key = "X16_raw" if "X16_raw" in z.files else "X16"
+        if x_key not in z.files:
+            raise KeyError(f"{path}: missing X16_raw or legacy X16")
+        x16 = np.asarray(z[x_key], dtype=np.float64)
         le = np.asarray(z["LE_macro"], dtype=np.float64)
-        b = np.asarray(z["B_macro"], dtype=np.float64)
-        weights = np.asarray(z["integration_weight_hat"], dtype=np.float64)
+        b_key = "B_macro_qraw" if "B_macro_qraw" in z.files else "B_macro"
+        if b_key not in z.files:
+            raise KeyError(f"{path}: missing B_macro_qraw or legacy B_macro")
+        b = np.asarray(z[b_key], dtype=np.float64)
         rows = np.asarray(z["source_row"], dtype=np.int64).reshape(-1)
         if q.ndim != 2 or q.shape[1] != 48:
             raise ValueError(f"{path}: q48_raw must be [N,48], got {q.shape}")
@@ -221,18 +247,63 @@ def load_macro(path: Path) -> dict[str, Any]:
         if le.ndim != 3 or le.shape[0] != q.shape[0] or le.shape[2] != 6:
             raise ValueError(f"{path}: LE_macro must be [N,P,6], got {le.shape}")
         if b.shape != (q.shape[0], le.shape[1], 6, 48):
-            raise ValueError(f"{path}: B_macro must be [N,{le.shape[1]},6,48], got {b.shape}")
-        if weights.shape != (q.shape[0], le.shape[1]):
-            raise ValueError(f"{path}: integration_weight_hat must be [N,{le.shape[1]}], got {weights.shape}")
+            raise ValueError(f"{path}: {b_key} must be [N,{le.shape[1]},6,48], got {b.shape}")
         if rows.shape != (q.shape[0],):
             raise ValueError(f"{path}: source_row must be [N], got {rows.shape}")
+        l_ref = np.asarray([characteristic_length(x) for x in x16], dtype=np.float64).reshape(-1, 1)
+        if "L_ref" in z.files:
+            stored_l_ref = frame_array(z, path, q.shape[0], np.arange(q.shape[0]), "L_ref", (1,))
+            if not np.allclose(stored_l_ref, l_ref, rtol=1.0e-5, atol=1.0e-7):
+                raise ValueError(f"{path}: L_ref is inconsistent with X16_raw")
+            l_ref = stored_l_ref
+        weights_hat = None
+        weights_phys = None
+        weight_hat_key = ""
+        weight_phys_key = ""
+        if "integration_weight_hat" in z.files:
+            weights_hat = np.asarray(z["integration_weight_hat"], dtype=np.float64)
+            if weights_hat.shape != (q.shape[0], le.shape[1]):
+                raise ValueError(f"{path}: integration_weight_hat must be [N,{le.shape[1]}], got {weights_hat.shape}")
+            weight_hat_key = "integration_weight_hat"
+        if "integration_weight_phys" in z.files:
+            weights_phys = np.asarray(z["integration_weight_phys"], dtype=np.float64)
+            if weights_phys.shape != (q.shape[0], le.shape[1]):
+                raise ValueError(f"{path}: integration_weight_phys must be [N,{le.shape[1]}], got {weights_phys.shape}")
+            weight_phys_key = "integration_weight_phys"
+        if weights_phys is None and weights_hat is None:
+            raise KeyError(f"{path}: missing integration_weight_phys or integration_weight_hat")
+        coord = scalar_text(z, "integration_weight_coordinate", "").strip().lower().replace("_", "-")
+        if weights_phys is None and weights_hat is not None and coord in {"physical-volume", "physical", "ivol", "abaqus-ivol"}:
+            weights_phys = weights_hat
+            weight_phys_key = "legacy_integration_weight_hat_physical_volume"
+            weights_hat = weights_phys / (l_ref**3)
+            weight_hat_key = "legacy_integration_weight_hat/L_ref^3"
+        b_hat = np.asarray(z["B_macro_qhat"], dtype=np.float64) if "B_macro_qhat" in z.files else None
+        q_hat = np.asarray(z["q48_hat"], dtype=np.float64) if "q48_hat" in z.files else None
+        scale_audit = scale_consistency_report(
+            q48_raw=q,
+            q48_hat=q_hat,
+            b_macro_qraw=b,
+            b_macro_qhat=b_hat,
+            integration_weight_hat=weights_hat,
+            integration_weight_phys=weights_phys,
+            l_ref=l_ref,
+        )
+        for key, value in scale_audit.items():
+            if key.endswith("_rel") and float(value) > 1.0e-4:
+                raise ValueError(f"{path}: Macro16 scale contract check {key}={float(value):.6g} failed")
         return {
             "path": str(path),
             "q": q,
             "x16": x16,
             "le": le,
             "b": b,
-            "weights_hat": weights,
+            "weights_hat": weights_hat,
+            "weights_phys": weights_phys,
+            "weight_hat_key": weight_hat_key,
+            "weight_phys_key": weight_phys_key,
+            "L_ref": l_ref,
+            "scale_consistency": scale_audit,
             "source_rows": rows,
             "source_compact": scalar_text(z, "source_compact"),
             "source_node_order": scalar_text(z, "source_node_order", "macro16"),
@@ -294,15 +365,21 @@ def load_source(path: Path, rows: np.ndarray) -> dict[str, Any]:
 
 
 def physical_weights(macro: dict[str, Any], source: dict[str, Any], weight_mode: str) -> tuple[np.ndarray, dict[str, Any]]:
-    weights = np.asarray(macro["weights_hat"], dtype=np.float64).copy()
+    weights_hat = None if macro.get("weights_hat") is None else np.asarray(macro["weights_hat"], dtype=np.float64)
+    weights_phys = None if macro.get("weights_phys") is None else np.asarray(macro["weights_phys"], dtype=np.float64)
     mode = str(weight_mode).strip().lower().replace("_", "-")
     if mode not in WEIGHT_MODES:
         raise ValueError(f"weight_mode must be one of {WEIGHT_MODES}, got {weight_mode!r}")
     requested_mode = mode
     if mode == "auto":
-        coord = str(macro.get("integration_weight_coordinate", "")).strip().lower().replace("_", "-")
-        mode = "as-stored" if coord in {"physical-volume", "physical", "ivol", "abaqus-ivol"} else "lref3"
-    l_ref = np.asarray([characteristic_length(x) for x in np.asarray(macro["x16"], dtype=np.float64)], dtype=np.float64)
+        mode = "as-stored" if weights_phys is not None else "lref3"
+    l_ref = np.asarray(macro["L_ref"], dtype=np.float64).reshape(-1)
+    if mode == "as-stored" and weights_phys is not None:
+        weights = weights_phys.copy()
+    else:
+        if weights_hat is None:
+            raise KeyError(f"weight-mode {mode} requires integration_weight_hat or a convertible legacy weight")
+        weights = weights_hat.copy()
     if mode == "lref3":
         weights *= (l_ref ** 3).reshape(-1, 1)
     elif mode == "source-volume-sum":
@@ -319,6 +396,8 @@ def physical_weights(macro: dict[str, Any], source: dict[str, Any], weight_mode:
         "requested_weight_mode": requested_mode,
         "weight_mode": mode,
         "integration_weight_coordinate": str(macro.get("integration_weight_coordinate", "")),
+        "integration_weight_hat_source": str(macro.get("weight_hat_key", "")),
+        "integration_weight_phys_source": str(macro.get("weight_phys_key", "")),
         "L_ref_min": float(np.min(l_ref)),
         "L_ref_max": float(np.max(l_ref)),
         "macro_weight_sum_min": float(np.min(np.sum(weights, axis=1))),
@@ -571,6 +650,7 @@ def audit_one(path: Path, weight_mode: str) -> dict[str, Any]:
         "B_label_q_coordinate": macro["B_label_q_coordinate"],
         "macro16_point_set": macro["macro16_point_set"],
         "weight": weight_meta,
+        "scale_consistency": macro["scale_consistency"],
         "weight_comparison": weight_comparison(weights, source),
         "force": compact_candidate["force"],
         "force_dof_max_abs_error": compact_candidate["force_dof_max_abs_error"],

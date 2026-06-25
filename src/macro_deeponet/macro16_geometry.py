@@ -187,6 +187,78 @@ def characteristic_length(x16: np.ndarray) -> tuple[float, np.ndarray, np.ndarra
     return l_ref, center.astype(np.float64), span.astype(np.float64)
 
 
+def normalize_macro16_x16_batch(x16_raw: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return X16_hat, X_center, and L_ref for a batch of raw Macro16 nodes."""
+
+    nodes = np.asarray(x16_raw, dtype=np.float64).reshape(-1, 16, 3)
+    x16_hat = np.empty_like(nodes, dtype=np.float64)
+    center = np.empty((nodes.shape[0], 3), dtype=np.float64)
+    l_ref = np.empty((nodes.shape[0], 1), dtype=np.float64)
+    for i, frame_nodes in enumerate(nodes):
+        cur_l_ref, cur_center, _span = characteristic_length(frame_nodes)
+        x16_hat[i] = (frame_nodes - cur_center.reshape(1, 3)) / float(cur_l_ref)
+        center[i] = cur_center
+        l_ref[i, 0] = float(cur_l_ref)
+    return x16_hat, center, l_ref
+
+
+def scale_consistency_report(
+    *,
+    q48_raw: np.ndarray | None = None,
+    q48_hat: np.ndarray | None = None,
+    b_macro_qraw: np.ndarray | None = None,
+    b_macro_qhat: np.ndarray | None = None,
+    integration_weight_hat: np.ndarray | None = None,
+    integration_weight_phys: np.ndarray | None = None,
+    l_ref: np.ndarray | None = None,
+) -> dict[str, Any]:
+    """Audit the Macro16 raw/hat scale identities when both sides exist."""
+
+    out: dict[str, Any] = {"available": bool(l_ref is not None)}
+    if l_ref is None:
+        out["reason"] = "missing L_ref"
+        return out
+    l_ref_arr = np.asarray(l_ref, dtype=np.float64).reshape(-1, 1)
+    if not np.all(np.isfinite(l_ref_arr)) or np.any(l_ref_arr <= 0.0):
+        raise ValueError("L_ref must be finite and positive for scale consistency checks")
+
+    def metric(name: str, pred: np.ndarray, ref: np.ndarray) -> None:
+        pred_arr = np.asarray(pred, dtype=np.float64)
+        ref_arr = np.asarray(ref, dtype=np.float64)
+        diff = pred_arr - ref_arr
+        den = max(float(np.linalg.norm(ref_arr.reshape(-1))), 1.0e-30)
+        out[f"{name}_rel"] = float(np.linalg.norm(diff.reshape(-1)) / den)
+        out[f"{name}_max_abs"] = float(np.max(np.abs(diff))) if diff.size else 0.0
+        out[f"{name}_checked"] = True
+
+    if q48_raw is not None and q48_hat is not None:
+        metric("q48_hat_times_L_ref_vs_q48_raw", np.asarray(q48_hat, dtype=np.float64) * l_ref_arr, q48_raw)
+    else:
+        out["q48_hat_times_L_ref_vs_q48_raw_checked"] = False
+
+    if b_macro_qraw is not None and b_macro_qhat is not None:
+        metric(
+            "B_macro_qhat_vs_B_macro_qraw_times_L_ref",
+            b_macro_qhat,
+            np.asarray(b_macro_qraw, dtype=np.float64) * l_ref_arr.reshape(-1, 1, 1, 1),
+        )
+    else:
+        out["B_macro_qhat_vs_B_macro_qraw_times_L_ref_checked"] = False
+
+    if integration_weight_hat is not None and integration_weight_phys is not None:
+        metric(
+            "integration_weight_phys_vs_hat_times_L_ref3",
+            integration_weight_phys,
+            np.asarray(integration_weight_hat, dtype=np.float64) * (l_ref_arr**3),
+        )
+    else:
+        out["integration_weight_phys_vs_hat_times_L_ref3_checked"] = False
+
+    checked = [key for key, value in out.items() if key.endswith("_checked") and bool(value)]
+    out["checked_count"] = int(len(checked))
+    return out
+
+
 def _normalize(vec: np.ndarray, *, eps: float = 1.0e-14) -> np.ndarray:
     vals = np.asarray(vec, dtype=np.float64).reshape(3)
     norm = float(np.linalg.norm(vals))

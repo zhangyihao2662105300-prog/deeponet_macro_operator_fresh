@@ -103,6 +103,7 @@ fixed parent integration points.
 | Gate 31 force residual 16 case audit | FAIL | `reports/31_force_residual_16case_audit.md`; corrected qdef 16-case training fails selected-frame force audit, wind shell cases `70` to `73` fail badly, and `case060` is not a normal relative-force gate sample. Do not expand training before Gate 32 diagnosis. |
 | Gate 32 wind shell diagnosis | DIAGNOSIS PASS | `reports/32_wind_shell_generalization_diagnosis.md`; teacher force is good, data is not bad, wind shell branch input is strongly out of distribution, and `case060` is a near-zero-force special sample. |
 | Gate 33 branch outlier columns | DIAGNOSIS PASS | `reports/33_branch_outlier_columns_diagnosis.md`; the largest branch outlier comes from `X16_hat_z`, especially `case073` columns such as `X01_z`, because train-split per-column geometry std is about `1.0e-08`. |
+| Gate 34 branch normalization replay | REPLAY PASS | `reports/34_branch_normalization_replay.md`; normalization-only replay shows `X16_hat` std floor `0.05` reduces wind branch max from about `2.2546e6` to `48.56` and is the minimum passing candidate. |
 
 Training is allowed only within the limited LE/B release boundary.
 
@@ -189,6 +190,9 @@ Current verified or adopted conclusions:
 - Gate 33 localizes the worst branch outlier to `X16_hat` geometry columns, not
   `q48_def_hat`. Train-split per-column standardization makes nearly constant
   geometry columns explode on wind shell shapes.
+- Gate 34 shows a guarded `X16_hat` std floor fixes the input-scale explosion
+  in replay. This does not prove force closure; it only clears the next safe
+  normalization candidate.
 
 ## Pending Issues That Are Not Data Errors
 
@@ -227,7 +231,8 @@ data is bad:
   weighting does not match the actual force error contribution.
 - Gate 31 fails the corrected 16-case force residual audit. Gate 32 and Gate 33
   localize the problem to wind-shell branch distribution and geometry
-  normalization. The next step is a normalization replay, not more training.
+  normalization. Gate 34 identifies `X16_hat` std floor `0.05` as the minimum
+  passing replay candidate.
 
 These issues must not be hidden inside network training as if a network could
 repair a definition mismatch. They do not block the limited LE/B training
@@ -292,10 +297,12 @@ Required after training:
 Recommended next tasks, in order:
 
 1. Keep material-only K diagnostics separate from full tangent claims.
-2. Run Gate 34 branch normalization replay.
-3. Test geometry std floors or grouped geometry normalization without training.
-4. Confirm wind shell branch max returns to a reasonable range.
-5. Only after Gate 34 gives evidence, decide the next small training experiment.
+2. Implement a guarded `--branch-x16-std-floor` training option with default old
+   behavior.
+3. Run a Linux small training with `--branch-x16-std-floor 0.05`.
+4. Rerun selected-frame force audit on the trained checkpoint.
+5. Decide from force audit, not training loss, whether the normalization fix is
+   useful.
 
 ## Currently Forbidden
 

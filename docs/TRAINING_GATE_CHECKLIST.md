@@ -38,6 +38,10 @@ Gate 33 update: Gate 32/33 localize the wind shell failure to branch
 normalization, mainly `X16_hat` geometry columns with near-zero train std. Do
 not train again before a normalization replay.
 
+Gate 34 update: normalization replay passed with `X16_hat` std floor `0.05`.
+The next allowed training is only a small Linux test with an explicit guarded
+normalization option, followed by selected-frame force audit.
+
 This checklist defines what must be true before network training is allowed.
 It does not start training, change the model, or modify the data contract.
 
@@ -95,6 +99,8 @@ Current status:
   shell scale and distribution diagnosis, not larger training.
 - Gate 33: branch outlier diagnosis passed; next step is normalization replay,
   not larger training.
+- Gate 34: normalization replay passed; next step is guarded implementation and
+  small Linux training, not larger training.
 
 Do not treat this as a full tangent or solver-readiness release.
 
@@ -141,6 +147,8 @@ be treated as proof that the data is corrupt:
   ordering, or 128 point rule corruption.
 - Gate 33 confirms the largest wind shell outlier is in `X16_hat` geometry
   standardization, not in `q48_def_hat`, `LE`, `B`, or the 128 point rule.
+- Gate 34 confirms `X16_hat` std floor `0.05` fixes the input-scale explosion
+  in replay, but it does not prove trained force closure.
 
 These issues no longer block the limited LE/B training release, but they remain
 unresolved mechanics items and are not the same as q48 ordering corruption, LE
@@ -256,3 +264,4 @@ Not allowed by this checklist:
   training.
 - Ignore Gate 31 failure and continue training before Gate 32 diagnosis.
 - Continue training before Gate 34 resolves or tests branch normalization.
+- Treat Gate 34 replay as a trained model pass.

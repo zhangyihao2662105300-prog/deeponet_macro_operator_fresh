@@ -198,7 +198,7 @@ def make_model(checkpoint: dict[str, Any], norms: dict[str, np.ndarray], device:
             state_b_rank=int(args.get("state_b_rank", state_b_meta.get("state_b_rank", 8))),
             state_b_scale=float(args.get("state_b_scale", state_b_meta.get("state_b_scale", 1.0))),
             detach_state_b=bool(args.get("detach_state_b", state_b_meta.get("detach_state_b", True))),
-            state_b_kind=str(args.get("state_b_kind", state_b_meta.get("state_b_kind", "low_rank_uv"))),
+            state_b_kind=str(args.get("state_b_kind", state_b_meta.get("state_b_kind", "point_q_rank"))),
             state_b_zero_init=not bool(args.get("state_b_random_init", False)),
         )
     elif "with-le0" in model_style or style_key == "le0":

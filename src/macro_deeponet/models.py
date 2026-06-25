@@ -857,10 +857,11 @@ class Macro16BoundaryDeepONetWithLE0(QueryFELE0LinearResidualDeepONet):
 class Macro16BoundaryDeepONetWithLE0StateB(QueryFELE0LinearResidualDeepONet):
     """Macro16 LE0 model with an optional state-dependent B baseline.
 
-    The state B term is a guarded low-rank correction to the point-only
-    baseline.  With ``detach_state_b=True`` its q-state input is detached, so
-    AD-B treats the state correction as the selected local baseline rather than
-    adding ``dB_state/dq`` terms.
+    The default state B term matches the Gate 17 prototype: every
+    point-strain-q entry gets a rank basis and the state network emits the
+    rank coefficients.  With ``detach_state_b=True`` its state input is
+    detached, so AD-B treats the state correction as the selected local
+    baseline rather than adding ``dB_state/dq`` terms.
     """
 
     macro16_contract = "v4-macro16-boundary-operator-001"
@@ -897,7 +898,7 @@ class Macro16BoundaryDeepONetWithLE0StateB(QueryFELE0LinearResidualDeepONet):
         state_b_rank: int = 8,
         state_b_scale: float = 1.0,
         detach_state_b: bool = True,
-        state_b_kind: str = "low_rank_uv",
+        state_b_kind: str = "point_q_rank",
         state_b_zero_init: bool = True,
     ) -> None:
         super().__init__(
@@ -928,7 +929,15 @@ class Macro16BoundaryDeepONetWithLE0StateB(QueryFELE0LinearResidualDeepONet):
             train_le0_point=train_le0_point,
         )
         key = str(state_b_kind).strip().lower().replace("_", "-")
-        if key not in {"low-rank-uv", "low-rank", "lowrank", "low-rank-uv-detached"}:
+        if key not in {
+            "point-q-rank",
+            "point-q",
+            "gate17",
+            "low-rank-uv",
+            "low-rank",
+            "lowrank",
+            "low-rank-uv-detached",
+        }:
             raise ValueError(f"unsupported state_b_kind {state_b_kind!r}")
         rank = int(state_b_rank)
         if rank <= 0:
@@ -936,11 +945,17 @@ class Macro16BoundaryDeepONetWithLE0StateB(QueryFELE0LinearResidualDeepONet):
         self.state_b_rank = rank
         self.state_b_scale = float(state_b_scale)
         self.detach_state_b = bool(detach_state_b)
-        self.state_b_kind = "low_rank_uv"
+        self.state_b_kind = "low_rank_uv" if key in {"low-rank-uv", "low-rank", "lowrank", "low-rank-uv-detached"} else "point_q_rank"
         act = activation_module(activation)
+        point_out_dim = (
+            self.strain_dim * self.q_dim * self.state_b_rank
+            if self.state_b_kind == "point_q_rank"
+            else self.strain_dim * self.state_b_rank
+        )
+        coeff_out_dim = self.state_b_rank if self.state_b_kind == "point_q_rank" else self.state_b_rank * self.q_dim
         self.state_b_point_net = MLP(
             self.point_dim,
-            self.strain_dim * self.state_b_rank,
+            point_out_dim,
             hidden_dim=hidden_dim,
             depth=trunk_depth,
             activation=act,
@@ -948,7 +963,7 @@ class Macro16BoundaryDeepONetWithLE0StateB(QueryFELE0LinearResidualDeepONet):
         )
         self.state_b_coeff_net = MLP(
             self.input_dim,
-            self.state_b_rank * self.q_dim,
+            coeff_out_dim,
             hidden_dim=hidden_dim,
             depth=branch_depth,
             activation=act,
@@ -968,6 +983,12 @@ class Macro16BoundaryDeepONetWithLE0StateB(QueryFELE0LinearResidualDeepONet):
         state_x = x_norm.detach() if self.detach_state_b else x_norm
         state_point = point_norm.detach() if self.detach_state_b else point_norm
         batch, point_count, _ = point_norm.shape
+        if self.state_b_kind == "point_q_rank":
+            basis = self.state_b_point_net(state_point.reshape(-1, self.point_dim)).view(
+                batch, point_count, self.strain_dim, self.q_dim, self.state_b_rank
+            )
+            coeff = self.state_b_coeff_net(state_x).view(batch, self.state_b_rank)
+            return torch.einsum("bpajr,br->bpaj", basis, coeff)
         u = self.state_b_point_net(state_point.reshape(-1, self.point_dim)).view(
             batch, point_count, self.strain_dim, self.state_b_rank
         )

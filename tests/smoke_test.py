@@ -296,6 +296,7 @@ def test_macro16_le0_state_b_model_shapes_and_detach_semantics() -> None:
     assert torch.max(torch.abs(j_detach - j_nodetach)).item() > 1.0e-8
     assert detach_model.state_b_config()["detach_state_b"] is True
     assert detach_model.state_b_config()["state_b_rank"] == 3
+    assert detach_model.state_b_config()["state_b_kind"] == "point_q_rank"
 
 
 def test_macro16_loader_rejects_missing_x16_and_keeps_q48() -> None:

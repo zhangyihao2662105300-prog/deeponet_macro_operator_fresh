@@ -1038,7 +1038,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             state_b_rank=int(getattr(args, "state_b_rank", 8)),
             state_b_scale=float(getattr(args, "state_b_scale", 1.0)),
             detach_state_b=bool(getattr(args, "detach_state_b", True)),
-            state_b_kind=str(getattr(args, "state_b_kind", "low_rank_uv")),
+            state_b_kind=str(getattr(args, "state_b_kind", "point_q_rank")),
             state_b_zero_init=not bool(getattr(args, "state_b_random_init", False)),
         ).to(device)
         model_meta_style = "macro16-boundary-deeponet-with-le0-state-b"
@@ -1345,7 +1345,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--state-b-lr-scale", type=float, default=1.0)
     p.add_argument("--state-b-rank", type=int, default=8)
     p.add_argument("--state-b-scale", type=float, default=1.0)
-    p.add_argument("--state-b-kind", default="low_rank_uv")
+    p.add_argument("--state-b-kind", default="point_q_rank")
     p.add_argument("--detach-state-b", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--state-b-random-init", action="store_true")
     p.add_argument("--anchored-residual-gate-q0", type=float, default=0.0)

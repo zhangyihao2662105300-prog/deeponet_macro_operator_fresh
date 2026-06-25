@@ -89,6 +89,7 @@ fixed parent integration points.
 | Gate 17 state B prototype | prototype PASS, production release FAIL | `reports/17_state_b_baseline_prototype.md`; state-dependent B baseline reduces force rel to `0.0919`, below the prototype `0.10` target but above final `0.02`. |
 | Gate 18 state B migration plan | PLAN PASS | `reports/18_state_b_migration_plan.md`; next step is guarded implementation of a new state B model variant, not formal large training. |
 | Gate 19 state B main model smoke | implementation smoke PASS, numeric reproduction pending | `reports/19_state_b_main_model_smoke.md`; `le0-state-b` model variant, checkpoint path, and force-audit loading are implemented; Linux case031 first6 numeric reproduction still pending. |
+| Gate 20 state B reproduction diagnosis | failure localized, rerun needed | `reports/20_state_b_reproduction_failure_diagnosis.md`; Gate 19 numeric reproduction failed because the migrated state B factorization was weaker than the Gate 17 prototype. Default state B kind is corrected to `point_q_rank`; Linux rerun is required. |
 
 Training is allowed only within the limited LE/B release boundary.
 
@@ -133,6 +134,9 @@ Current verified or adopted conclusions:
   reproduction before any larger training.
 - Gate 19 implements the separate `le0-state-b` model variant and verifies
   local smoke tests, while leaving the default `le0` route unchanged.
+- Gate 20 shows the first `le0-state-b` numeric rerun failed, but the failure is
+  localized to an under-expressive state B factorization rather than data,
+  checkpoint loading, q ordering, LE ordering, or the 128 point rule.
 
 ## Pending Issues That Are Not Data Errors
 
@@ -153,8 +157,9 @@ data is bad:
 - Full consistent tangent K is still an unresolved route decision or
   implementation task.
 - The new `Macro16BoundaryDeepONetWithLE0StateB` implementation has only passed
-  local smoke tests. Gate 19 Linux numeric reproduction is still pending, so it
-  does not yet meet the final `0.02` force closure target.
+  local smoke tests. The first Linux numeric reproduction failed and must be
+  rerun after the `point_q_rank` correction, so it does not yet meet the final
+  `0.02` force closure target.
 
 These issues must not be hidden inside network training as if a network could
 repair a definition mismatch. They do not block the limited LE/B training
@@ -219,7 +224,8 @@ Required after training:
 Recommended next tasks, in order:
 
 1. Keep material-only K diagnostics separate from full tangent claims.
-2. Run Gate 19 Linux case031 first6 reproduction for `le0-state-b`.
+2. Rerun Gate 20 Linux case031 first6 reproduction for corrected `point_q_rank`
+   `le0-state-b`.
 3. Keep migration staged behind tests and six-frame reproduction.
 4. After any migrated prototype training, rerun selected-frame force closure before
    claiming mechanical usability.

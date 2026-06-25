@@ -668,6 +668,70 @@ def explicit_state_b_physical_balanced_loss(
     )
 
 
+def force_aware_b_loss_from_j_norm(
+    j_pred_norm: torch.Tensor,
+    j_target_norm: torch.Tensor,
+    le_true_norm: torch.Tensor,
+    weights_hat: torch.Tensor,
+    *,
+    le_std_scale: torch.Tensor,
+    le_mean: torch.Tensor,
+    le_std: torch.Tensor,
+    q_std_cols: torch.Tensor,
+    b_scale: torch.Tensor,
+    weight_min: float,
+    weight_max: float,
+) -> torch.Tensor:
+    b_pred = j_norm_to_b_qhat_torch(j_pred_norm, le_std_scale, q_std_cols)
+    b_target = j_norm_to_b_qhat_torch(j_target_norm, le_std_scale, q_std_cols)
+    scale = torch.clamp(b_scale.to(dtype=j_pred_norm.dtype, device=j_pred_norm.device), min=1.0e-12)
+    le_raw = le_true_norm * le_std.to(dtype=le_true_norm.dtype, device=le_true_norm.device) + le_mean.to(
+        dtype=le_true_norm.dtype,
+        device=le_true_norm.device,
+    )
+    w = torch.abs(le_raw) * torch.clamp(weights_hat.to(dtype=le_true_norm.dtype, device=le_true_norm.device), min=0.0).unsqueeze(-1)
+    w = w / torch.clamp(w.mean(), min=1.0e-12)
+    w = torch.clamp(w, min=float(weight_min), max=float(weight_max)).unsqueeze(-1)
+    err2 = ((b_pred - b_target) / scale) ** 2
+    return (w * err2).mean()
+
+
+def explicit_state_b_force_aware_loss(
+    model: nn.Module,
+    x_norm: torch.Tensor,
+    point_norm: torch.Tensor,
+    j_target_norm: torch.Tensor,
+    le_true_norm: torch.Tensor,
+    weights_hat: torch.Tensor,
+    *,
+    le_std_scale: torch.Tensor,
+    le_mean: torch.Tensor,
+    le_std: torch.Tensor,
+    q_std_cols: torch.Tensor,
+    b_scale: torch.Tensor,
+    columns: list[int],
+    weight_min: float,
+    weight_max: float,
+) -> torch.Tensor:
+    if not hasattr(model, "_state_b_norm"):
+        raise ValueError("force-aware B loss requires a model with _state_b_norm")
+    col_idx = torch.as_tensor(columns, dtype=torch.long, device=x_norm.device)
+    state_b_norm = model._state_b_norm(x_norm, point_norm).index_select(-1, col_idx)  # type: ignore[attr-defined]
+    return force_aware_b_loss_from_j_norm(
+        state_b_norm,
+        j_target_norm,
+        le_true_norm,
+        weights_hat,
+        le_std_scale=le_std_scale,
+        le_mean=le_mean,
+        le_std=le_std,
+        q_std_cols=q_std_cols,
+        b_scale=b_scale,
+        weight_min=weight_min,
+        weight_max=weight_max,
+    )
+
+
 def sample_columns(columns: list[int], count: int, rng: np.random.Generator) -> list[int]:
     if int(count) <= 0 or int(count) >= len(columns):
         return list(columns)
@@ -1116,12 +1180,17 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     rigid_rng = np.random.default_rng(int(args.seed) + 1307)
     le_std_scale_np = _le_std_scale(le_std, data.le.shape[1]).astype(np.float32)
     le_std_scale_t = torch.as_tensor(le_std_scale_np, dtype=torch.float32, device=device)
+    le_mean_t = torch.as_tensor(le_mean.astype(np.float32), dtype=torch.float32, device=device)
+    le_std_t = torch.as_tensor(le_std.astype(np.float32), dtype=torch.float32, device=device)
     b_loss_scale_t = torch.as_tensor(b_loss_scale, dtype=torch.float32, device=device)
     q_std_t = torch.as_tensor(q_std.astype(np.float32), dtype=torch.float32, device=device)
     jacobian_loss_weight = float(getattr(args, "jacobian_loss_weight", 1.0))
     direct_state_b_loss_weight = float(getattr(args, "direct_state_b_loss_weight", 0.0))
+    force_aware_b_loss_weight = float(getattr(args, "force_aware_b_loss_weight", 0.0))
     if direct_state_b_loss_weight > 0.0 and not hasattr(model, "_state_b_norm"):
         raise ValueError("--direct-state-b-loss-weight requires le0-state-b or le0-fixed128-state-b")
+    if force_aware_b_loss_weight > 0.0 and not hasattr(model, "_state_b_norm"):
+        raise ValueError("--force-aware-b-loss-weight requires le0-state-b or le0-fixed128-state-b")
     history: list[dict[str, Any]] = []
     best_score = float("inf")
     best_report: dict[str, Any] | None = None
@@ -1166,6 +1235,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 "physical_b_loss_scale_max": float(np.max(b_loss_scale)),
                 "direct_state_b_loss_weight": direct_state_b_loss_weight,
                 "direct_state_b_loss_target": "explicit _state_b_norm converted to physical B_macro_qdef",
+                "force_aware_b_loss_weight": force_aware_b_loss_weight,
+                "force_aware_b_weight_mode": str(getattr(args, "force_aware_b_weight_mode", "strain-volume")),
+                "force_aware_b_weight_min": float(getattr(args, "force_aware_b_weight_min", 0.1)),
+                "force_aware_b_weight_max": float(getattr(args, "force_aware_b_weight_max", 10.0)),
                 "le0_enabled": bool(style in {"le0", "le0-state-b", "le0-fixed128-state-b"}),
                 "state_b": model.state_b_config() if hasattr(model, "state_b_config") else {"state_b_enabled": False},
                 "le0_init_definition": f"mean_train((LE_macro - {model_visible_b} @ {model_visible_q} - LE_mean) / LE_std)",
@@ -1187,13 +1260,14 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     for epoch in range(1, int(args.epochs) + 1):
         model.train()
         t0 = time.time()
-        sums = {"loss": 0.0, "le": 0.0, "j": 0.0, "direct_b": 0.0, "rigid": 0.0}
+        sums = {"loss": 0.0, "le": 0.0, "j": 0.0, "direct_b": 0.0, "force_aware_b": 0.0, "rigid": 0.0}
         count = 0
-        for xb, pb, leb, jb, _wb in train_loader:
+        for xb, pb, leb, jb, wb in train_loader:
             xb = xb.to(device)
             pb = pb.to(device)
             leb = leb.to(device)
             jb = jb.to(device)
+            wb = wb.to(device)
             optimizer.zero_grad(set_to_none=True)
             pred = model(xb, pb)
             le_loss = nn.functional.mse_loss(pred, leb)
@@ -1229,9 +1303,29 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                         b_scale=b_loss_scale_t[:, :, :, columns],
                         columns=columns,
                     )
+                force_aware_b_loss = torch.zeros((), dtype=xb.dtype, device=device)
+                if force_aware_b_loss_weight > 0.0:
+                    col_idx = torch.as_tensor(columns, dtype=torch.long, device=device)
+                    force_aware_b_loss = explicit_state_b_force_aware_loss(
+                        model,
+                        xb,
+                        pb,
+                        jb[:, :, :, columns],
+                        leb,
+                        wb,
+                        le_std_scale=le_std_scale_t,
+                        le_mean=le_mean_t,
+                        le_std=le_std_t,
+                        q_std_cols=q_std_t.index_select(0, col_idx),
+                        b_scale=b_loss_scale_t[:, :, :, columns],
+                        columns=columns,
+                        weight_min=float(getattr(args, "force_aware_b_weight_min", 0.1)),
+                        weight_max=float(getattr(args, "force_aware_b_weight_max", 10.0)),
+                    )
             else:
                 j_loss = torch.zeros((), dtype=xb.dtype, device=device)
                 direct_b_loss = torch.zeros((), dtype=xb.dtype, device=device)
+                force_aware_b_loss = torch.zeros((), dtype=xb.dtype, device=device)
             rigid_loss = torch.zeros((), dtype=xb.dtype, device=device)
             if float(args.rigid_loss_weight) > 0.0:
                 batch_x16_norm = xb[:, 48:96] * torch.as_tensor(
@@ -1254,6 +1348,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 float(args.le_loss_weight) * le_loss
                 + jacobian_loss_weight * j_loss
                 + direct_state_b_loss_weight * direct_b_loss
+                + force_aware_b_loss_weight * force_aware_b_loss
                 + float(args.rigid_loss_weight) * rigid_loss
             )
             loss.backward()
@@ -1266,6 +1361,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             sums["le"] += float(le_loss.detach().cpu()) * batch_n
             sums["j"] += float(j_loss.detach().cpu()) * batch_n
             sums["direct_b"] += float(direct_b_loss.detach().cpu()) * batch_n
+            sums["force_aware_b"] += float(force_aware_b_loss.detach().cpu()) * batch_n
             sums["rigid"] += float(rigid_loss.detach().cpu()) * batch_n
         scheduler.step()
         denom = max(count, 1)
@@ -1277,6 +1373,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             "jacobian_loss_scale": jacobian_loss_scale,
             "direct_state_b_loss_norm_mse": sums["direct_b"] / denom,
             "direct_state_b_loss_weight": direct_state_b_loss_weight,
+            "force_aware_b_loss_norm_mse": sums["force_aware_b"] / denom,
+            "force_aware_b_loss_weight": force_aware_b_loss_weight,
             "rigid_loss_norm_mse": sums["rigid"] / denom,
             "lr": float(scheduler.get_last_lr()[0]),
             "seconds": time.time() - t0,
@@ -1373,6 +1471,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "physical_b_loss_scale_max": float(np.max(b_loss_scale)),
         "direct_state_b_loss_weight": direct_state_b_loss_weight,
         "direct_state_b_loss_target": "explicit _state_b_norm converted to physical B_macro_qdef",
+        "force_aware_b_loss_weight": force_aware_b_loss_weight,
+        "force_aware_b_weight_mode": str(getattr(args, "force_aware_b_weight_mode", "strain-volume")),
+        "force_aware_b_weight_min": float(getattr(args, "force_aware_b_weight_min", 0.1)),
+        "force_aware_b_weight_max": float(getattr(args, "force_aware_b_weight_max", 10.0)),
         "q_dim": 48,
         "rigid_modes_removed_from_input": False,
         "fine_grid_geometry_visible": False,
@@ -1433,6 +1535,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--jacobian-loss-weight", type=float, default=1.0)
     p.add_argument("--jacobian-loss-scale", default="physical-balanced", choices=["physical-balanced", "j-norm"])
     p.add_argument("--direct-state-b-loss-weight", type=float, default=0.0)
+    p.add_argument("--force-aware-b-loss-weight", type=float, default=0.0)
+    p.add_argument("--force-aware-b-weight-mode", default="strain-volume", choices=["strain-volume"])
+    p.add_argument("--force-aware-b-weight-min", type=float, default=0.1)
+    p.add_argument("--force-aware-b-weight-max", type=float, default=10.0)
     p.add_argument("--physical-b-loss-floor-rel", type=float, default=2.0e-2)
     p.add_argument("--physical-b-loss-floor-abs", type=float, default=1.0e-8)
     p.add_argument("--rigid-loss-weight", type=float, default=0.1)

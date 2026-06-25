@@ -58,6 +58,8 @@ from macro_deeponet.train_true176_generic_sobolev import (
 from macro_deeponet.train_macro16_boundary_sobolev import (
     build_physical_b_loss_scale,
     explicit_state_b_physical_balanced_loss,
+    explicit_state_b_force_aware_loss,
+    force_aware_b_loss_from_j_norm,
     j_norm_to_b_qhat_torch,
     load_macro16_compacts,
     physical_balanced_b_loss_from_j_norm,
@@ -402,6 +404,66 @@ def test_macro16_fixed128_direct_state_b_loss_uses_explicit_physical_b() -> None
     assert float(loss1.detach()) > 0.0
 
 
+def test_macro16_force_aware_b_loss_weights_by_strain_volume() -> None:
+    rng = np.random.default_rng(20260627)
+    b = rng.normal(scale=0.2, size=(2, 4, 6, 3)).astype(np.float32)
+    q_std = np.asarray([0.02, 0.04, 0.08], dtype=np.float32)
+    le_std = np.ones((1, 4, 6, 1), dtype=np.float32)
+    le_mean = np.zeros((1, 4, 6), dtype=np.float32)
+    le_norm = np.zeros((2, 4, 6), dtype=np.float32)
+    le_norm[:, :, 0] = 10.0
+    le_norm[:, :, 4] = 1.0
+    weights = np.asarray([[1.0, 2.0, 1.0, 0.5], [1.0, 2.0, 1.0, 0.5]], dtype=np.float32)
+    j = b * q_std.reshape(1, 1, 1, 3) / le_std
+    b_scale = np.ones((1, 1, 6, 3), dtype=np.float32)
+    zero = force_aware_b_loss_from_j_norm(
+        torch.as_tensor(j),
+        torch.as_tensor(j),
+        torch.as_tensor(le_norm),
+        torch.as_tensor(weights),
+        le_std_scale=torch.as_tensor(le_std),
+        le_mean=torch.as_tensor(le_mean),
+        le_std=torch.as_tensor(le_std.reshape(1, 4, 6)),
+        q_std_cols=torch.as_tensor(q_std),
+        b_scale=torch.as_tensor(b_scale),
+        weight_min=0.1,
+        weight_max=10.0,
+    )
+    assert float(zero.detach()) == 0.0
+
+    shifted_e11 = torch.as_tensor(j.copy())
+    shifted_g23 = torch.as_tensor(j.copy())
+    shifted_e11[:, :, 0, :] += 0.05
+    shifted_g23[:, :, 5, :] += 0.05
+    loss_e11 = force_aware_b_loss_from_j_norm(
+        shifted_e11,
+        torch.as_tensor(j),
+        torch.as_tensor(le_norm),
+        torch.as_tensor(weights),
+        le_std_scale=torch.as_tensor(le_std),
+        le_mean=torch.as_tensor(le_mean),
+        le_std=torch.as_tensor(le_std.reshape(1, 4, 6)),
+        q_std_cols=torch.as_tensor(q_std),
+        b_scale=torch.as_tensor(b_scale),
+        weight_min=0.1,
+        weight_max=10.0,
+    )
+    loss_g23 = force_aware_b_loss_from_j_norm(
+        shifted_g23,
+        torch.as_tensor(j),
+        torch.as_tensor(le_norm),
+        torch.as_tensor(weights),
+        le_std_scale=torch.as_tensor(le_std),
+        le_mean=torch.as_tensor(le_mean),
+        le_std=torch.as_tensor(le_std.reshape(1, 4, 6)),
+        q_std_cols=torch.as_tensor(q_std),
+        b_scale=torch.as_tensor(b_scale),
+        weight_min=0.1,
+        weight_max=10.0,
+    )
+    assert float(loss_e11.detach()) > float(loss_g23.detach())
+
+
 def test_macro16_loader_rejects_missing_x16_and_keeps_q48() -> None:
     point_table = macro16_standard_point_table(plane_order=3, thickness_order=2)
     with tempfile.TemporaryDirectory() as tmp:
@@ -527,6 +589,10 @@ def test_macro16_training_smoke_runs_one_epoch() -> None:
             le_loss_weight=1.0,
             jacobian_loss_weight=0.1,
             jacobian_loss_scale="physical-balanced",
+            force_aware_b_loss_weight=0.0,
+            force_aware_b_weight_mode="strain-volume",
+            force_aware_b_weight_min=0.1,
+            force_aware_b_weight_max=10.0,
             physical_b_loss_floor_rel=0.02,
             physical_b_loss_floor_abs=1.0e-8,
             rigid_loss_weight=0.1,
@@ -607,6 +673,10 @@ def test_macro16_training_can_still_use_legacy_j_norm_loss() -> None:
             le_loss_weight=1.0,
             jacobian_loss_weight=0.1,
             jacobian_loss_scale="j-norm",
+            force_aware_b_loss_weight=0.0,
+            force_aware_b_weight_mode="strain-volume",
+            force_aware_b_weight_min=0.1,
+            force_aware_b_weight_max=10.0,
             physical_b_loss_floor_rel=0.02,
             physical_b_loss_floor_abs=1.0e-8,
             rigid_loss_weight=0.0,
@@ -698,6 +768,10 @@ def test_macro16_state_b_training_checkpoint_loads_for_force_audit() -> None:
             le_loss_weight=1.0,
             jacobian_loss_weight=0.1,
             jacobian_loss_scale="physical-balanced",
+            force_aware_b_loss_weight=0.0,
+            force_aware_b_weight_mode="strain-volume",
+            force_aware_b_weight_min=0.1,
+            force_aware_b_weight_max=10.0,
             physical_b_loss_floor_rel=0.02,
             physical_b_loss_floor_abs=1.0e-8,
             rigid_loss_weight=0.0,
@@ -804,6 +878,10 @@ def test_macro16_fixed128_state_b_training_checkpoint_loads_for_force_audit() ->
             le_loss_weight=1.0,
             jacobian_loss_weight=0.1,
             jacobian_loss_scale="physical-balanced",
+            force_aware_b_loss_weight=0.5,
+            force_aware_b_weight_mode="strain-volume",
+            force_aware_b_weight_min=0.1,
+            force_aware_b_weight_max=10.0,
             physical_b_loss_floor_rel=0.02,
             physical_b_loss_floor_abs=1.0e-8,
             rigid_loss_weight=0.0,
@@ -824,6 +902,8 @@ def test_macro16_fixed128_state_b_training_checkpoint_loads_for_force_audit() ->
         summary = json.loads((out_dir / "training_summary.json").read_text(encoding="utf-8"))
         assert summary["model_style"] == "macro16-boundary-deeponet-with-le0-fixed128-state-b"
         assert summary["state_b"]["has_static_b_norm"] is True
+        assert summary["force_aware_b_loss_weight"] == 0.5
+        assert summary["latest_report"]["force_aware_b_loss_norm_mse"] >= 0.0
         checkpoint = torch.load(Path(summary["latest_checkpoint"]), map_location="cpu", weights_only=False)
         loaded = make_trained_macro16_force_model(
             checkpoint,

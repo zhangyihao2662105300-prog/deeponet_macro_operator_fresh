@@ -87,6 +87,7 @@ fixed parent integration points.
 | Gate 06 training | LIMITED RELEASE | `docs/TRAINING_RELEASE_DECISION.md`; training may start only for LE/B learning, with mandatory selected-frame force closure after training. |
 | Gate 16 q dependent B diagnosis | diagnosis PASS, large training release FAIL | `reports/16_q_dependent_b_diagnosis.md`; B varies with `q48_def_hat`; point-only B prior is insufficient; formal large training remains blocked. |
 | Gate 17 state B prototype | prototype PASS, production release FAIL | `reports/17_state_b_baseline_prototype.md`; state-dependent B baseline reduces force rel to `0.0919`, below the prototype `0.10` target but above final `0.02`. |
+| Gate 18 state B migration plan | PLAN PASS | `reports/18_state_b_migration_plan.md`; next step is guarded implementation of a new state B model variant, not formal large training. |
 
 Training is allowed only within the limited LE/B release boundary.
 
@@ -126,6 +127,9 @@ Current verified or adopted conclusions:
   rel from about `0.2107` to `0.0919` and B rel from about `0.0834` to
   `0.0474`.
 - Gate 17 proves the direction but does not release the production model.
+- Gate 18 records the safe migration plan: add a separate state-dependent B
+  model variant, keep default LE0 route intact, and require a six-frame
+  reproduction before any larger training.
 
 ## Pending Issues That Are Not Data Errors
 
@@ -149,6 +153,7 @@ data is bad:
   the residual derivative. Gate 17 shows a state-dependent B baseline prototype
   is better, but it has not yet been migrated into the production trainer and
   still does not meet the final `0.02` force closure target.
+- Gate 18 is only a plan. It does not prove the migrated main model works.
 
 These issues must not be hidden inside network training as if a network could
 repair a definition mismatch. They do not block the limited LE/B training
@@ -213,8 +218,7 @@ Required after training:
 Recommended next tasks, in order:
 
 1. Keep material-only K diagnostics separate from full tangent claims.
-2. Write a Gate 18 migration plan for adding state-dependent B baseline to the
-   Macro16 main model.
+2. Implement Gate 19 as a guarded state-dependent B model variant.
 3. Keep migration staged behind tests and six-frame reproduction.
 4. After any migrated prototype training, rerun selected-frame force closure before
    claiming mechanical usability.

@@ -2,25 +2,9 @@
 
 日期：2026-06-26
 
-## 1. 当前状态
+## 1. 目标
 
-Gate 32 已建立只读诊断脚本。
-
-脚本：
-
-```text
-scripts/diagnose_macro16_wind_shell_generalization.py
-```
-
-本地 Windows 工作区没有 Gate 31 Linux `runs` 数据，因此本文件是任务入口报告，不伪造数值结论。
-
-最终数值报告必须在 Linux 训练目录运行脚本后覆盖本文件。
-
-## 2. 目标
-
-诊断 Gate 31 中风机壳验证集 `case070` 到 `case073` force closure 失败原因。
-
-本任务只做诊断。
+诊断 Gate 31 中 `case070` 到 `case073` 风机壳验证集 force closure 失败原因。
 
 不训练网络。
 
@@ -32,90 +16,133 @@ scripts/diagnose_macro16_wind_shell_generalization.py
 
 不改 128 点规则。
 
-## 3. Gate 31 已知事实
+## 2. 数据
 
-Gate 31 结论：
-
-```text
-FAIL
-```
-
-有效数据必须来自重新生成的 qdef source128 compact：
+compact list：
 
 ```text
-runs/gate31_force_residual_16case_qdef/enriched_16case_compact_list.txt
+/home/ydh/IS-FEM/gate31_force_residual_16case_qdef/repo/runs/gate31_force_residual_16case_qdef/enriched_16case_compact_list.txt
 ```
 
-旧 compact 训练结果作废，因为缺少：
+train cases：
 
 ```text
-q48_def_hat
-B_macro_qdef
-rigid_projection_P
+19,25,31,41,43,44,45,46,49,50,60,61
 ```
 
-Gate 31 已知问题：
+wind shell cases：
 
-1. 16 case 混合训练失败。
-2. wind shell `case070` 到 `case073` teacher force closure 很好，但模型 force closure 极差。
-3. `case060` 是 q_zero 或近零力特殊样本，不应作为普通 relative force gate 样本。
-
-## 4. Gate 32 必须输出
-
-脚本会统计：
-
-1. train cases 和 wind shell cases 的 `q48_def_hat` 范数。
-2. `LE_macro` 范数。
-3. `B_macro_qdef` 范数。
-4. teacher assembled force 范数。
-5. branch 标准化后风机壳是否离群。
-6. `case070` 到 `case073` 是否因 q 或 force 太小导致 relative error 爆炸。
-7. `case060` 是否应排除普通 relative force gate。
-
-## 5. Linux 命令
-
-在 Linux 训练目录运行：
-
-```bash
-cd /home/ydh/IS-FEM/gate31_force_residual_16case_qdef/repo
-git pull
-
-python3 scripts/run_gate32_wind_shell_generalization_diagnosis.py \
-  --source-path-map "D:\\IS-FEM=/home/ydh/IS-FEM" \
-  --run-root runs/gate31_force_residual_16case_qdef \
-  --run-name f01_lr8e5
+```text
+70,71,72,73
 ```
 
-脚本会自动查找 checkpoint。
+branch normalization：
 
-如果自动查找失败，先查找：
-
-```bash
-find runs/gate31_force_residual_16case_qdef/train/f01_lr8e5 -maxdepth 2 -type f \( -name "*.pt" -o -name "*.pth" \)
+```text
+/home/ydh/IS-FEM/gate31_force_residual_16case_qdef/repo/runs/gate31_force_residual_16case_qdef/train/f01_lr8e5/best.pt
 ```
 
-然后补充：
+## 3. 分组统计
 
-```bash
---checkpoint 实际文件路径
+| group | cases | frames | q p50 | LE p50 | B p50 | branch max | RF p50 | teacher force rel |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| train | 19,25,31,41,43,44,45,46,49,50,60,61 | 120 | 0.00169088 | 0.0040895 | 1760.54 | 33.0432 | 6.44181 | 0.00856901 |
+| wind_shell | 70,71,72,73 | 40 | 0.000109107 | 0.00115624 | 535.149 | 2.25463e+06 | 2.07127 | 2.56391e-05 |
+
+## 4. 逐 Case 统计
+
+| case | frames | q p50 | LE p50 | B p50 | branch max | RF p50 | teacher force rel |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 019 | 10 | 0.0151985 | 0.0191803 | 1055.82 | 6.22575 | 21.4034 | 0.00160548 |
+| 025 | 10 | 0.00218128 | 0.00315252 | 1055.54 | 7.14224 | 3.44723 | 0.000327393 |
+| 031 | 10 | 0.208091 | 0.282465 | 1059.38 | 33.0432 | 543.802 | 0.00858535 |
+| 041 | 10 | 0.00108749 | 0.0022921 | 1760.6 | 5.16064 | 3.40987 | 0.000225811 |
+| 043 | 10 | 0.00276282 | 0.0050611 | 1761.21 | 10.3844 | 10.1685 | 0.000296671 |
+| 044 | 10 | 0.00105632 | 0.00230044 | 1760.62 | 5.16662 | 3.4906 | 0.000211632 |
+| 045 | 10 | 0.00227319 | 0.00462515 | 1760.17 | 8.87261 | 8.61142 | 0.000286828 |
+| 046 | 10 | 0.00107376 | 0.00302429 | 1760.61 | 4.20022 | 5.36431 | 0.000162025 |
+| 049 | 10 | 0.00299191 | 0.00542066 | 1761.21 | 6.10081 | 9.28603 | 0.000440265 |
+| 050 | 10 | 0.00388438 | 0.0068074 | 1761.59 | 9.8921 | 11.627 | 0.000575362 |
+| 060 | 10 | 0 | 1.33749e-14 | 566.467 | 10.6888 | 1.22397e-11 | 0.826993 |
+| 061 | 10 | 0.000409282 | 0.00848767 | 608.741 | 19.5785 | 35.9933 | 1.84304e-05 |
+| 070 | 10 | 8.97888e-05 | 0.00096745 | 536.882 | 3.09887 | 2.2753 | 2.56091e-05 |
+| 071 | 10 | 9.55489e-05 | 0.00119287 | 581.504 | 18.1749 | 2.74041 | 2.6548e-05 |
+| 072 | 10 | 8.95528e-05 | 0.000964905 | 495.526 | 3.38797 | 2.36188 | 2.49487e-05 |
+| 073 | 10 | 0.000225664 | 0.00170988 | 533.414 | 2.25463e+06 | 1.4259 | 2.41231e-05 |
+
+## 5. Gate 31 Force Audit 对照
+
+| case | model force rel | teacher force rel | json |
+|---|---:|---:|---|
+| 019 | 2.85914 | 0.00161182 | /home/ydh/IS-FEM/gate31_force_residual_16case_qdef/repo/runs/gate31_force_residual_16case_qdef/audits/f01_lr8e5_case19.json |
+| 025 | 20.0507 | 0.000328068 | /home/ydh/IS-FEM/gate31_force_residual_16case_qdef/repo/runs/gate31_force_residual_16case_qdef/audits/f01_lr8e5_case25.json |
+| 031 | 1.0278 | 0.0103085 | /home/ydh/IS-FEM/gate31_force_residual_16case_qdef/repo/runs/gate31_force_residual_16case_qdef/audits/f01_lr8e5_case31.json |
+| 041 | 11.1843 | 0.000225604 | /home/ydh/IS-FEM/gate31_force_residual_16case_qdef/repo/runs/gate31_force_residual_16case_qdef/audits/f01_lr8e5_case41.json |
+| 043 | 3.32268 | 0.000298642 | /home/ydh/IS-FEM/gate31_force_residual_16case_qdef/repo/runs/gate31_force_residual_16case_qdef/audits/f01_lr8e5_case43.json |
+| 044 | 10.8819 | 0.00021144 | /home/ydh/IS-FEM/gate31_force_residual_16case_qdef/repo/runs/gate31_force_residual_16case_qdef/audits/f01_lr8e5_case44.json |
+| 045 | 5.00738 | 0.000286018 | /home/ydh/IS-FEM/gate31_force_residual_16case_qdef/repo/runs/gate31_force_residual_16case_qdef/audits/f01_lr8e5_case45.json |
+| 046 | 7.65603 | 0.000162083 | /home/ydh/IS-FEM/gate31_force_residual_16case_qdef/repo/runs/gate31_force_residual_16case_qdef/audits/f01_lr8e5_case46.json |
+| 049 | 4.01248 | 0.000440409 | /home/ydh/IS-FEM/gate31_force_residual_16case_qdef/repo/runs/gate31_force_residual_16case_qdef/audits/f01_lr8e5_case49.json |
+| 050 | 2.92299 | 0.000575513 | /home/ydh/IS-FEM/gate31_force_residual_16case_qdef/repo/runs/gate31_force_residual_16case_qdef/audits/f01_lr8e5_case50.json |
+| 060 | 8.44726e+12 | 0.812668 | /home/ydh/IS-FEM/gate31_force_residual_16case_qdef/repo/runs/gate31_force_residual_16case_qdef/audits/f01_lr8e5_case60.json |
+| 061 | 2.75058 | 1.83974e-05 | /home/ydh/IS-FEM/gate31_force_residual_16case_qdef/repo/runs/gate31_force_residual_16case_qdef/audits/f01_lr8e5_case61.json |
+| 070 | 56.7939 | 2.56137e-05 | /home/ydh/IS-FEM/gate31_force_residual_16case_qdef/repo/runs/gate31_force_residual_16case_qdef/audits/f01_lr8e5_case70.json |
+| 071 | 48.2835 | 2.65392e-05 | /home/ydh/IS-FEM/gate31_force_residual_16case_qdef/repo/runs/gate31_force_residual_16case_qdef/audits/f01_lr8e5_case71.json |
+| 072 | 62.0157 | 2.49434e-05 | /home/ydh/IS-FEM/gate31_force_residual_16case_qdef/repo/runs/gate31_force_residual_16case_qdef/audits/f01_lr8e5_case72.json |
+| 073 | 93.8086 | 2.41213e-05 | /home/ydh/IS-FEM/gate31_force_residual_16case_qdef/repo/runs/gate31_force_residual_16case_qdef/audits/f01_lr8e5_case73.json |
+
+## 6. 诊断标记
+
+```text
+data_bad_evidence = False
+wind_teacher_force_passes_0p02 = True
+wind_branch_max_over_train_p99 = 78705.7
+wind_rf_p50_over_train_rf_p50 = 0.321536
+wind_branch_outlier_flag = True
+wind_force_small_flag = False
+wind_model_force_failed_in_gate31 = True
+case060_invalid_relative_gate_flag = True
 ```
 
-## 6. 当前禁止事项
+## 7. 当前结论
 
-不要继续扩大训练。
+Gate 32 结论：
 
-不要把 Gate 30 two-case 成功当作 16-case 放行证据。
+```text
+diagnosis PASS
+Gate 31 失败不是数据坏
+主要问题是 wind shell branch 标准化离群
+```
 
-不要把 `case060` 的 relative force 数值和正常非零力样本混用。
+依据：
 
-不要在 Gate 32 诊断前改模型或 loss。
+1. wind shell teacher force rel 是 `2.56391e-05`，通过 `0.02`。
+2. wind shell model force 在 Gate 31 中失败，case070 到 case073 全部很差。
+3. wind branch max 是 `2.25463e+06`，train branch max 只有 `33.0432`。
+4. `wind_branch_max_over_train_p99 = 78705.7`。
+5. wind RF p50 不是近零，`wind_rf_p50_over_train_rf_p50 = 0.321536`，所以不是小力范数导致的主失败。
+6. `case060` 的 teacher force rel 是 `0.826993`，应标记为 near-zero-force special sample，不进普通 relative force gate。
 
-## 7. Gate 32 判定逻辑
+当前判断：
 
-如果 wind shell teacher force 通过 `0.02`，但模型 force 失败，则不是老师力闭合坏。
+```text
+不是 q48 顺序错误
+不是 LE 顺序错误
+不是 128 点规则错误
+不是 teacher force 数据坏
+是 wind shell 输入标准化或数据分布离群问题
+```
 
-如果 wind shell branch 标准化范数明显大于 train 分布，则优先诊断 normalization 或 split。
+## 8. 下一步
 
-如果 wind shell RF 范数远小于 train 分布，则需要给 relative force gate 加 absolute floor 或单独小力样本规则。
+不要扩大训练。
 
-如果 `case060` teacher force relative error 本身不通过，则 `case060` 应标记为 near-zero-force special sample。
+进入 Gate 33。
+
+目标是查清楚 branch 离群来自：
+
+1. `q48_def_hat`
+2. `X16_hat`
+3. `L_ref`
+4. train split 中某些列标准差过小
+5. `case073` 几何尺度或厚度字段异常

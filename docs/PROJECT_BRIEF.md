@@ -6,7 +6,7 @@ the current route unless a newer dated project brief says otherwise.
 
 ## 1. Final Goal
 
-Status: CONFIRMED
+Theory status: 已验证
 
 Build a standard macro element that can be used inside a solver.
 
@@ -16,7 +16,7 @@ assembly of recovery force and stiffness.
 
 ## 2. Current Main Route
 
-Status: CONFIRMED
+Theory status: 已验证
 
 The current main route is the Macro16 v4 boundary route:
 
@@ -36,14 +36,14 @@ Relationship:
 
 Historical routes:
 
-- active42 is OLD.
-- The 18-point Macro16 integration route has temporarily failed.
+- active42 is 旧路线.
+- The 18-point Macro16 integration route is 旧路线 for the current workflow.
 - Routes that only train a network without recovery-force and stiffness audits
   are abandoned.
 
 ## 3. Current Trusted Dataset
 
-Status: CONFIRMED
+Theory status: 已验证
 
 The currently trusted data is regenerated Macro16 source128 compact data.
 
@@ -57,7 +57,7 @@ Current verified range:
 - 100 frames.
 - Covers regular geometry and lightly distorted geometry.
 
-Status: UNCERTAIN
+Theory status: 待验证
 
 - Medium-distortion geometry is not complete.
 - Strong-distortion geometry is not complete.
@@ -119,13 +119,17 @@ Rigid fields:
 - `ip_feature`: standard integration-point features generated from parent
   coordinates and the `X16_hat` isoparametric map. CONFIRMED.
 - `F_int`: recovery force assembled from strain, stress, strain-displacement
-  matrix, and physical integration weights. CONFIRMED.
-- `K`: stiffness assembled from strain-displacement matrix, material matrix, and
-  physical integration weights. CONFIRMED.
+  matrix, and physical integration weights. CONFIRMED for the assembly path;
+  large-response volume convention is still a route decision.
+- `K_material`: material-only stiffness assembled as `B^T D B dV`.
+  CONFIRMED as an audit quantity, but not the complete Abaqus tangent under
+  large deformation.
+- `K`: complete tangent stiffness. UNCERTAIN until the consistent tangent terms
+  required by Gate 03 are included or explicitly waived.
 
 ## 6. Current Model Setting
 
-Status: CONFIRMED
+Theory status: 已验证
 
 Inputs:
 
@@ -158,7 +162,7 @@ Notes:
 
 ## 7. Existing Results
 
-Status: CONFIRMED
+Theory status: 已验证
 
 The 18-point Macro16 route failed.
 
@@ -167,7 +171,10 @@ The 18-point Macro16 route failed.
 - Mean recovery-force error: 0.355.
 - Mean stiffness error: 0.326.
 
-The standard 128-point Macro16 route basically closes.
+The standard 128-point Macro16 route has good mean force/stiffness errors but
+does not pass the current `0.02` max-error mechanics gate. The `case031`
+diagnosis has localized the failure; it is not a compact copy/reorder error and
+not a network-training issue.
 
 Standard 128-point result:
 
@@ -175,6 +182,9 @@ Standard 128-point result:
 - Max recovery-force error: 0.03578.
 - Mean stiffness error: 0.01013.
 - Max stiffness error: 0.04257.
+- Worst case: `case031`.
+- Gate result: FAIL current max-error threshold.
+- Failure status: localized, not resolved.
 
 Rigid preprocessing audit passed.
 
@@ -187,9 +197,17 @@ Audit result:
 - After pure translation and pure rotation, the rigid-removed displacement is
   close to zero.
 
-Status: UNCERTAIN
+Theory status: 待验证
 
 - Maximum error has not been fully reduced below 0.02.
+- The active large-response volume convention is 待决策. Selected-frame or
+  inferred volume reduces `case031` force error from about `0.036` to about
+  `0.0086`, but the route has not chosen which physical volume convention Gate
+  03 must close against.
+- Material-only stiffness `B^T D B dV` is not the complete Abaqus
+  finite-difference tangent under large deformation.
+- Missing consistent tangent terms, including `dV/dq`, `dB/dq`, and
+  geometric/stress stiffness when applicable, block Gate 03.
 - Medium-distortion and strong-distortion cases have not been verified.
 - `B_macro_qdef` is currently based on a small-rotation linear projection
   approximation, not a strict nonlinear Kabsch Jacobian.
@@ -222,24 +240,65 @@ Status: CONFIRMED
    must be audited.
 10. Do not mix physical weights with dimensionless weights.
 
-## 10. Current Work Priority
+## 10. Gate Status Ledger
 
-Status: CONFIRMED
+Status values in theory documents are limited to `已验证`, `待验证`, `待决策`,
+`近似`, and `旧路线`. Gate result may be PASS, FAIL, incomplete, or blocked.
+
+| Gate | Purpose | Gate Result | Evidence | Theory Status |
+|---|---|---|---|---|
+| 01 | Data contract audit | PASS | `reports/macro16_source128_data_audit.md` | 已验证 |
+| 02 | TRUE176/CSS8 teacher closure audit | FAIL on full teacher stiffness closure | `reports/02_teacher_closure_audit.md` | 待验证 |
+| 03 | Macro16 source128 force/stiffness audit | FAIL current max-error gate; failure localized | `reports/macro16_force_stiffness_audit.md`, `reports/macro16_case031_mechanics_diagnosis.md` | 待验证 |
+| 04 | Distortion/general geometry audit | incomplete | no canonical report yet | 待验证 |
+| 05 | Integration-point reduction audit | incomplete | no canonical report yet | 待验证 |
+| 06 | Training gate | blocked | blocked by Gate 02/03/04/05 | 待验证 |
+
+Current mechanics gate evidence:
+
+- Gate 02 teacher label evidence:
+  `LE128_base` is finite and merge-consistent, `B_LE128_forward` closes against
+  `LE128_plus` finite differences with max relative error
+  `2.5944000095411714e-08`, and teacher recovery force closes with
+  selected-frame IVOL with max relative error `0.00858572515082126`.
+- Gate 02 teacher stiffness blocker: material-only `B^T D B dV` does not close
+  against Abaqus perturbed-reaction stiffness on the full set; selected-frame
+  IVOL max stiffness relative error is `0.03196211043109838`, worst case
+  `case031`.
+- Recovery-force mean relative error: `0.00973330739371948`.
+- Recovery-force max relative error: `0.03578126940126121`.
+- Stiffness mean relative error: `0.010125161902503614`.
+- Stiffness max relative error: `0.04256563396475579`.
+- Worst case: `case031`.
+- Stiffness symmetry max relative error: `1.4366806903130055e-16`.
+- Diagnosis: `case031` is a large-response volume/tangent mismatch. `LE_macro`
+  and `B_macro_qraw` match source fields exactly. Excluding `case031`, the
+  remaining 9 cases pass the `0.02` max-error gate with force max
+  `0.009089404785732353` and stiffness max `0.007424585935534821`.
+
+## 11. Current Work Priority
+
+Theory status: 已验证
 
 The current priority is data audit and mechanical assembly, not network
 training.
 
 Next steps:
 
-1. Continue standard 128-point Macro16 generality validation.
-2. Generate medium-distortion geometries.
-3. Generate strong but non-inverted distortion geometries.
-4. Rebuild source128 compacts.
-5. Run rigid preprocessing audit.
-6. Run recovery-force and stiffness audit.
-7. If 128 points remain stably closed, then consider 64-point and 32-point
-   reduction.
-8. Train the network only after the above gates pass.
+1. Decide the Gate 03 large-response volume convention.
+2. Define or audit the consistent tangent terms needed beyond material-only
+   `B^T D B dV`.
+3. Resolve or explicitly waive Gate 02 full teacher stiffness closure with
+   consistent-tangent evidence.
+4. Generate medium-distortion geometries.
+5. Generate strong but non-inverted distortion geometries.
+6. Rebuild source128 compacts.
+7. Rerun rigid preprocessing audit.
+8. Rerun recovery-force and stiffness audit.
+9. If 128 points stably closes, run the generality audit.
+10. Only after 128-point mechanics and generality gates pass, consider 96/64/32
+   point reduction.
+11. Train the network only after the gate workflow permits it.
 
 ## Three Core Sentences
 

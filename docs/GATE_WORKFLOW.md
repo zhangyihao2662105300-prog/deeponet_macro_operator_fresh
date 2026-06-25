@@ -139,9 +139,9 @@ Current result:
 - Cylindrical, conical, thickness-varying, and mild double-curvature shell
   selected-frame force closure pass in
   `reports/04_distortion_generality_audit.md`.
-- Strong non-inverted data is invalid because the intended strong compact
-  duplicates medium-distortion geometry; it is now classified as a non-blocking
-  robustness-data issue.
+- Repaired strong non-inverted data no longer duplicates medium-distortion
+  geometry; it passes detJ, data-contract, and selected-frame effective force
+  checks as a non-blocking robustness boundary test.
 
 ## Gate 05: Integration-Point Reduction Audit
 

@@ -80,9 +80,9 @@ fixed parent integration points.
 | Gate 01 data contract | PASS | `reports/macro16_source128_data_audit.md`; loader uses `q48_def_hat` and `B_macro_qdef`; input remains 48D. |
 | Gate 02 teacher closure | FAIL / not cleared | `LE128_base` and `B_LE128_forward` are credible, and teacher force closes with selected-frame IVOL, but full teacher stiffness closure remains unresolved. |
 | Gate 03 Macro16 mechanics | split status | Selected-frame force closure passes on the current 10-case set; material-only K is diagnostic; full tangent closure remains incomplete. |
-| Gate 04 geometry generality | incomplete | Regular, light, and medium selected-frame force closure pass; cylindrical, conical, thickness-varying, and mild double-curvature shell families remain. |
-| Gate 05 IP reduction | not started | Blocked until Gate 04 mainline passes; planned order is `128 -> 96 -> 64 -> 32 -> 18`. |
-| Gate 06 training | blocked | Blocked by unresolved Gate 02/03/04/05 conditions. |
+| Gate 04 geometry generality | PASS for main-route required families | Regular, light, medium, cylindrical, conical, thickness-varying, and mild double-curvature selected-frame force closure pass; repaired strong non-inverted robustness data also passes. |
+| Gate 05 IP reduction | not started | Planned order is `128 -> 96 -> 64 -> 32 -> 18`; 128 remains the active rule until a reduction audit passes. |
+| Gate 06 training | blocked | Blocked by unresolved Gate 02/03/05 conditions. |
 
 Training is not allowed yet.
 
@@ -124,9 +124,6 @@ data is bad:
 - Material-only stiffness may remain above the old full-FD `0.02` threshold on
   large-response cases; this is now a named diagnostic, not proof of data
   corruption.
-- Strong non-inverted distortion data currently duplicates the medium geometry;
-  this is a non-blocking robustness-data issue, not a hard mainline Gate 04
-  blocker.
 - `B_macro_qdef` uses the current small-rotation linear projection
   approximation; strict nonlinear Kabsch Jacobian remains a future audit topic.
 - Full consistent tangent K is still an unresolved route decision or
@@ -137,20 +134,20 @@ repair a definition mismatch.
 
 ## Current Gate 04 Wind-Turbine Shell Geometry Task
 
-Gate 04 is the active mainline task before reduction or training.
+Gate 04 main-route required families now pass. Repaired strong non-inverted
+distortion also passes as a non-blocking robustness boundary test.
 
 Already audited:
 
 - regular geometry selected-frame force closure;
 - light distortion selected-frame force closure;
-- medium distortion selected-frame force closure.
-
-Still required for the main wind-turbine shell geometry route:
-
-- cylindrical shell geometry;
-- conical shell geometry;
-- thickness-varying shell geometry;
-- mild double-curvature shell geometry.
+- medium distortion selected-frame force closure;
+- cylindrical shell geometry selected-frame force closure;
+- conical shell geometry selected-frame force closure;
+- thickness-varying shell geometry selected-frame force closure;
+- mild double-curvature shell geometry selected-frame force closure;
+- repaired strong non-inverted robustness selected-frame effective force
+  closure.
 
 For each required geometry family, Gate 04 must verify:
 
@@ -172,18 +169,12 @@ geometries.
 
 Recommended next tasks, in order:
 
-1. Continue Gate 04 mainline geometry audit on cylindrical, conical,
-   thickness-varying, and mild double-curvature shell families.
-2. For each new geometry family, rebuild or collect source128 compacts with
-   valid `X16_raw` and selected-frame physical volume evidence.
-3. Rerun data contract and selected-frame force closure checks for the Gate 04
-   families.
-4. Keep material-only K diagnostics separate from full tangent claims.
-5. Decide whether the full consistent tangent requirement is implemented or
+1. Keep material-only K diagnostics separate from full tangent claims.
+2. Decide whether the full consistent tangent requirement is implemented or
    explicitly waived with evidence.
-6. Only after Gate 04 mainline passes, start Gate 05 IP reduction planning
-   execution.
-7. Keep Gate 06 training blocked until Gate 01-05 conditions are satisfied or
+3. Start Gate 05 IP reduction planning/execution only if the project chooses to
+   test fewer than 128 integration points.
+4. Keep Gate 06 training blocked until Gate 01-05 conditions are satisfied or
    formally waived where allowed.
 
 ## Currently Forbidden

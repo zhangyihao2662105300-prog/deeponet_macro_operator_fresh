@@ -62,7 +62,9 @@ Current verified range:
   cylindrical, conical, thickness-varying, and mild double-curvature shells.
   These add 4 Macro16 source128 compacts and 40 total base frames.
 - Strong non-inverted distortion is now a non-blocking robustness boundary test,
-  not a hard main-route Gate 04 requirement.
+  not a hard main-route Gate 04 requirement. The repaired `case061` strong
+  non-inverted set has also passed detJ, data-contract, and selected-frame
+  force closure checks.
 
 Theory status: 已验证
 
@@ -71,14 +73,12 @@ Theory status: 已验证
 - Cylindrical, conical, thickness-varying, and mild double-curvature shell
   selected-frame force closure pass in
   `reports/04_distortion_generality_audit.md`.
+- Repaired strong non-inverted `case061` selected-frame effective force closure
+  passes in `reports/04_distortion_generality_audit.md`.
 - Gate 04 main-route required geometry families have passed.
 
 Theory status: 待验证
 
-- Strong-distortion geometry is still not complete: the intended strong
-  non-inverted `case061` compact contains the same `shape4` and `X16` as the
-  medium-distortion `case060` compact. This is recorded as a non-blocking
-  robustness-data issue.
 - The E-drive path mentioned in older context is not formally confirmed in this
   project brief. Treat it as a historical path to confirm, not as the unique
   current main data path.
@@ -239,10 +239,8 @@ Theory status: 待验证
 - Medium-distortion selected-frame force closure has been audited and passes.
 - Cylindrical, conical, thickness-varying, and mild double-curvature shell
   selected-frame force closure has been audited and passes.
-- Strong-distortion cases have not been verified because the current intended
-  strong compact duplicates the medium-distortion geometry. This no longer
-  blocks the main Gate 04 wind-turbine shell geometry route, but it remains an
-  optional robustness boundary test.
+- Repaired strong non-inverted distortion has been audited as an optional
+  robustness boundary test and passes selected-frame effective force closure.
 - `B_macro_qdef` is currently based on a small-rotation linear projection
   approximation, not a strict nonlinear Kabsch Jacobian.
 
@@ -284,7 +282,7 @@ Status values in theory documents are limited to `已验证`, `待验证`, `待�
 | 01 | Data contract audit | PASS | `reports/macro16_source128_data_audit.md` | 已验证 |
 | 02 | TRUE176/CSS8 teacher closure audit | FAIL on full teacher stiffness closure | `reports/02_teacher_closure_audit.md` | 待验证 |
 | 03 | Macro16 source128 force/stiffness audit | split: force closure PASS; material-only stiffness diagnostic residual; full tangent incomplete | `reports/03_macro16_force_stiffness_reaudit.md`, `reports/macro16_case031_mechanics_diagnosis.md` | 待验证 |
-| 04 | Distortion/general geometry audit | PASS for main-route required families; strong non-inverted remains non-blocking robustness data | `reports/04_distortion_generality_audit.md` | 已验证 |
+| 04 | Distortion/general geometry audit | PASS for main-route required families; repaired strong non-inverted robustness check also passes | `reports/04_distortion_generality_audit.md` | 已验证 |
 | 05 | Integration-point reduction audit | incomplete | no canonical report yet | 待验证 |
 | 06 | Training gate | blocked | blocked by Gate 02/03/05 | 待验证 |
 
@@ -326,7 +324,9 @@ Current mechanics gate evidence:
   `0.00002797270029813907` / `0.00002797270029813907`;
   thickness-varying shell `0.000025519441712169405` /
   `0.000025519441712169405`; mild double-curvature shell
-  `0.000025422600701057786` / `0.000025422600701057786`.
+  `0.000025422600701057786` / `0.000025422600701057786`; repaired strong
+  non-inverted effective force mean/max `0.00009686685671651643` /
+  `0.00023346870978522232`.
 - Gate 04 material-only stiffness remains diagnostic only:
   regular mean/max `0.011443767055272435` / `0.031962110431098374`;
   light mean/max `0.000330240237648814` / `0.0004728016155049718`;
@@ -336,7 +336,8 @@ Current mechanics gate evidence:
   `0.0001097975864293813`; thickness-varying shell
   `0.0000904030325614494` / `0.0000904030325614494`; mild
   double-curvature shell `0.00008722059435666368` /
-  `0.00008722059435666368`.
+  `0.00008722059435666368`; repaired strong non-inverted mean/max
+  `0.002260104975094106` / `0.006567508247031507`.
 
 ## 11. Current Work Priority
 
@@ -351,8 +352,8 @@ Next steps:
    `B^T D B dV`.
 2. Resolve or explicitly waive Gate 02 full teacher stiffness closure with
    consistent-tangent evidence.
-3. Keep strong non-inverted distortion as an optional robustness boundary test;
-   fix its duplicated data when useful, but do not let it block the main route.
+3. Keep repaired strong non-inverted distortion as an optional robustness
+   boundary test; do not use it as a network-training shortcut.
 4. Only after 128-point mechanics and generality gates pass, consider 96/64/32
    point reduction.
 5. Train the network only after the gate workflow permits it.

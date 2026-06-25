@@ -31,7 +31,8 @@ Current status:
   still unresolved.
 - Gate 03: force closure passes with selected-frame physical volume, but full
   tangent closure remains incomplete.
-- Gate 04: incomplete; required wind-turbine shell geometry families remain.
+- Gate 04: mainline geometry generality passes; repaired strong non-inverted
+  robustness data also passes.
 - Gate 05: incomplete; reduction has not started.
 - Gate 06: blocked.
 
@@ -54,9 +55,8 @@ be treated as proof that the data is corrupt:
 - The `case031` stiffness residual is a tangent-definition mismatch involving
   missing full-tangent terms such as `dV/dq`, `dB/dq`, and geometric/stress
   stiffness.
-- Strong non-inverted distortion data currently has a duplicated-geometry issue
-  and is a non-blocking robustness-data item, not a hard mainline Gate 04
-  failure by itself.
+- Repaired strong non-inverted distortion no longer duplicates the medium
+  geometry and passes as a non-blocking robustness boundary check.
 - `B_macro_qdef` uses the current small-rotation linear projection
   approximation; strict nonlinear Kabsch Jacobian remains a future audit topic.
 

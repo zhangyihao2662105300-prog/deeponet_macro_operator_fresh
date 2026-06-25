@@ -443,6 +443,27 @@ Rules:
   contain only `X16`, `q48`, Macro16 point data, `LE_macro`, `B_macro`, and
   integration weights.
 
+Existing audited TRUE176/CSS8 128-IP compacts can be used as a teacher source
+for a small Macro16 smoke, but not as direct v4 training input.  First export a
+Macro16 teacher compact:
+
+```powershell
+cd D:\IS-FEM\deeponet_macro_operator_fresh
+$env:PYTHONPATH = "D:\IS-FEM\deeponet_macro_operator_fresh\src"
+py scripts\build_macro16_from_128_teacher.py `
+  --compact-list D:\path\to\v2b_compact_list.txt `
+  --out-root runs\macro16_from_128_teacher `
+  --case-limit 10 `
+  --max-frames-per-compact 10
+```
+
+The exporter writes only `X16`, `q48_raw`, `LE_macro`, `B_macro`, and Macro16
+weights.  It does not write `X_macro` or CSS8 labels.  When the source is
+`X_keep`, the default node-order mode treats it as the TRUE176 keep-node order
+and rewrites `X16`, `q48`, and the 48 B columns into Macro16 order.  The labels
+are 128-IP teacher fields interpolated to the standard 18 Macro16 integration
+points, not a direct Abaqus Macro16-IP export.
+
 Windows smoke run:
 
 ```powershell

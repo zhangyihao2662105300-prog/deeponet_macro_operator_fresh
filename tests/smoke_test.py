@@ -67,6 +67,9 @@ from validate_true176_css8_macro_mapping import run_css8_macro_validation
 from audit_query_point_data_coverage import run_coverage_audit
 from export_abaqus_true176_complete_compact import enforce_ip_audit, merge_existing_payload
 from run_macro16_two_geometry_smoke import run_two_geometry_smoke
+from build_macro16_from_128_teacher import build_all as build_macro16_from_128_teacher
+from build_macro16_from_128_teacher import macro16_from_128_interpolation_matrix
+from build_macro16_from_128_teacher import reorder_nodes_q_b_to_macro16
 
 
 def macro16_flat_x16(thickness: float = 0.2) -> np.ndarray:
@@ -444,6 +447,88 @@ def test_macro16_two_geometry_smoke_script_runs_on_synthetic_compact() -> None:
         assert summary["validation_split"]["val_cases"] == [2]
         train_config = json.loads(Path(summary["training_config"]).read_text(encoding="utf-8"))
         assert train_config["validation_split"]["val_cases"] == [2]
+
+
+def test_macro16_from_128_teacher_builder_writes_v4_contract_only() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        source = root / "complete_case001_training_ready.npz"
+        out_root = root / "macro16"
+        n = 3
+        point_table = macro16_standard_point_table(plane_order=3, thickness_order=2)
+        w = macro16_from_128_interpolation_matrix(point_table)
+        x16 = macro16_flat_x16()
+        rng = np.random.default_rng(9125)
+        q48 = rng.normal(scale=0.01, size=(n, 48)).astype(np.float32)
+        le128 = np.zeros((n, 128, 6), dtype=np.float32)
+        b128 = np.zeros((n, 128, 6, 48), dtype=np.float32)
+        row_ids = np.arange(128, dtype=np.float32)
+        le128[:, :, 0] = row_ids.reshape(1, 128)
+        b128[:, :, 1, 2] = (2.0 * row_ids).reshape(1, 128)
+        np.savez(
+            source,
+            q48_raw=q48,
+            X_keep=x16,
+            LE128_base=le128,
+            B_LE128_forward=b128,
+            ip_keys=np.asarray([[elem, ip, 0] for elem in range(1, 17) for ip in range(1, 9)], dtype=np.int64),
+            case_id=np.asarray([1, 1, 1], dtype=np.int64),
+            strain_field=np.asarray("LE", dtype=object),
+            B_label_strain_field=np.asarray("LE", dtype=object),
+        )
+        args = SimpleNamespace(
+            compact=[source],
+            compact_list=[],
+            out_root=out_root,
+            case_limit=0,
+            frame_stride=1,
+            max_frames_per_compact=0,
+            plane_gauss_order=3,
+            thickness_gauss_order=2,
+            allow_missing_ip_keys=False,
+            source_node_order="macro16",
+            source_geometry_tol=0.0,
+        )
+        summary = build_macro16_from_128_teacher(args)
+        compact = Path(summary["cases"][0]["macro16_compact"])
+        assert compact.exists()
+        with np.load(compact, allow_pickle=True) as z:
+            assert "X_macro" not in z.files
+            assert "B_LE128_forward" not in z.files
+            assert str(np.asarray(z["standard_operator_contract_version"]).reshape(-1)[0]) == MACRO16_CONTRACT_VERSION
+            assert str(np.asarray(z["source_node_order"]).reshape(-1)[0]) == "macro16"
+            assert z["X16"].shape == (n, 16, 3)
+            assert z["q48_raw"].shape == (n, 48)
+            assert z["LE_macro"].shape == (n, 18, 6)
+            assert z["B_macro"].shape == (n, 18, 6, 48)
+            assert bool(np.asarray(z["fine_grid_geometry_visible_to_model"]).reshape(-1)[0]) is False
+        data = load_macro16_compacts([str(compact)], point_table=point_table)
+        expected_le0 = np.einsum("pr,r->p", w, row_ids.astype(np.float64))
+        expected_b12 = np.einsum("pr,r->p", w, 2.0 * row_ids.astype(np.float64))
+        assert data.q48_hat.shape == (n, 48)
+        assert data.x16_hat.shape == (n, 16, 3)
+        assert np.allclose(data.le[:, :, 0], expected_le0.reshape(1, -1), atol=1.0e-5)
+        assert np.allclose(data.b[:, :, 1, 2], expected_b12.reshape(1, -1), atol=1.0e-5)
+
+
+def test_macro16_from_128_teacher_reorders_true176_keep_q_and_b_columns() -> None:
+    x_macro = macro16_flat_x16()
+    true176_keep_to_macro = np.asarray([0, 1, 2, 7, 3, 6, 5, 4, 8, 9, 10, 15, 11, 14, 13, 12], dtype=np.int64)
+    x_keep = x_macro[true176_keep_to_macro].reshape(1, 16, 3)
+    q_keep = np.arange(48, dtype=np.float64).reshape(1, 48)
+    b_keep = np.zeros((1, 128, 6, 48), dtype=np.float64)
+    b_keep[0, 0, 0, :] = q_keep[0] + 1000.0
+    x_out, q_out, b_out, meta = reorder_nodes_q_b_to_macro16(
+        x16=x_keep,
+        q48=q_keep,
+        b128=b_keep,
+        source_node_order="true176-keep",
+    )
+    assert meta["node_order_transform"] == "true176_keep_to_macro16_surface8"
+    assert np.allclose(x_out[0], x_macro)
+    expected_cols = np.asarray([node * 3 + axis for node in [0, 1, 2, 4, 7, 6, 5, 3, 8, 9, 10, 12, 15, 14, 13, 11] for axis in range(3)])
+    assert np.array_equal(q_out[0], q_keep[0, expected_cols])
+    assert np.array_equal(b_out[0, 0, 0], b_keep[0, 0, 0, expected_cols])
 
 
 def test_true176_xkeep_branch_and_ad_shapes() -> None:

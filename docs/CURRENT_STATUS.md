@@ -93,6 +93,7 @@ fixed parent integration points.
 | Gate 21 point q rank rerun | FAIL | `reports/21_state_b_point_q_rank_rerun.md`; Linux `point_q_rank` rerun still fails. Best model force rel is about `0.59` to `0.62`, while teacher force rel remains `0.01279`. Large training remains blocked. |
 | Gate 22 state B equivalence diagnosis | diagnosis PASS, training release FAIL | `reports/22_state_b_equivalence_diagnosis.md`; main `le0-state-b` is not equivalent to Gate 17. The main path lacks fixed `static_b[128,6,48]`, and residual AD terms mix into B. Next step is a fixed-128 direct-B state baseline, not larger training. |
 | Gate 23 fixed128 direct B training | FAIL, close but not released | `reports/23_fixed128_direct_b_training.md`; Linux rank 4/8/12 fixed128 direct-B training completed. Best force rel is `0.1073723868`, above the `0.10` prototype threshold; teacher force rel remains `0.0127911083`. Large training remains blocked. |
+| Gate 24 Gate17 loss match | FAIL | `reports/24_gate17_loss_match.md`; increasing direct-B weight improves val B to about `0.0973`, but best force rel worsens to `0.1781248909`. This shows balanced B rel is not aligned with the force functional. Large training remains blocked. |
 
 Training is allowed only within the limited LE/B release boundary.
 
@@ -151,6 +152,9 @@ Current verified or adopted conclusions:
   4/8/12 training. Train B improves to about `0.048`, but validation B remains
   about `0.107`, and best selected-frame force rel is `0.1073723868`, so it is
   still not released.
+- Gate 24 increases direct B weighting and reduces validation B to about
+  `0.0973`, but force rel worsens to `0.1781248909`. This means global
+  balanced B rel is not a sufficient proxy for selected-frame force closure.
 
 ## Pending Issues That Are Not Data Errors
 
@@ -175,8 +179,9 @@ data is bad:
   localizes the mismatch to the trainer objective and B baseline structure, so
   it does not yet meet the final `0.02` force closure target.
 - The fixed-128 direct-B variant is closer to Gate 17 but still fails the
-  prototype force target. Gate 24 must align Gate 17 loss weighting,
-  initialization, and checkpoint selection before any larger training.
+  prototype force target. Gate 24 shows that simply increasing B loss improves
+  B rel while worsening force closure, so Gate 25 must diagnose force-aware
+  error contributions before another training sweep.
 
 These issues must not be hidden inside network training as if a network could
 repair a definition mismatch. They do not block the limited LE/B training

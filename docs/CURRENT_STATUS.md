@@ -94,6 +94,7 @@ fixed parent integration points.
 | Gate 22 state B equivalence diagnosis | diagnosis PASS, training release FAIL | `reports/22_state_b_equivalence_diagnosis.md`; main `le0-state-b` is not equivalent to Gate 17. The main path lacks fixed `static_b[128,6,48]`, and residual AD terms mix into B. Next step is a fixed-128 direct-B state baseline, not larger training. |
 | Gate 23 fixed128 direct B training | FAIL, close but not released | `reports/23_fixed128_direct_b_training.md`; Linux rank 4/8/12 fixed128 direct-B training completed. Best force rel is `0.1073723868`, above the `0.10` prototype threshold; teacher force rel remains `0.0127911083`. Large training remains blocked. |
 | Gate 24 Gate17 loss match | FAIL | `reports/24_gate17_loss_match.md`; increasing direct-B weight improves val B to about `0.0973`, but best force rel worsens to `0.1781248909`. This shows balanced B rel is not aligned with the force functional. Large training remains blocked. |
+| Gate 25 force error diagnosis | diagnosis PASS, training release FAIL | `reports/25_force_error_diagnosis.md`; Gate 24 lowers LE/B rel but worsens force. Error is concentrated in the largest-q frame, shifts from Gate 23 G13 dominance to Gate 24 E11 dominance, and shows force magnitude underprediction. Next step is force-weighted B loss planning. |
 
 Training is allowed only within the limited LE/B release boundary.
 
@@ -155,6 +156,10 @@ Current verified or adopted conclusions:
 - Gate 24 increases direct B weighting and reduces validation B to about
   `0.0973`, but force rel worsens to `0.1781248909`. This means global
   balanced B rel is not a sufficient proxy for selected-frame force closure.
+- Gate 25 diagnoses the mismatch: Gate 24 force error is dominated by the
+  largest-q frame, E11 contribution, and selected q DOFs. Gate 24 also
+  underpredicts force magnitude on the worst frame. A force-aware loss or
+  checkpoint selector is needed before further training.
 
 ## Pending Issues That Are Not Data Errors
 
@@ -182,6 +187,9 @@ data is bad:
   prototype force target. Gate 24 shows that simply increasing B loss improves
   B rel while worsening force closure, so Gate 25 must diagnose force-aware
   error contributions before another training sweep.
+- Gate 25 has localized the force/B mismatch. The next training change should
+  be force-weighted, stress-weighted, or force-aware; another unweighted B loss
+  sweep is not justified.
 
 These issues must not be hidden inside network training as if a network could
 repair a definition mismatch. They do not block the limited LE/B training

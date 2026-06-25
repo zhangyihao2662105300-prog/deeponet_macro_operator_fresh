@@ -48,7 +48,7 @@ Diagnostic JSON inputs:
 Existing Gate 03 audit command:
 
 ```powershell
-$env:PYTHONPATH='src;scripts'; py scripts\audit_macro16_force_stiffness.py --compact-list runs\macro16_source128_rigid_preprocess_audit_real_10case\macro16_source128_teacher_compact_list.txt --out runs\macro16_source128_rigid_preprocess_audit_real_10case\force_stiffness_audit_mechanics.json --weight-mode auto --max-force-rel 2.0e-2 --max-stiffness-rel 2.0e-2 --max-macro-stiffness-symmetry-rel 1.0e-10
+$env:PYTHONPATH='src;scripts'; py scripts\audit_macro16_force_stiffness.py --compact-list runs\macro16_source128_rigid_preprocess_audit_real_10case\macro16_source128_teacher_compact_list.txt --out runs\macro16_source128_rigid_preprocess_audit_real_10case\force_stiffness_audit_mechanics.json --volume-mode reference --tangent-mode material-only --max-force-rel 2.0e-2 --max-stiffness-rel 2.0e-2 --max-macro-stiffness-symmetry-rel 1.0e-10
 ```
 
 This report additionally read the existing case031 diagnostic JSONs and source
@@ -84,9 +84,10 @@ Implementation evidence:
 - If a source volume is requested, the builder stores it separately as
   `requested_integration_weight_phys`; it does not replace
   `integration_weight_phys`.
-- `scripts/audit_macro16_force_stiffness.py --weight-mode auto` resolves to
-  `as-stored` when `integration_weight_phys` exists, so Gate 03 assembled with
-  the compact's standard reference volume.
+- `scripts/audit_macro16_force_stiffness.py --volume-mode reference` assembles
+  with the compact's standard reference volume. This is the explicit spelling
+  of the earlier `--weight-mode auto` behavior, which resolved to `as-stored`
+  when `integration_weight_phys` existed.
 
 ## Force Error By Volume Definition
 
@@ -188,9 +189,9 @@ the standard reference physical weight.
 The first required change is the audit script. Gate 03 should support an
 explicit volume mode, for example:
 
-- `--physical-volume-mode reference-standard`;
-- `--physical-volume-mode selected-frame`;
-- `--physical-volume-mode inferred-abaqus`.
+- `--volume-mode reference`;
+- `--volume-mode selected-frame`;
+- `--volume-mode inferred`.
 
 The compact should then be regenerated or extended so selected-frame and
 inferred physical volumes are carried in clearly named fields. This is needed

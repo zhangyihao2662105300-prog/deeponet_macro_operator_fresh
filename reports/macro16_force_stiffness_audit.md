@@ -26,7 +26,7 @@ Dataset gate:
 ## Command
 
 ```powershell
-$env:PYTHONPATH='src;scripts'; py scripts\audit_macro16_force_stiffness.py --compact-list runs\macro16_source128_rigid_preprocess_audit_real_10case\macro16_source128_teacher_compact_list.txt --out runs\macro16_source128_rigid_preprocess_audit_real_10case\force_stiffness_audit_mechanics.json --weight-mode auto --max-force-rel 2.0e-2 --max-stiffness-rel 2.0e-2 --max-macro-stiffness-symmetry-rel 1.0e-10
+$env:PYTHONPATH='src;scripts'; py scripts\audit_macro16_force_stiffness.py --compact-list runs\macro16_source128_rigid_preprocess_audit_real_10case\macro16_source128_teacher_compact_list.txt --out runs\macro16_source128_rigid_preprocess_audit_real_10case\force_stiffness_audit_mechanics.json --volume-mode reference --tangent-mode material-only --max-force-rel 2.0e-2 --max-stiffness-rel 2.0e-2 --max-macro-stiffness-symmetry-rel 1.0e-10
 ```
 
 Output JSON:
@@ -81,7 +81,12 @@ The worst geometry in this checked set is therefore `case031`.
 
 ## Physical Weights
 
-Physical assembly used `weight_mode=as-stored` after `--weight-mode auto`.
+Physical assembly used the explicit `--volume-mode reference` convention. This
+is equivalent to the earlier `weight_mode=as-stored` resolution after
+`--weight-mode auto` on these compacts.
+
+Stiffness used `--tangent-mode material-only`, so the audited matrix was
+`B^T D B dV`, not a full Abaqus consistent tangent.
 
 For all checked compacts:
 

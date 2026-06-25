@@ -38,6 +38,8 @@ TRUE176_MACRO_TO_KEEP_FLAT = np.asarray(
 )
 
 WEIGHT_MODES = ("auto", "lref3", "as-stored", "source-volume-sum", "source-inferred-volume-sum")
+VOLUME_MODES = ("reference", "selected-frame", "inferred")
+TANGENT_MODES = ("material-only", "full-fd-reference")
 
 
 def json_default(obj: Any) -> Any:
@@ -355,6 +357,13 @@ def load_source(path: Path, rows: np.ndarray) -> dict[str, Any]:
                 (128,),
                 "IVOL128_inferred_from_DLE",
             )
+        if "ip_IVOL_abaqus_selected_frames" in z.files:
+            out["source_selected_frame_volume"] = row_select_or_broadcast(
+                np.asarray(z["ip_IVOL_abaqus_selected_frames"], dtype=np.float64),
+                rows,
+                (128,),
+                "ip_IVOL_abaqus_selected_frames",
+            )
         if "ip_IVOL_abaqus" in z.files:
             out["source_ip_volume"] = row_select_or_broadcast(
                 np.asarray(z["ip_IVOL_abaqus"], dtype=np.float64),
@@ -406,12 +415,107 @@ def physical_weights(macro: dict[str, Any], source: dict[str, Any], weight_mode:
     }
 
 
+def resolve_volume_weights(
+    macro: dict[str, Any],
+    source: dict[str, Any],
+    *,
+    volume_mode: str | None,
+    weight_mode: str,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    requested_volume_mode = None if volume_mode is None else str(volume_mode).strip().lower().replace("_", "-")
+    if requested_volume_mode in {"", "none"}:
+        requested_volume_mode = None
+    if requested_volume_mode is not None and requested_volume_mode not in VOLUME_MODES:
+        raise ValueError(f"volume_mode must be one of {VOLUME_MODES}, got {volume_mode!r}")
+    if requested_volume_mode is None:
+        weights, meta = physical_weights(macro, source, weight_mode)
+        legacy_mode = str(meta.get("weight_mode", ""))
+        if legacy_mode in {"as-stored", "lref3"}:
+            effective_volume_mode = "reference"
+        elif legacy_mode == "source-volume-sum":
+            effective_volume_mode = "legacy-source-reference-volume-sum"
+        elif legacy_mode == "source-inferred-volume-sum":
+            effective_volume_mode = "legacy-source-inferred-volume-sum"
+        else:
+            effective_volume_mode = f"legacy-{legacy_mode}"
+        meta.update(
+            {
+                "requested_volume_mode": None,
+                "volume_mode": effective_volume_mode,
+                "volume_source": str(meta.get("integration_weight_phys_source", "")),
+                "legacy_weight_mode_compatibility": True,
+            }
+        )
+        return weights, meta
+    if requested_volume_mode == "reference":
+        if str(weight_mode).strip().lower().replace("_", "-") in {"source-volume-sum", "source-inferred-volume-sum"}:
+            raise ValueError(
+                "--volume-mode reference cannot be combined with legacy source-volume --weight-mode values; "
+                "use --volume-mode selected-frame or --volume-mode inferred instead"
+            )
+        weights, meta = physical_weights(macro, source, weight_mode)
+        meta.update(
+            {
+                "requested_volume_mode": requested_volume_mode,
+                "volume_mode": "reference",
+                "volume_source": str(meta.get("integration_weight_phys_source", "")),
+                "legacy_weight_mode_compatibility": False,
+            }
+        )
+        return weights, meta
+    source_key = {
+        "selected-frame": "source_selected_frame_volume",
+        "inferred": "source_inferred_volume",
+    }[requested_volume_mode]
+    source_label = {
+        "selected-frame": "source.ip_IVOL_abaqus_selected_frames",
+        "inferred": "source.IVOL128_inferred_from_DLE",
+    }[requested_volume_mode]
+    if source_key not in source:
+        raise KeyError(f"--volume-mode {requested_volume_mode} requires {source_label}")
+    weights = np.asarray(source[source_key], dtype=np.float64).copy()
+    expected = (np.asarray(macro["q"]).shape[0], np.asarray(macro["le"]).shape[1])
+    if weights.shape != expected:
+        raise ValueError(
+            f"--volume-mode {requested_volume_mode} resolved weights with shape {weights.shape}, "
+            f"but compact assembly needs {expected}"
+        )
+    if not np.all(np.isfinite(weights)) or np.any(weights <= 0.0):
+        raise ValueError(f"--volume-mode {requested_volume_mode} produced non-finite or non-positive weights")
+    l_ref = np.asarray(macro["L_ref"], dtype=np.float64).reshape(-1)
+    return weights, {
+        "requested_weight_mode": str(weight_mode),
+        "weight_mode": f"volume-mode-{requested_volume_mode}",
+        "requested_volume_mode": requested_volume_mode,
+        "volume_mode": requested_volume_mode,
+        "volume_source": source_label,
+        "legacy_weight_mode_compatibility": False,
+        "integration_weight_coordinate": "physical-volume",
+        "integration_weight_hat_source": str(macro.get("weight_hat_key", "")),
+        "integration_weight_phys_source": source_label,
+        "L_ref_min": float(np.min(l_ref)),
+        "L_ref_max": float(np.max(l_ref)),
+        "macro_weight_sum_min": float(np.min(np.sum(weights, axis=1))),
+        "macro_weight_sum_max": float(np.max(np.sum(weights, axis=1))),
+    }
+
+
 def assemble_force_stiffness(le: np.ndarray, b: np.ndarray, weights: np.ndarray, elastic_d: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     stress = np.einsum("ab,npb->npa", elastic_d, le)
     force = np.einsum("npaj,npa,np->nj", b, stress, weights)
     stiffness = np.einsum("npaj,ab,npbk,np->njk", b, elastic_d, b, weights)
     energy_density_twice = np.einsum("npa,npa,np->n", le, stress, weights)
     return force, stiffness, energy_density_twice
+
+
+def full_stiffness_from_subset(kfd_subset: np.ndarray, dirs_macro: np.ndarray, size: int = 48) -> np.ndarray | None:
+    dirs = np.asarray(dirs_macro, dtype=np.int64).reshape(-1)
+    if dirs.size != size or sorted(dirs.astype(int).tolist()) != list(range(size)):
+        return None
+    full = np.empty((kfd_subset.shape[0], size, size), dtype=np.float64)
+    for pos, macro_dir in enumerate(dirs.tolist()):
+        full[:, :, int(macro_dir)] = kfd_subset[:, :, pos]
+    return full
 
 
 def candidate_report(
@@ -425,32 +529,65 @@ def candidate_report(
     macro: dict[str, Any],
     kfd_subset: np.ndarray | None,
     dirs_macro: np.ndarray | None,
+    tangent_mode: str,
 ) -> dict[str, Any]:
+    tangent_mode = str(tangent_mode).strip().lower().replace("_", "-")
+    if tangent_mode not in TANGENT_MODES:
+        raise ValueError(f"tangent_mode must be one of {TANGENT_MODES}, got {tangent_mode!r}")
     force_metric = metric(force, source_rf_macro)
     stiffness_report: dict[str, Any] = {"available": False, "reason": "source compact lacks RF_projected_plus"}
+    material_report: dict[str, Any] = {"available": False, "reason": "source compact lacks RF_projected_plus"}
+    full_fd_report: dict[str, Any] = {"available": False, "reason": "source compact lacks RF_projected_plus"}
     plus_kdq_report: dict[str, Any] = {"available": False, "reason": "source compact lacks RF_projected_plus"}
+    active_stiffness_for_frame_check = stiffness
+    active_tangent_symmetry: dict[str, Any] = stiffness_symmetry(stiffness)
     if kfd_subset is not None and dirs_macro is not None:
         subset = stiffness[:, :, dirs_macro]
-        stiffness_report = {
+        material_report = {
             "available": True,
+            "mode": "material-only",
+            "definition": "assembled B^T D B dV compared with Abaqus RF finite-difference tangent",
             "direction_count": int(dirs_macro.size),
             "macro_directions_first16": dirs_macro[:16].astype(int).tolist(),
             **metric(subset, kfd_subset),
         }
-        plus_kdq_report = {
+        full_fd_report = {
             "available": True,
+            "mode": "full-fd-reference",
+            "definition": "Abaqus RF finite-difference tangent used as both candidate and reference",
+            "direction_count": int(dirs_macro.size),
+            "macro_directions_first16": dirs_macro[:16].astype(int).tolist(),
+            **metric(kfd_subset, kfd_subset),
+        }
+        if tangent_mode == "full-fd-reference":
+            stiffness_report = full_fd_report
+            full_kfd = full_stiffness_from_subset(kfd_subset, dirs_macro)
+            if full_kfd is not None:
+                active_stiffness_for_frame_check = full_kfd
+                active_tangent_symmetry = stiffness_symmetry(full_kfd)
+            else:
+                active_tangent_symmetry = {"available": False, "reason": "full-fd-reference symmetry requires all 48 directions"}
+        else:
+            stiffness_report = material_report
+        plus_kdq_report = {
+            **stiffness_report,
+            "available": True,
+            "mode": tangent_mode,
             "definition": "K_candidate[:, dir] * delta versus RF_projected_plus(dir) - RF_projected",
-            **metric(subset, kfd_subset),
         }
     return {
         "name": name,
         "point_count": int(point_count),
+        "tangent_mode": tangent_mode,
         "force": force_metric,
         "force_dof_max_abs_error": float(np.max(np.abs(force - source_rf_macro), axis=None)),
         "stiffness": stiffness_report,
+        "material_only_stiffness": material_report,
+        "full_fd_reference_stiffness": full_fd_report,
         "stiffness_symmetry": stiffness_symmetry(stiffness),
+        "active_tangent_symmetry": active_tangent_symmetry,
         "plus_Kdq_vs_dF": plus_kdq_report,
-        "frame_to_frame_Kdq_vs_dF_source_RF": frame_to_frame_kdq(macro, source_rf_macro, stiffness),
+        "frame_to_frame_Kdq_vs_dF_source_RF": frame_to_frame_kdq(macro, source_rf_macro, active_stiffness_for_frame_check),
         "energy": energy_checks(np.asarray(macro["q"], dtype=np.float64), force, source_rf_macro, energy_twice),
     }
 
@@ -465,6 +602,7 @@ def source128_candidate(
     macro: dict[str, Any],
     kfd_subset: np.ndarray | None,
     dirs_macro: np.ndarray | None,
+    tangent_mode: str,
 ) -> dict[str, Any] | None:
     required = {"LE128_base", "B_LE128_forward", weights_key}
     missing = sorted(key for key in required if key not in source)
@@ -491,6 +629,7 @@ def source128_candidate(
         macro=macro,
         kfd_subset=kfd_subset,
         dirs_macro=dirs_macro,
+        tangent_mode=tangent_mode,
     )
     report["available"] = True
     report["weights_key"] = weights_key
@@ -552,7 +691,11 @@ def weight_comparison(weights: np.ndarray, source: dict[str, Any]) -> dict[str, 
         "compact_weight_sum_min": float(np.min(np.sum(weights, axis=1))),
         "compact_weight_sum_max": float(np.max(np.sum(weights, axis=1))),
     }
-    for key, label in (("source_ip_volume", "vs_source_ip_volume"), ("source_inferred_volume", "vs_source_inferred_volume")):
+    for key, label in (
+        ("source_ip_volume", "vs_source_ip_volume"),
+        ("source_selected_frame_volume", "vs_source_selected_frame_volume"),
+        ("source_inferred_volume", "vs_source_inferred_volume"),
+    ):
         if key not in source:
             out[label] = {"available": False, "reason": f"missing {key}"}
             continue
@@ -564,7 +707,10 @@ def weight_comparison(weights: np.ndarray, source: dict[str, Any]) -> dict[str, 
     return out
 
 
-def audit_one(path: Path, weight_mode: str) -> dict[str, Any]:
+def audit_one(path: Path, weight_mode: str, volume_mode: str | None = None, tangent_mode: str = "material-only") -> dict[str, Any]:
+    tangent_mode = str(tangent_mode).strip().lower().replace("_", "-")
+    if tangent_mode not in TANGENT_MODES:
+        raise ValueError(f"tangent_mode must be one of {TANGENT_MODES}, got {tangent_mode!r}")
     macro = load_macro(path)
     source_path = Path(str(macro["source_compact"]))
     if not source_path.exists():
@@ -572,7 +718,7 @@ def audit_one(path: Path, weight_mode: str) -> dict[str, Any]:
     source = load_source(source_path, np.asarray(macro["source_rows"], dtype=np.int64))
     source_order = str(macro["source_node_order"])
     source_rf_macro = source_vectors_to_macro(np.asarray(source["rf"], dtype=np.float64), source_order)
-    weights, weight_meta = physical_weights(macro, source, weight_mode)
+    weights, weight_meta = resolve_volume_weights(macro, source, volume_mode=volume_mode, weight_mode=weight_mode)
     force_macro, stiffness_macro, energy_twice = assemble_force_stiffness(
         np.asarray(macro["le"], dtype=np.float64),
         np.asarray(macro["b"], dtype=np.float64),
@@ -592,10 +738,8 @@ def audit_one(path: Path, weight_mode: str) -> dict[str, Any]:
             float(source["delta"]),
             source_order,
         )
-        if dirs_macro.size == 48 and sorted(dirs_macro.astype(int).tolist()) == list(range(48)):
-            full_kfd = np.empty_like(stiffness_macro)
-            for pos, macro_dir in enumerate(dirs_macro.tolist()):
-                full_kfd[:, :, int(macro_dir)] = kfd_subset[:, :, pos]
+        full_kfd = full_stiffness_from_subset(kfd_subset, dirs_macro)
+        if full_kfd is not None:
             source_kfd_symmetry = stiffness_symmetry(full_kfd)
     compact_point_count = int(np.asarray(macro["le"]).shape[1])
     compact_candidate_name = "macro16_18pt" if compact_point_count == 18 else f"macro16_{compact_point_count}pt_compact"
@@ -609,6 +753,7 @@ def audit_one(path: Path, weight_mode: str) -> dict[str, Any]:
         macro=macro,
         kfd_subset=kfd_subset,
         dirs_macro=dirs_macro,
+        tangent_mode=tangent_mode,
     )
     source128_ip_volume = source128_candidate(
         name="source128_ip_volume",
@@ -619,6 +764,18 @@ def audit_one(path: Path, weight_mode: str) -> dict[str, Any]:
         macro=macro,
         kfd_subset=kfd_subset,
         dirs_macro=dirs_macro,
+        tangent_mode=tangent_mode,
+    )
+    source128_selected_frame_volume = source128_candidate(
+        name="source128_selected_frame_volume",
+        source=source,
+        source_order=source_order,
+        weights_key="source_selected_frame_volume",
+        source_rf_macro=source_rf_macro,
+        macro=macro,
+        kfd_subset=kfd_subset,
+        dirs_macro=dirs_macro,
+        tangent_mode=tangent_mode,
     )
     source128_inferred_volume = source128_candidate(
         name="source128_inferred_volume",
@@ -629,6 +786,7 @@ def audit_one(path: Path, weight_mode: str) -> dict[str, Any]:
         macro=macro,
         kfd_subset=kfd_subset,
         dirs_macro=dirs_macro,
+        tangent_mode=tangent_mode,
     )
     source_force_checks: dict[str, Any] = {}
     if "F_DLE_IVOL" in source:
@@ -651,12 +809,17 @@ def audit_one(path: Path, weight_mode: str) -> dict[str, Any]:
         "B_label_q_coordinate": macro["B_label_q_coordinate"],
         "macro16_point_set": macro["macro16_point_set"],
         "weight": weight_meta,
+        "volume_mode": weight_meta.get("volume_mode"),
+        "tangent_mode": tangent_mode,
         "scale_consistency": macro["scale_consistency"],
         "weight_comparison": weight_comparison(weights, source),
         "force": compact_candidate["force"],
         "force_dof_max_abs_error": compact_candidate["force_dof_max_abs_error"],
         "stiffness": compact_candidate["stiffness"],
+        "material_only_stiffness": compact_candidate["material_only_stiffness"],
+        "full_fd_reference_stiffness": compact_candidate["full_fd_reference_stiffness"],
         "stiffness_symmetry_macro": compact_candidate["stiffness_symmetry"],
+        "active_tangent_symmetry": compact_candidate["active_tangent_symmetry"],
         "stiffness_symmetry_source_fd": source_kfd_symmetry,
         "plus_Kdq_vs_dF": compact_candidate["plus_Kdq_vs_dF"],
         "frame_to_frame_Kdq_vs_dF_source_RF": compact_candidate["frame_to_frame_Kdq_vs_dF_source_RF"],
@@ -665,12 +828,14 @@ def audit_one(path: Path, weight_mode: str) -> dict[str, Any]:
             "compact_points": compact_candidate,
             compact_candidate_name: compact_candidate,
             "source128_ip_volume": source128_ip_volume,
+            "source128_selected_frame_volume": source128_selected_frame_volume,
             "source128_inferred_volume": source128_inferred_volume,
         },
         "source_force_checks": source_force_checks,
         "interpretation_note": (
-            "Large Macro16 force/stiffness errors here are teacher-label assembly errors, not network training errors. "
-            "Compare candidates.macro16_18pt against candidates.source128_ip_volume to separate 18-point reduction error from source 128-point closure."
+            "Large Macro16 force/stiffness errors here are mechanics assembly errors, not network training errors. "
+            "Use --volume-mode to choose reference, selected-frame, or inferred physical volume. "
+            "Use --tangent-mode material-only for B^T D B dV diagnostics, or full-fd-reference to report the Abaqus RF finite-difference tangent as the reference path."
         ),
     }
 
@@ -702,12 +867,16 @@ def aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
     out: dict[str, Any] = {"compact_count": int(len(rows))}
     out.update(stats("force_rel", ("force", "rel")))
     out.update(stats("stiffness_rel", ("stiffness", "rel")))
+    out.update(stats("material_only_stiffness_rel", ("material_only_stiffness", "rel")))
+    out.update(stats("full_fd_reference_stiffness_rel", ("full_fd_reference_stiffness", "rel")))
     out.update(stats("macro_stiffness_symmetry_rel", ("stiffness_symmetry_macro", "rel")))
+    out.update(stats("active_tangent_symmetry_rel", ("active_tangent_symmetry", "rel")))
     out.update(stats("source_fd_stiffness_symmetry_rel", ("stiffness_symmetry_source_fd", "rel")))
     out.update(stats("plus_Kdq_vs_dF_rel", ("plus_Kdq_vs_dF", "rel")))
     out.update(stats("frame_Kdq_vs_dF_rel", ("frame_to_frame_Kdq_vs_dF_source_RF", "rel")))
     out.update(stats("energy_qF_vs_integral_rel", ("energy", "macro_q_dot_F_vs_integral_LE_sigma", "rel")))
     out.update(stats("weight_vs_source_ip_volume_rel", ("weight_comparison", "vs_source_ip_volume", "rel")))
+    out.update(stats("weight_vs_source_selected_frame_volume_rel", ("weight_comparison", "vs_source_selected_frame_volume", "rel")))
     out.update(stats("weight_vs_source_inferred_volume_rel", ("weight_comparison", "vs_source_inferred_volume", "rel")))
     out.update(stats("source_F_DLE_vs_RF_rel", ("source_force_checks", "F_DLE_IVOL_vs_RF_projected", "rel")))
     out.update(stats("source_F128_D_IVOL_vs_RF_rel", ("source_force_checks", "F128_D_IVOL_vs_RF_projected", "rel")))
@@ -716,12 +885,13 @@ def aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 def apply_thresholds(summary: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     specs = [
-        ("force_rel", "force_rel_max", float(args.max_force_rel)),
-        ("stiffness_rel", "stiffness_rel_max", float(args.max_stiffness_rel)),
-        ("macro_stiffness_symmetry_rel", "macro_stiffness_symmetry_rel_max", float(args.max_macro_stiffness_symmetry_rel)),
-        ("plus_Kdq_vs_dF_rel", "plus_Kdq_vs_dF_rel_max", float(args.max_plus_kdq_rel)),
-        ("source_F_DLE_vs_RF_rel", "source_F_DLE_vs_RF_rel_max", float(args.max_source_force_rel)),
-        ("source_F128_D_IVOL_vs_RF_rel", "source_F128_D_IVOL_vs_RF_rel_max", float(args.max_source_128_force_rel)),
+        ("force_rel", "force_rel_max", float(getattr(args, "max_force_rel", 0.0))),
+        ("stiffness_rel", "stiffness_rel_max", float(getattr(args, "max_stiffness_rel", 0.0))),
+        ("macro_stiffness_symmetry_rel", "macro_stiffness_symmetry_rel_max", float(getattr(args, "max_macro_stiffness_symmetry_rel", 0.0))),
+        ("active_tangent_symmetry_rel", "active_tangent_symmetry_rel_max", float(getattr(args, "max_active_tangent_symmetry_rel", 0.0))),
+        ("plus_Kdq_vs_dF_rel", "plus_Kdq_vs_dF_rel_max", float(getattr(args, "max_plus_kdq_rel", 0.0))),
+        ("source_F_DLE_vs_RF_rel", "source_F_DLE_vs_RF_rel_max", float(getattr(args, "max_source_force_rel", 0.0))),
+        ("source_F128_D_IVOL_vs_RF_rel", "source_F128_D_IVOL_vs_RF_rel_max", float(getattr(args, "max_source_128_force_rel", 0.0))),
     ]
     checks: list[dict[str, Any]] = []
     agg = summary["aggregate"]
@@ -735,16 +905,20 @@ def apply_thresholds(summary: dict[str, Any], args: argparse.Namespace) -> dict[
     return summary
 
 
-def _audit_one_job(job: tuple[int, Path, str]) -> dict[str, Any]:
-    _source_index, path, weight_mode = job
-    return audit_one(path, weight_mode)
+def _audit_one_job(job: tuple[int, Path, str, str | None, str]) -> dict[str, Any]:
+    _source_index, path, weight_mode, volume_mode, tangent_mode = job
+    return audit_one(path, weight_mode, volume_mode=volume_mode, tangent_mode=tangent_mode)
 
 
 def run_audit(args: argparse.Namespace) -> dict[str, Any]:
     paths = collect_paths(args.compact, args.compact_list, args.compact_glob, case_limit=int(args.case_limit))
     if not paths:
         raise ValueError("provide --compact, --compact-list, or --compact-glob")
-    jobs = [(i, path, str(args.weight_mode)) for i, path in enumerate(paths)]
+    volume_mode = getattr(args, "volume_mode", None)
+    tangent_mode = str(getattr(args, "tangent_mode", "material-only")).strip().lower().replace("_", "-")
+    if tangent_mode not in TANGENT_MODES:
+        raise ValueError(f"tangent_mode must be one of {TANGENT_MODES}, got {tangent_mode!r}")
+    jobs = [(i, path, str(args.weight_mode), volume_mode, tangent_mode) for i, path in enumerate(paths)]
     workers = max(1, int(getattr(args, "workers", 1)))
     if workers <= 1 or len(jobs) <= 1:
         rows = [_audit_one_job(job) for job in jobs]
@@ -760,6 +934,8 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
         "script": "audit_macro16_force_stiffness",
         "compact_paths": [str(path) for path in paths],
         "weight_mode": str(args.weight_mode),
+        "volume_mode": volume_mode,
+        "tangent_mode": tangent_mode,
         "workers": int(workers),
         "aggregate": aggregate(rows),
         "compacts": rows,
@@ -792,9 +968,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--case-limit", type=int, default=0)
     parser.add_argument("--weight-mode", choices=WEIGHT_MODES, default="auto")
+    parser.add_argument(
+        "--volume-mode",
+        choices=VOLUME_MODES,
+        default=None,
+        help=(
+            "Explicit physical volume convention. reference uses the compact/reference physical weights "
+            "(or legacy --weight-mode behavior); selected-frame uses source ip_IVOL_abaqus_selected_frames; "
+            "inferred uses source IVOL128_inferred_from_DLE. If omitted, legacy --weight-mode behavior is preserved."
+        ),
+    )
+    parser.add_argument(
+        "--tangent-mode",
+        choices=TANGENT_MODES,
+        default="material-only",
+        help=(
+            "Stiffness candidate to compare. material-only assembles B^T D B dV. "
+            "full-fd-reference reports the Abaqus RF finite-difference tangent as the reference path."
+        ),
+    )
     parser.add_argument("--max-force-rel", type=float, default=0.0)
     parser.add_argument("--max-stiffness-rel", type=float, default=0.0)
     parser.add_argument("--max-macro-stiffness-symmetry-rel", type=float, default=0.0)
+    parser.add_argument("--max-active-tangent-symmetry-rel", type=float, default=0.0)
     parser.add_argument("--max-plus-kdq-rel", type=float, default=0.0)
     parser.add_argument("--max-source-force-rel", type=float, default=0.0)
     parser.add_argument("--max-source-128-force-rel", type=float, default=0.0)

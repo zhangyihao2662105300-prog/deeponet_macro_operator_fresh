@@ -928,6 +928,101 @@ def test_macro16_force_stiffness_audit_reports_source128_candidate() -> None:
         assert source128["plus_Kdq_vs_dF"]["rel"] < 1.0e-6
 
 
+def test_macro16_force_stiffness_audit_explicit_volume_and_tangent_modes() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        source = root / "source_volume_tangent.npz"
+        compact = root / "macro16_volume_tangent.npz"
+        n = 1
+        p = 128
+        x16 = macro16_flat_x16()
+        q48 = np.zeros((n, 48), dtype=np.float32)
+        le = np.zeros((n, p, 6), dtype=np.float64)
+        le[:, :, 0] = 1.0
+        b = np.zeros((n, p, 6, 48), dtype=np.float64)
+        b[:, :, 0, 0] = 1.0
+        elastic_d = np.eye(6, dtype=np.float64)
+        w_reference = np.full((n, p), 0.5, dtype=np.float64)
+        w_selected = np.full((n, p), 0.75, dtype=np.float64)
+        force_reference = np.einsum("npaj,npa,np->nj", b, le, w_reference)
+        force_selected = np.einsum("npaj,npa,np->nj", b, le, w_selected)
+        k_selected = np.einsum("npaj,ab,npbk,np->njk", b, elastic_d, b, w_selected)
+        source_force = np.zeros((n, 48), dtype=np.float64)
+        source_force[:, TRUE176_MACRO_TO_KEEP_FLAT] = force_selected
+        delta = 1.0e-6
+        directions_source = TRUE176_MACRO_TO_KEEP_FLAT.copy()
+        source_to_macro = np.empty(48, dtype=np.int64)
+        source_to_macro[TRUE176_MACRO_TO_KEEP_FLAT] = np.arange(48, dtype=np.int64)
+        plus_source = np.empty((n, 48, 48), dtype=np.float64)
+        for pos, source_dir in enumerate(directions_source.tolist()):
+            macro_dir = int(source_to_macro[source_dir])
+            plus_macro = force_selected + delta * k_selected[:, :, macro_dir]
+            plus_source[:, pos, TRUE176_MACRO_TO_KEEP_FLAT] = plus_macro
+        np.savez(
+            source,
+            RF_projected=source_force,
+            RF_projected_plus=plus_source,
+            perturb_directions=directions_source,
+            delta=np.asarray(delta, dtype=np.float64),
+            elastic_D=elastic_d,
+            ip_IVOL_abaqus=np.asarray(w_reference, dtype=np.float64),
+            ip_IVOL_abaqus_selected_frames=np.asarray(w_selected, dtype=np.float64),
+            IVOL128_inferred_from_DLE=np.asarray(w_selected, dtype=np.float64),
+        )
+        np.savez_compressed(
+            compact,
+            q48_raw=q48,
+            X16=np.broadcast_to(x16.reshape(1, 16, 3), (n, 16, 3)).astype(np.float32),
+            LE_macro=le.astype(np.float32),
+            B_macro=b.astype(np.float32),
+            integration_weight_phys=w_reference.astype(np.float32),
+            integration_weight_hat=(w_reference / 8.0).astype(np.float32),
+            source_compact=np.asarray(str(source), dtype=object),
+            source_row=np.arange(n, dtype=np.int64),
+            source_node_order=np.asarray("true176-keep", dtype=object),
+            strain_output_coordinate=np.asarray("macro16_local_frame", dtype=object),
+            B_label_q_coordinate=np.asarray("q48_raw", dtype=object),
+        )
+        base_args = dict(
+            compact=[compact],
+            compact_list=[],
+            compact_glob=[],
+            case_limit=0,
+            weight_mode="auto",
+            max_force_rel=0.0,
+            max_stiffness_rel=0.0,
+            max_macro_stiffness_symmetry_rel=0.0,
+            max_active_tangent_symmetry_rel=0.0,
+            max_plus_kdq_rel=0.0,
+            max_source_force_rel=0.0,
+            max_source_128_force_rel=0.0,
+            strict=False,
+        )
+        reference = run_macro16_force_stiffness_audit(
+            SimpleNamespace(**base_args, out=root / "reference.json", volume_mode="reference", tangent_mode="material-only")
+        )
+        selected = run_macro16_force_stiffness_audit(
+            SimpleNamespace(**base_args, out=root / "selected.json", volume_mode="selected-frame", tangent_mode="material-only")
+        )
+        inferred = run_macro16_force_stiffness_audit(
+            SimpleNamespace(**base_args, out=root / "inferred.json", volume_mode="inferred", tangent_mode="material-only")
+        )
+        full_fd = run_macro16_force_stiffness_audit(
+            SimpleNamespace(**base_args, out=root / "full_fd.json", volume_mode="selected-frame", tangent_mode="full-fd-reference")
+        )
+        assert reference["compacts"][0]["weight"]["volume_mode"] == "reference"
+        assert selected["compacts"][0]["weight"]["volume_mode"] == "selected-frame"
+        assert inferred["compacts"][0]["weight"]["volume_mode"] == "inferred"
+        assert reference["compacts"][0]["force"]["rel"] > 0.1
+        assert selected["compacts"][0]["force"]["rel"] < 1.0e-6
+        assert inferred["compacts"][0]["force"]["rel"] < 1.0e-6
+        assert selected["compacts"][0]["material_only_stiffness"]["rel"] < 1.0e-6
+        assert full_fd["tangent_mode"] == "full-fd-reference"
+        assert full_fd["compacts"][0]["stiffness"]["mode"] == "full-fd-reference"
+        assert full_fd["compacts"][0]["stiffness"]["rel"] == 0.0
+        assert full_fd["compacts"][0]["material_only_stiffness"]["rel"] < 1.0e-6
+
+
 def test_macro16_source128_teacher_builder_writes_force_closing_compact() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)

@@ -38,7 +38,7 @@ $env:PYTHONPATH='src;scripts'; py scripts\audit_macro16_rigid_preprocessing.py -
 ```
 
 ```powershell
-$env:PYTHONPATH='src;scripts'; py scripts\audit_macro16_force_stiffness.py --compact-list runs\macro16_source128_rigid_preprocess_audit_real_10case\macro16_source128_teacher_compact_list.txt --out runs\macro16_source128_rigid_preprocess_audit_real_10case\force_stiffness_audit.json --weight-mode auto
+$env:PYTHONPATH='src;scripts'; py scripts\audit_macro16_force_stiffness.py --compact-list runs\macro16_source128_rigid_preprocess_audit_real_10case\macro16_source128_teacher_compact_list.txt --out runs\macro16_source128_rigid_preprocess_audit_real_10case\force_stiffness_audit.json --volume-mode reference --tangent-mode material-only
 ```
 
 ## Result
@@ -116,8 +116,10 @@ assembly fields are present:
 - `B_macro_qraw`
 - `integration_weight_phys`
 
-The force/stiffness audit script ran on the same compact list with `--weight-mode
-auto` and completed successfully.
+The force/stiffness audit script ran on the same compact list with
+`--volume-mode reference --tangent-mode material-only` and completed
+successfully. This is the explicit spelling of the previous reference-volume
+material-only audit.
 
 Force/stiffness context from the existing audit output:
 

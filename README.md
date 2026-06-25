@@ -464,6 +464,23 @@ and rewrites `X16`, `q48`, and the 48 B columns into Macro16 order.  The labels
 are 128-IP teacher fields interpolated to the standard 18 Macro16 integration
 points, not a direct Abaqus Macro16-IP export.
 
+Before interpreting a Macro16 training smoke, audit the teacher labels:
+
+```powershell
+cd D:\IS-FEM\deeponet_macro_operator_fresh
+$env:PYTHONPATH = "D:\IS-FEM\deeponet_macro_operator_fresh\src"
+py scripts\audit_macro16_teacher_labels.py `
+  --compact-list runs\macro16_from_128_teacher\macro16_from_128_teacher_compact_list.txt `
+  --out runs\macro16_from_128_teacher\macro16_teacher_label_audit.json `
+  --max-plus-fd-rel 1e-4 `
+  --strict
+```
+
+The hard check is `plus_fd_B_consistency`, which compares `B_macro` against
+`LE_plus` finite differences after the same 128-to-18 interpolation and
+Macro16 frame transform.  Geometry position error and `LE≈Bq` are also reported,
+but they are diagnostic signals rather than direct proof of the tangent label.
+
 Windows smoke run:
 
 ```powershell

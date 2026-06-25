@@ -70,6 +70,7 @@ from run_macro16_two_geometry_smoke import run_two_geometry_smoke
 from build_macro16_from_128_teacher import build_all as build_macro16_from_128_teacher
 from build_macro16_from_128_teacher import macro16_from_128_interpolation_matrix
 from build_macro16_from_128_teacher import reorder_nodes_q_b_to_macro16
+from audit_macro16_teacher_labels import run_audit as run_macro16_teacher_audit
 
 
 def macro16_flat_x16(thickness: float = 0.2) -> np.ndarray:
@@ -529,6 +530,82 @@ def test_macro16_from_128_teacher_reorders_true176_keep_q_and_b_columns() -> Non
     expected_cols = np.asarray([node * 3 + axis for node in [0, 1, 2, 4, 7, 6, 5, 3, 8, 9, 10, 12, 15, 14, 13, 11] for axis in range(3)])
     assert np.array_equal(q_out[0], q_keep[0, expected_cols])
     assert np.array_equal(b_out[0, 0, 0], b_keep[0, 0, 0, expected_cols])
+
+
+def test_macro16_teacher_audit_checks_plus_fd_b_consistency() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        source = root / "complete_case001_training_ready.npz"
+        out_root = root / "macro16"
+        audit_out = root / "audit.json"
+        n = 2
+        direction = 2
+        delta = 1.0e-6
+        x16 = macro16_flat_x16()
+        q48 = np.zeros((n, 48), dtype=np.float32)
+        q48[:, direction] = np.asarray([0.1, 0.2], dtype=np.float32)
+        le128 = np.zeros((n, 128, 6), dtype=np.float32)
+        b128 = np.zeros((n, 128, 6, 48), dtype=np.float32)
+        b128[:, :, 1, direction] = 3.0
+        le128[:, :, 1] = 3.0 * q48[:, direction].reshape(n, 1)
+        le_plus = np.repeat(le128[:, None, :, :], 1, axis=1).astype(np.float64)
+        le_plus[:, 0, :, 1] += delta * 3.0
+        np.savez(
+            source,
+            q48_raw=q48,
+            X_keep=x16,
+            LE128_base=le128,
+            B_LE128_forward=b128,
+            LE128_plus=le_plus,
+            perturb_directions=np.asarray([direction], dtype=np.int64),
+            delta=np.asarray(delta, dtype=np.float64),
+            ip_keys=np.asarray([[elem, ip, 0] for elem in range(1, 17) for ip in range(1, 9)], dtype=np.int64),
+            case_id=np.asarray([1, 1], dtype=np.int64),
+            strain_field=np.asarray("LE", dtype=object),
+            B_label_strain_field=np.asarray("LE", dtype=object),
+        )
+        build_args = SimpleNamespace(
+            compact=[source],
+            compact_list=[],
+            out_root=out_root,
+            case_limit=0,
+            frame_stride=1,
+            max_frames_per_compact=0,
+            plane_gauss_order=3,
+            thickness_gauss_order=2,
+            allow_missing_ip_keys=False,
+            source_node_order="macro16",
+            source_geometry_tol=0.0,
+        )
+        build_summary = build_macro16_from_128_teacher(build_args)
+        compact = Path(build_summary["cases"][0]["macro16_compact"])
+        audit_args = SimpleNamespace(
+            compact=[compact],
+            compact_list=[],
+            out=audit_out,
+            case_limit=0,
+            plane_gauss_order=3,
+            thickness_gauss_order=2,
+            max_geometry_rel=0.0,
+            max_plus_fd_rel=1.0e-5,
+            max_bq_rel=0.0,
+            max_frame_fd_rel=0.0,
+            strict=True,
+        )
+        audit = run_macro16_teacher_audit(audit_args)
+        assert audit["strict_pass"] is True
+        plus = audit["compacts"][0]["plus_fd_B_consistency"]["raw_coordinate"]
+        assert plus["rel"] < 1.0e-5
+
+        bad = root / "bad_macro16.npz"
+        with np.load(compact, allow_pickle=True) as z:
+            payload = {key: np.asarray(z[key]) for key in z.files}
+        payload["B_macro"] = np.asarray(payload["B_macro"], dtype=np.float32) * 2.0
+        np.savez_compressed(bad, **payload)
+        bad_args = SimpleNamespace(**{**vars(audit_args), "compact": [bad], "out": root / "bad_audit.json", "strict": False})
+        bad_audit = run_macro16_teacher_audit(bad_args)
+        bad_plus = bad_audit["compacts"][0]["plus_fd_B_consistency"]["raw_coordinate"]
+        assert bad_plus["rel"] > 0.5
 
 
 def test_true176_xkeep_branch_and_ad_shapes() -> None:

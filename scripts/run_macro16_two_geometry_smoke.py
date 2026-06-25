@@ -158,7 +158,15 @@ def select_two_geometry_groups(
     return selected_rows, selected_groups, groups
 
 
-def write_subset_compact(data: Macro16Arrays, selected_rows: list[int], out_dir: Path) -> tuple[Path, Path]:
+def write_subset_compact(data: Macro16Arrays, selected_groups: list[dict[str, Any]], out_dir: Path) -> tuple[Path, Path]:
+    selected_rows: list[int] = []
+    geometry_ids: list[int] = []
+    case_ids: list[int] = []
+    for gid, group in enumerate(selected_groups, start=1):
+        rows = [int(v) for v in group["selected_frame_indices"]]
+        selected_rows.extend(rows)
+        geometry_ids.extend([gid - 1] * len(rows))
+        case_ids.extend([gid] * len(rows))
     idx = np.asarray(selected_rows, dtype=np.int64)
     subset_dir = out_dir / "prepared_subset"
     subset_dir.mkdir(parents=True, exist_ok=True)
@@ -172,12 +180,11 @@ def write_subset_compact(data: Macro16Arrays, selected_rows: list[int], out_dir:
         LE_macro=data.le[idx].astype(np.float32),
         B_macro=data.b[idx].astype(np.float32),
         integration_weight_hat=data.weights[idx].astype(np.float32),
-        case_id=np.ones(idx.shape[0], dtype=np.int64),
-        geometry_id=np.concatenate(
-            [
-                np.zeros(idx.shape[0] // 2, dtype=np.int64),
-                np.ones(idx.shape[0] - idx.shape[0] // 2, dtype=np.int64),
-            ]
+        case_id=np.asarray(case_ids, dtype=np.int64),
+        geometry_id=np.asarray(geometry_ids, dtype=np.int64),
+        geometry_role=np.asarray(
+            [str(group["role"]) for group in selected_groups for _ in group["selected_frame_indices"]],
+            dtype=object,
         ),
         source_compact_paths=np.asarray(data.compact_paths, dtype=object),
         source_index=data.source_index[idx].astype(np.int64),
@@ -228,7 +235,7 @@ def make_train_args(args: argparse.Namespace | SimpleNamespace, subset_list: Pat
         weight_decay=float(getattr(args, "weight_decay", 1.0e-5)),
         grad_clip=float(getattr(args, "grad_clip", 10.0)),
         val_fraction=float(getattr(args, "val_fraction", 0.25)),
-        val_cases="",
+        val_cases=str(getattr(args, "val_cases", "2")),
         eval_every=int(getattr(args, "eval_every", 1)),
         cuda=bool(getattr(args, "cuda", False)),
     )
@@ -239,6 +246,8 @@ def convergence_report(training_summary: dict[str, Any], args: argparse.Namespac
     latest = training_summary.get("latest_report") or {}
     max_le = float(getattr(args, "max_best_le_rel", 0.0))
     max_b = float(getattr(args, "max_best_b_rel", 0.0))
+    max_val_le = float(getattr(args, "max_best_val_le_rel", 0.0))
+    max_val_b = float(getattr(args, "max_best_val_b_rel", 0.0))
     checks: dict[str, Any] = {
         "best_score": training_summary.get("best_score"),
         "best_train_LE_rel": best.get("train_LE_rel"),
@@ -249,10 +258,14 @@ def convergence_report(training_summary: dict[str, Any], args: argparse.Namespac
         "thresholds_enforced": bool(getattr(args, "require_convergence", False)),
         "max_best_le_rel": max_le,
         "max_best_b_rel": max_b,
+        "max_best_val_le_rel": max_val_le,
+        "max_best_val_b_rel": max_val_b,
     }
-    pass_le = max_le <= 0.0 or float(best.get("train_LE_rel", float("inf"))) <= max_le
-    pass_b = max_b <= 0.0 or float(best.get("train_AD_B_rel", float("inf"))) <= max_b
-    checks["stable_convergence_pass"] = bool(pass_le and pass_b)
+    pass_train_le = max_le <= 0.0 or float(best.get("train_LE_rel", float("inf"))) <= max_le
+    pass_train_b = max_b <= 0.0 or float(best.get("train_AD_B_rel", float("inf"))) <= max_b
+    pass_val_le = max_val_le <= 0.0 or float(best.get("val_LE_rel", float("inf"))) <= max_val_le
+    pass_val_b = max_val_b <= 0.0 or float(best.get("val_AD_B_rel", float("inf"))) <= max_val_b
+    checks["stable_convergence_pass"] = bool(pass_train_le and pass_train_b and pass_val_le and pass_val_b)
     return checks
 
 
@@ -277,12 +290,14 @@ def run_two_geometry_smoke(args: argparse.Namespace | SimpleNamespace) -> dict[s
         decimals=int(getattr(args, "geometry_round_decimals", 10)),
         slight_delta=float(getattr(args, "slight_distortion_min_delta", 1.0e-4)),
     )
-    subset_path, subset_list = write_subset_compact(data, selected_rows, out_root)
+    subset_path, subset_list = write_subset_compact(data, selected_groups, out_root)
     train_dir = out_root / "training"
     train_args = make_train_args(args, subset_list, train_dir)
     train_macro16_boundary(train_args)
     training_summary_path = train_dir / "training_summary.json"
     training_summary = json.loads(training_summary_path.read_text(encoding="utf-8"))
+    training_config_path = train_dir / "config.json"
+    training_config = json.loads(training_config_path.read_text(encoding="utf-8"))
     convergence = convergence_report(training_summary, args)
     summary = {
         "script": "run_macro16_two_geometry_smoke",
@@ -299,7 +314,10 @@ def run_two_geometry_smoke(args: argparse.Namespace | SimpleNamespace) -> dict[s
         "subset_compact_list": str(subset_list),
         "training_out_dir": str(train_dir),
         "training_summary": str(training_summary_path),
+        "training_config": str(training_config_path),
         "training_args": vars(train_args),
+        "validation_split": training_config.get("validation_split", {}),
+        "validation_design": "case_id=1 regular train, case_id=2 lightly_distorted validation by default",
         "convergence": convergence,
     }
     summary_path = out_root / "macro16_two_geometry_smoke_summary.json"
@@ -357,6 +375,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--require-convergence", action="store_true")
     p.add_argument("--max-best-le-rel", type=float, default=0.0)
     p.add_argument("--max-best-b-rel", type=float, default=0.0)
+    p.add_argument("--max-best-val-le-rel", type=float, default=0.0)
+    p.add_argument("--max-best-val-b-rel", type=float, default=0.0)
+    p.add_argument("--val-cases", default="2")
     return p.parse_args()
 
 

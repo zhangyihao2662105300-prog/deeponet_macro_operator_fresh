@@ -469,6 +469,13 @@ py scripts\run_macro16_two_geometry_smoke.py `
   --out-root runs\macro16_two_geometry_smoke `
   --frames-per-geometry 16 `
   --epochs 20 `
+  --val-cases 2 `
   --jacobian-columns 0,1,2,3,4,5,6,7,8,9,10,11 `
   --eval-columns 0,1,2,3,4,5,6,7,8,9,10,11
 ```
+
+The prepared subset uses `case_id=1` for the regular geometry and `case_id=2`
+for the lightly distorted geometry, so the default validation split checks the
+distorted geometry.  Optional `--require-convergence` thresholds can include
+train and validation metrics with `--max-best-le-rel`, `--max-best-b-rel`,
+`--max-best-val-le-rel`, and `--max-best-val-b-rel`.

@@ -427,6 +427,9 @@ def test_macro16_two_geometry_smoke_script_runs_on_synthetic_compact() -> None:
             require_convergence=False,
             max_best_le_rel=0.0,
             max_best_b_rel=0.0,
+            max_best_val_le_rel=0.0,
+            max_best_val_b_rel=0.0,
+            val_cases="2",
         )
         summary = run_two_geometry_smoke(args)
         assert summary["selected_geometry_count"] == 2
@@ -434,6 +437,13 @@ def test_macro16_two_geometry_smoke_script_runs_on_synthetic_compact() -> None:
         assert Path(summary["subset_compact"]).exists()
         assert Path(summary["training_summary"]).exists()
         assert summary["convergence"]["thresholds_enforced"] is False
+        with np.load(summary["subset_compact"], allow_pickle=True) as z:
+            assert np.array_equal(np.asarray(z["case_id"], dtype=np.int64), np.asarray([1, 1, 2, 2], dtype=np.int64))
+            assert np.array_equal(np.asarray(z["geometry_id"], dtype=np.int64), np.asarray([0, 0, 1, 1], dtype=np.int64))
+        assert summary["validation_split"]["validation_split_mode"] == "case"
+        assert summary["validation_split"]["val_cases"] == [2]
+        train_config = json.loads(Path(summary["training_config"]).read_text(encoding="utf-8"))
+        assert train_config["validation_split"]["val_cases"] == [2]
 
 
 def test_true176_xkeep_branch_and_ad_shapes() -> None:

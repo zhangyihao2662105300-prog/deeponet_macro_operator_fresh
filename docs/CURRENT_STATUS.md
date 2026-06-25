@@ -92,6 +92,7 @@ fixed parent integration points.
 | Gate 20 state B reproduction diagnosis | failure localized | `reports/20_state_b_reproduction_failure_diagnosis.md`; Gate 19 numeric reproduction failed because the migrated state B factorization was weaker than the Gate 17 prototype. Default state B kind was corrected to `point_q_rank`. |
 | Gate 21 point q rank rerun | FAIL | `reports/21_state_b_point_q_rank_rerun.md`; Linux `point_q_rank` rerun still fails. Best model force rel is about `0.59` to `0.62`, while teacher force rel remains `0.01279`. Large training remains blocked. |
 | Gate 22 state B equivalence diagnosis | diagnosis PASS, training release FAIL | `reports/22_state_b_equivalence_diagnosis.md`; main `le0-state-b` is not equivalent to Gate 17. The main path lacks fixed `static_b[128,6,48]`, and residual AD terms mix into B. Next step is a fixed-128 direct-B state baseline, not larger training. |
+| Gate 23 fixed128 direct B training | FAIL, close but not released | `reports/23_fixed128_direct_b_training.md`; Linux rank 4/8/12 fixed128 direct-B training completed. Best force rel is `0.1073723868`, above the `0.10` prototype threshold; teacher force rel remains `0.0127911083`. Large training remains blocked. |
 
 Training is allowed only within the limited LE/B release boundary.
 
@@ -146,6 +147,10 @@ Current verified or adopted conclusions:
   Gate 17. Gate 17 uses a fixed `static_b[128,6,48]` direct-B baseline, while
   the main Query model uses `global_b_norm[6,48]` plus point nets and residual
   AD contributions.
+- Gate 23 implements a fixed-128 direct-B training path and runs Linux rank
+  4/8/12 training. Train B improves to about `0.048`, but validation B remains
+  about `0.107`, and best selected-frame force rel is `0.1073723868`, so it is
+  still not released.
 
 ## Pending Issues That Are Not Data Errors
 
@@ -169,6 +174,9 @@ data is bad:
   local smoke tests and failed the corrected Linux `point_q_rank` rerun. Gate 22
   localizes the mismatch to the trainer objective and B baseline structure, so
   it does not yet meet the final `0.02` force closure target.
+- The fixed-128 direct-B variant is closer to Gate 17 but still fails the
+  prototype force target. Gate 24 must align Gate 17 loss weighting,
+  initialization, and checkpoint selection before any larger training.
 
 These issues must not be hidden inside network training as if a network could
 repair a definition mismatch. They do not block the limited LE/B training

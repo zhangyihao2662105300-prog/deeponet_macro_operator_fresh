@@ -58,18 +58,27 @@ Current verified range:
 - Covers regular geometry and lightly distorted geometry.
 - Gate 04 has now audited regular, lightly distorted, and medium-distortion
   source128 compacts with selected-frame force closure.
+- Gate 04 has also audited four typical wind-turbine shell geometry families:
+  cylindrical, conical, thickness-varying, and mild double-curvature shells.
+  These add 4 Macro16 source128 compacts and 40 total base frames.
 - Strong non-inverted distortion is now a non-blocking robustness boundary test,
   not a hard main-route Gate 04 requirement.
 
-Theory status: 待验证
+Theory status: 已验证
 
 - Medium-distortion selected-frame force closure passes in
   `reports/04_distortion_generality_audit.md`.
+- Cylindrical, conical, thickness-varying, and mild double-curvature shell
+  selected-frame force closure pass in
+  `reports/04_distortion_generality_audit.md`.
+- Gate 04 main-route required geometry families have passed.
+
+Theory status: 待验证
+
 - Strong-distortion geometry is still not complete: the intended strong
   non-inverted `case061` compact contains the same `shape4` and `X16` as the
   medium-distortion `case060` compact. This is recorded as a non-blocking
   robustness-data issue.
-- Generality has not fully passed.
 - The E-drive path mentioned in older context is not formally confirmed in this
   project brief. Treat it as a historical path to confirm, not as the unique
   current main data path.
@@ -228,6 +237,8 @@ Theory status: 待验证
 - Missing consistent tangent terms, including `dV/dq`, `dB/dq`, and
   geometric/stress stiffness when applicable, block Gate 03.
 - Medium-distortion selected-frame force closure has been audited and passes.
+- Cylindrical, conical, thickness-varying, and mild double-curvature shell
+  selected-frame force closure has been audited and passes.
 - Strong-distortion cases have not been verified because the current intended
   strong compact duplicates the medium-distortion geometry. This no longer
   blocks the main Gate 04 wind-turbine shell geometry route, but it remains an
@@ -240,7 +251,7 @@ Theory status: 待验证
 1. CONFIRMED: Whether standard 128-point closure remains stable across more
    geometries.
 2. CONFIRMED: Whether recovery-force and stiffness errors amplify under
-   medium-distortion and strong-distortion geometries.
+   medium-distortion and required wind-turbine shell geometries.
 3. UNCERTAIN: Whether the current small-rotation linear projection used for
    `B_macro_qdef` is sufficient for training.
 4. UNCERTAIN: Whether a strict Kabsch Jacobian is needed.
@@ -273,9 +284,9 @@ Status values in theory documents are limited to `已验证`, `待验证`, `待�
 | 01 | Data contract audit | PASS | `reports/macro16_source128_data_audit.md` | 已验证 |
 | 02 | TRUE176/CSS8 teacher closure audit | FAIL on full teacher stiffness closure | `reports/02_teacher_closure_audit.md` | 待验证 |
 | 03 | Macro16 source128 force/stiffness audit | split: force closure PASS; material-only stiffness diagnostic residual; full tangent incomplete | `reports/03_macro16_force_stiffness_reaudit.md`, `reports/macro16_case031_mechanics_diagnosis.md` | 待验证 |
-| 04 | Distortion/general geometry audit | incomplete: regular, light, and medium selected-frame force closure pass; typical wind-turbine shell families remain; strong non-inverted is non-blocking robustness data | `reports/04_distortion_generality_audit.md` | 待验证 |
+| 04 | Distortion/general geometry audit | PASS for main-route required families; strong non-inverted remains non-blocking robustness data | `reports/04_distortion_generality_audit.md` | 已验证 |
 | 05 | Integration-point reduction audit | incomplete | no canonical report yet | 待验证 |
-| 06 | Training gate | blocked | blocked by Gate 02/03/04/05 | 待验证 |
+| 06 | Training gate | blocked | blocked by Gate 02/03/05 | 待验证 |
 
 Current mechanics gate evidence:
 
@@ -310,11 +321,22 @@ Current mechanics gate evidence:
   regular force mean/max `0.0035065058950908396` /
   `0.00858572515082126`; light force mean/max
   `0.0003154735170576633` / `0.0005754271836312788`; medium force mean/max
-  `0.0001372555780980519` / `0.0002487106248325675`.
+  `0.0001372555780980519` / `0.0002487106248325675`; cylindrical shell
+  `0.000026251543003621474` / `0.000026251543003621474`; conical shell
+  `0.00002797270029813907` / `0.00002797270029813907`;
+  thickness-varying shell `0.000025519441712169405` /
+  `0.000025519441712169405`; mild double-curvature shell
+  `0.000025422600701057786` / `0.000025422600701057786`.
 - Gate 04 material-only stiffness remains diagnostic only:
   regular mean/max `0.011443767055272435` / `0.031962110431098374`;
   light mean/max `0.000330240237648814` / `0.0004728016155049718`;
-  medium mean/max `0.0017063919009665687` / `0.007058560473715983`.
+  medium mean/max `0.0017063919009665687` / `0.007058560473715983`;
+  cylindrical shell `0.00008774957197456735` /
+  `0.00008774957197456735`; conical shell `0.0001097975864293813` /
+  `0.0001097975864293813`; thickness-varying shell
+  `0.0000904030325614494` / `0.0000904030325614494`; mild
+  double-curvature shell `0.00008722059435666368` /
+  `0.00008722059435666368`.
 
 ## 11. Current Work Priority
 
@@ -329,17 +351,11 @@ Next steps:
    `B^T D B dV`.
 2. Resolve or explicitly waive Gate 02 full teacher stiffness closure with
    consistent-tangent evidence.
-3. Audit typical wind-turbine shell geometry families: cylindrical, conical,
-   thickness-varying, and mild double-curvature shells.
-4. Keep strong non-inverted distortion as an optional robustness boundary test;
+3. Keep strong non-inverted distortion as an optional robustness boundary test;
    fix its duplicated data when useful, but do not let it block the main route.
-5. Rebuild source128 compacts for the required geometry families.
-6. Rerun rigid preprocessing audit.
-7. Rerun selected-frame recovery-force audit.
-8. If 128 points stably closes, mark Gate 04 required families complete.
-9. Only after 128-point mechanics and generality gates pass, consider 96/64/32
+4. Only after 128-point mechanics and generality gates pass, consider 96/64/32
    point reduction.
-10. Train the network only after the gate workflow permits it.
+5. Train the network only after the gate workflow permits it.
 
 ## Three Core Sentences
 

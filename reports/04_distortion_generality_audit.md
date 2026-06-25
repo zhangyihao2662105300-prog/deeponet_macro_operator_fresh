@@ -24,6 +24,17 @@ Role: Gate 04 Generality Agent
 
 `D:\IS-FEM\deeponet_macro_operator_fresh\runs\gate04_generality`
 
+4. Wind-turbine shell geometry audit directory
+
+`D:\IS-FEM\deeponet_macro_operator_fresh\runs\gate04_wind_shell_generality`
+
+Generated Macro16 source128 compact list:
+
+`D:\IS-FEM\deeponet_macro_operator_fresh\runs\gate04_wind_shell_generality\macro16_source128\macro16_source128_teacher_compact_list.txt`
+
+This wind-shell set contains 4 Macro16 source128 compacts and 40 total base
+frames. The selected-frame force audit reports 1 selected frame per compact.
+
 ## 3. Commands Used
 
 Geometry inventory and class lists:
@@ -53,6 +64,20 @@ py -3 scripts\audit_macro16_force_stiffness.py --compact-list runs\gate04_genera
 py -3 scripts\audit_macro16_force_stiffness.py --compact-list runs\gate04_generality\moderately_distorted_compact_list.txt --out runs\gate04_generality\moderately_distorted_selected_material_only_force_audit.json --volume-mode selected-frame --tangent-mode material-only --max-force-rel 0.02 --max-macro-stiffness-symmetry-rel 1e-10 --workers 8
 py -3 scripts\audit_macro16_force_stiffness.py --compact-list runs\gate04_generality\strong_non_flipped_intended_invalid_compact_list.txt --out runs\gate04_generality\strong_non_flipped_intended_invalid_selected_material_only_force_audit.json --volume-mode selected-frame --tangent-mode material-only --max-force-rel 0.02 --max-macro-stiffness-symmetry-rel 1e-10 --workers 8
 ```
+
+Wind-turbine shell generation and audit:
+
+```powershell
+$env:PYTHONPATH='src;scripts'
+$env:KMP_DUPLICATE_LIB_OK='TRUE'
+$env:OMP_NUM_THREADS='1'
+$env:MKL_NUM_THREADS='1'
+py -3 scripts\run_gate04_wind_shell_generality_audit.py --out-root runs\gate04_wind_shell_generality --inner-workers 4 --post-workers 8 --skip-existing
+```
+
+Output summary:
+
+`D:\IS-FEM\deeponet_macro_operator_fresh\runs\gate04_wind_shell_generality\gate04_wind_shell_summary.json`
 
 ## 4. Class Definition
 
@@ -95,31 +120,59 @@ and `X16` matches `case060`.
 
 Therefore the force and material-only K numbers in the strong row are numerically useful as a repeated medium-distortion check, but they do not verify strong non-inverted geometry.
 
-## 7. Gate Result
+## 7. Wind-Turbine Shell Geometry Audit
 
-Gate 04 result: incomplete.
+The wind-turbine shell audit generated four teacher CSS8 patches, converted
+them to Macro16 source128 compacts, and ran the strict data-contract audit plus
+selected-frame volume force audit. The script did not train a network, did not
+modify model code, and did not change the fixed 128-point rule.
 
-Passed so far:
+| Shell Family | Geometry Count | Frame Count | Selected Force Frames | detJ Positive | Data Contract | Force Mean | Force Max | Material-only K Mean | Material-only K Max | Enter Next Class |
+|---|---:|---:|---:|---|---|---:|---:|---:|---:|---|
+| Cylindrical shell | 1 | 10 | 1 | yes, min `0.002461802` | PASS | `0.000026252` | `0.000026252` | `0.000087750` | `0.000087750` | yes |
+| Conical shell | 1 | 10 | 1 | yes, min `0.002022906` | PASS | `0.000027973` | `0.000027973` | `0.000109798` | `0.000109798` | yes |
+| Thickness-varying shell | 1 | 10 | 1 | yes, min `0.002254853` | PASS | `0.000025519` | `0.000025519` | `0.000090403` | `0.000090403` | yes |
+| Mild double-curvature shell | 1 | 10 | 1 | yes, min `0.002482064` | PASS | `0.000025423` | `0.000025423` | `0.000087221` | `0.000087221` | yes |
+
+Pass standard:
+
+1. detJ must be positive.
+2. Data contract must pass.
+3. Selected-frame force max must be below `0.02`.
+4. Material-only K is recorded as a diagnostic only.
+
+All four wind-turbine shell families pass the required Gate 04 selected-frame
+force standard. The largest wind-shell force max is `0.000027973`, far below
+`0.02`.
+
+## 8. Gate Result
+
+Gate 04 required-family result: PASS for the current main route.
+
+Passed:
 
 1. Regular geometry data contract and selected-frame force closure.
 2. Light distortion data contract and selected-frame force closure.
 3. Medium distortion data contract and selected-frame force closure.
-4. detJ is positive for all audited effective geometries.
+4. Cylindrical shell data contract and selected-frame force closure.
+5. Conical shell data contract and selected-frame force closure.
+6. Thickness-varying shell data contract and selected-frame force closure.
+7. Mild double-curvature shell data contract and selected-frame force closure.
+8. detJ is positive for all audited required geometries.
 
-Not passed yet:
+Not a blocker:
 
-1. Cylindrical, conical, thickness-varying, and mild double-curvature families remain outside this report.
-2. Strong non-inverted geometry has not been verified because the generated compact is not actually strong-distorted. This is now a non-blocking robustness boundary issue, not a hard Gate 04 main-route blocker.
+1. Strong non-inverted geometry has not been verified because the generated compact is not actually strong-distorted. This remains a non-blocking robustness boundary issue.
+2. Material-only stiffness remains a diagnostic only. The full Gate 03 tangent is still pending and not resolved here.
 
-## 8. Unresolved Issues
+## 9. Unresolved Issues
 
-1. Typical wind-turbine shell geometry families remain to be audited: cylindrical, conical, thickness-varying, and mild double-curvature.
-2. Regenerate true strong non-inverted geometry only as a robustness boundary test, not as a main-route blocker.
-3. Material-only stiffness remains a diagnostic only. The full Gate 03 tangent is still pending and not resolved here.
+1. Regenerate true strong non-inverted geometry only as a robustness boundary test, not as a main-route blocker.
+2. Material-only stiffness is not a complete Abaqus tangent. The full Gate 03 consistent tangent remains unresolved.
+3. Gate 05 integration-point reduction is still not started.
 
-## 9. Recommended Next Action
+## 10. Recommended Next Action
 
-1. Prioritize typical wind-turbine shell geometry families: cylindrical, conical, thickness-varying, and mild double-curvature.
-2. Rebuild Macro16 source128 compacts for those required families.
-3. Rerun Gate 04 data contract and selected-frame force closure.
-4. Regenerate true strong non-inverted geometry later as a robustness boundary test if needed.
+1. Keep Gate 04 main-route required families marked as passed.
+2. Return to Gate 03 consistent tangent decision or Gate 05 only when the project explicitly chooses that route.
+3. Do not train the network yet because Gate 02 full teacher stiffness, Gate 03 full tangent, and Gate 05 still block Gate 06.

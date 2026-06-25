@@ -133,14 +133,15 @@ wind-turbine shell geometry route.
 
 Current result:
 
-- Gate result: incomplete.
+- Gate result: PASS for main-route required families.
 - Regular, light-distortion, and medium-distortion selected-frame force closure
   pass in `reports/04_distortion_generality_audit.md`.
+- Cylindrical, conical, thickness-varying, and mild double-curvature shell
+  selected-frame force closure pass in
+  `reports/04_distortion_generality_audit.md`.
 - Strong non-inverted data is invalid because the intended strong compact
   duplicates medium-distortion geometry; it is now classified as a non-blocking
   robustness-data issue.
-- Cylindrical, conical, thickness-varying, and mild double-curvature shell
-  families remain to be audited.
 
 ## Gate 05: Integration-Point Reduction Audit
 
@@ -185,8 +186,8 @@ Current result:
 
 - Gate result: blocked.
 - Reason: Gate 02 fails full teacher stiffness closure, Gate 03 full tangent
-  closure is incomplete, and Gate 04 required wind-turbine shell geometry
-  families plus Gate 05 are incomplete.
+  closure is incomplete, and Gate 05 is incomplete. Gate 04 main-route required
+  families now pass, but that does not unblock training by itself.
 
 ## Required Report Template
 

@@ -34,7 +34,7 @@ the exact claim.
 | `X16_hat` is produced by centering and scaling `X16_raw`. | 已验证 | `reports/macro16_source128_data_audit.md` |
 | Integration-point positions are obtained by isoparametric mapping from `X16_hat`. | 待验证 | Needs explicit map reproduction audit report. |
 | Integration weights are obtained from the Jacobian and scale relation. | 已验证 | `reports/macro16_source128_data_audit.md` |
-| The Jacobian determinant must remain positive for valid non-inverted geometries. | 待验证 | Required for distortion generality audit. |
+| The Jacobian determinant must remain positive for valid non-inverted geometries. | 已验证 | `reports/04_distortion_generality_audit.md` verifies positive detJ for audited Gate 04 required geometries; true strong non-inverted geometry remains a non-blocking robustness item. |
 
 ## 3. Displacement And Rigid Motion
 

@@ -12,7 +12,7 @@ gate.
 | 01 | Data contract audit | PASS | `reports/macro16_source128_data_audit.md` |
 | 02 | Teacher TRUE176/CSS8 closure audit | FAIL on full teacher stiffness closure | `reports/02_teacher_closure_audit.md` |
 | 03 | Macro16 source128 force/stiffness audit | FAIL current max-error gate; failure localized | `reports/macro16_force_stiffness_audit.md`, `reports/macro16_case031_mechanics_diagnosis.md` |
-| 04 | Distortion/general geometry audit | not complete | `reports/04_distortion_generality_audit.md` |
+| 04 | Distortion/general geometry audit | PASS for main-route required families; strong non-inverted remains non-blocking robustness data | `reports/04_distortion_generality_audit.md` |
 | 05 | Integration-point reduction audit | not complete | `reports/05_ip_reduction_audit.md` |
 | 06 | Training gate | blocked | `reports/06_training_gate.md` |
 

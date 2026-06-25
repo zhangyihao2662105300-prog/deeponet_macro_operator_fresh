@@ -464,6 +464,13 @@ and rewrites `X16`, `q48`, and the 48 B columns into Macro16 order.  The labels
 are 128-IP teacher fields interpolated to the standard 18 Macro16 integration
 points, not a direct Abaqus Macro16-IP export.
 
+The default strain-coordinate mode is `global-to-macro-local`: source 128-IP
+labels are interpreted as global tensor components, interpolated, then rotated
+to the Macro16 local frame.  For coordinate-semantics A/B checks, rerun the
+export with `--strain-coordinate-mode source-local`; this uses `LE128_local`
+and `T_eps_from_abq@B_LE128_forward` without applying the Macro16 frame
+rotation again.
+
 Before interpreting a Macro16 training smoke, audit the teacher labels:
 
 ```powershell
@@ -478,8 +485,12 @@ py scripts\audit_macro16_teacher_labels.py `
 
 The hard check is `plus_fd_B_consistency`, which compares `B_macro` against
 `LE_plus` finite differences after the same 128-to-18 interpolation and
-Macro16 frame transform.  Geometry position error and `LE≈Bq` are also reported,
-but they are diagnostic signals rather than direct proof of the tangent label.
+the selected strain-coordinate transform.  Geometry position error and `LE≈Bq`
+are also reported, but they are diagnostic signals rather than direct proof of
+the tangent label.
+The audit also reports `LE0_star = LE_macro - B_macro @ q48`; a large value is
+evidence that the labels are not a zero-anchored `LE=Bq` response and may
+conflict with a model that forces `q=0` to zero strain.
 
 Windows smoke run:
 

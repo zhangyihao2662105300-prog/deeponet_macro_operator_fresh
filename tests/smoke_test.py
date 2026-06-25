@@ -488,6 +488,7 @@ def test_macro16_from_128_teacher_builder_writes_v4_contract_only() -> None:
             thickness_gauss_order=2,
             allow_missing_ip_keys=False,
             source_node_order="macro16",
+            strain_coordinate_mode="global-to-macro-local",
             source_geometry_tol=0.0,
         )
         summary = build_macro16_from_128_teacher(args)
@@ -575,6 +576,7 @@ def test_macro16_teacher_audit_checks_plus_fd_b_consistency() -> None:
             thickness_gauss_order=2,
             allow_missing_ip_keys=False,
             source_node_order="macro16",
+            strain_coordinate_mode="global-to-macro-local",
             source_geometry_tol=0.0,
         )
         build_summary = build_macro16_from_128_teacher(build_args)
@@ -596,6 +598,7 @@ def test_macro16_teacher_audit_checks_plus_fd_b_consistency() -> None:
         assert audit["strict_pass"] is True
         plus = audit["compacts"][0]["plus_fd_B_consistency"]["raw_coordinate"]
         assert plus["rel"] < 1.0e-5
+        assert "LE0_star_rel_to_LE" in audit["compacts"][0]["LE_vs_Bq_at_frames"]
 
         bad = root / "bad_macro16.npz"
         with np.load(compact, allow_pickle=True) as z:
@@ -606,6 +609,81 @@ def test_macro16_teacher_audit_checks_plus_fd_b_consistency() -> None:
         bad_audit = run_macro16_teacher_audit(bad_args)
         bad_plus = bad_audit["compacts"][0]["plus_fd_B_consistency"]["raw_coordinate"]
         assert bad_plus["rel"] > 0.5
+
+
+def test_macro16_from_128_teacher_source_local_mode_uses_local_labels() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        source = root / "complete_case001_training_ready.npz"
+        out_root = root / "macro16"
+        audit_out = root / "audit_local.json"
+        n = 2
+        direction = 5
+        delta = 1.0e-6
+        x16 = macro16_flat_x16()
+        q48 = np.zeros((n, 48), dtype=np.float32)
+        q48[:, direction] = np.asarray([0.1, 0.2], dtype=np.float32)
+        le_local = np.zeros((n, 128, 6), dtype=np.float32)
+        le_local[:, :, 4] = 2.5 * q48[:, direction].reshape(n, 1)
+        b_global = np.zeros((n, 128, 6, 48), dtype=np.float32)
+        b_global[:, :, 4, direction] = 2.5
+        le_plus_global = np.repeat(le_local[:, None, :, :], 1, axis=1).astype(np.float64)
+        le_plus_global[:, 0, :, 4] += delta * 2.5
+        t_eps = np.broadcast_to(np.eye(6, dtype=np.float64).reshape(1, 6, 6), (128, 6, 6)).copy()
+        np.savez(
+            source,
+            q48_raw=q48,
+            X_keep=x16,
+            LE128_base=le_local,
+            LE128_local=le_local,
+            B_LE128_forward=b_global,
+            T_eps_from_abq=t_eps,
+            LE128_plus=le_plus_global,
+            perturb_directions=np.asarray([direction], dtype=np.int64),
+            delta=np.asarray(delta, dtype=np.float64),
+            ip_keys=np.asarray([[elem, ip, 0] for elem in range(1, 17) for ip in range(1, 9)], dtype=np.int64),
+            case_id=np.asarray([1, 1], dtype=np.int64),
+            strain_field=np.asarray("LE", dtype=object),
+            strain_output_coordinate=np.asarray("local_jacobian_frame", dtype=object),
+            B_label_strain_field=np.asarray("LE", dtype=object),
+            B_label_output_coordinate=np.asarray("local_jacobian_frame", dtype=object),
+        )
+        build_args = SimpleNamespace(
+            compact=[source],
+            compact_list=[],
+            out_root=out_root,
+            case_limit=0,
+            frame_stride=1,
+            max_frames_per_compact=0,
+            plane_gauss_order=3,
+            thickness_gauss_order=2,
+            allow_missing_ip_keys=False,
+            source_node_order="macro16",
+            strain_coordinate_mode="source-local",
+            source_geometry_tol=0.0,
+        )
+        build_summary = build_macro16_from_128_teacher(build_args)
+        compact = Path(build_summary["cases"][0]["macro16_compact"])
+        with np.load(compact, allow_pickle=True) as z:
+            assert str(np.asarray(z["source_strain_coordinate_mode"]).reshape(-1)[0]) == "source-local"
+            assert str(np.asarray(z["strain_output_coordinate"]).reshape(-1)[0]) == "source_local_frame_interpolated"
+        audit_args = SimpleNamespace(
+            compact=[compact],
+            compact_list=[],
+            out=audit_out,
+            case_limit=0,
+            plane_gauss_order=3,
+            thickness_gauss_order=2,
+            max_geometry_rel=0.0,
+            max_plus_fd_rel=1.0e-5,
+            max_bq_rel=0.0,
+            max_frame_fd_rel=0.0,
+            strict=True,
+        )
+        audit = run_macro16_teacher_audit(audit_args)
+        assert audit["strict_pass"] is True
+        assert audit["compacts"][0]["source_strain_coordinate_mode"] == "source-local"
+        assert audit["compacts"][0]["plus_fd_B_consistency"]["raw_coordinate"]["rel"] < 1.0e-5
 
 
 def test_true176_xkeep_branch_and_ad_shapes() -> None:

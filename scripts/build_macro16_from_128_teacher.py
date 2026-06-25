@@ -43,6 +43,7 @@ from macro_deeponet.true176_data import (  # noqa: E402
 )
 
 TEACHER_CONTRACT_VERSION = "macro16-from-128-teacher-parent-linear-001"
+STRAIN_COORDINATE_MODES = ("global-to-macro-local", "source-local")
 TRUE176_SURFACE_MACRO_TO_KEEP = np.asarray([0, 1, 2, 4, 7, 6, 5, 3], dtype=np.int64)
 TRUE176_MACRO_TO_KEEP_NODE = np.concatenate([TRUE176_SURFACE_MACRO_TO_KEEP, TRUE176_SURFACE_MACRO_TO_KEEP + 8])
 TRUE176_KEEP_TO_MACRO_NODE = np.argsort(TRUE176_MACRO_TO_KEEP_NODE)
@@ -264,6 +265,56 @@ def load_le_b_128(z: np.lib.npyio.NpzFile, path: Path, n_total: int, rows: np.nd
     return le[rows].astype(np.float64), b[rows].astype(np.float64), le_key, b_key
 
 
+def load_source_local_le_b_128(z: np.lib.npyio.NpzFile, path: Path, n_total: int, rows: np.ndarray) -> tuple[np.ndarray, np.ndarray, str, str]:
+    if "LE128_local" not in z.files:
+        raise KeyError(f"{path}: strain-coordinate-mode=source-local requires LE128_local")
+    if "B_LE128_forward" not in z.files:
+        raise KeyError(f"{path}: strain-coordinate-mode=source-local requires B_LE128_forward")
+    if "T_eps_from_abq" not in z.files:
+        raise KeyError(f"{path}: strain-coordinate-mode=source-local requires T_eps_from_abq")
+    le = np.asarray(z["LE128_local"], dtype=np.float64)
+    b_global = np.asarray(z["B_LE128_forward"], dtype=np.float64)
+    t_from = np.asarray(z["T_eps_from_abq"], dtype=np.float64)
+    if le.shape != (n_total, 128, 6):
+        raise ValueError(f"{path}: LE128_local must have shape [{n_total},128,6], got {le.shape}")
+    if b_global.shape != (n_total, 128, 6, 48):
+        raise ValueError(f"{path}: B_LE128_forward must have shape [{n_total},128,6,48], got {b_global.shape}")
+    if t_from.shape == (128, 6, 6):
+        t_rows = np.broadcast_to(t_from.reshape(1, 128, 6, 6), (rows.size, 128, 6, 6)).copy()
+    elif t_from.shape == (n_total, 128, 6, 6):
+        t_rows = t_from[rows]
+    else:
+        raise ValueError(f"{path}: T_eps_from_abq must have shape [128,6,6] or [{n_total},128,6,6], got {t_from.shape}")
+    b_local = np.einsum("nrab,nrbj->nraj", t_rows, b_global[rows])
+    return le[rows].astype(np.float64), b_local.astype(np.float64), "LE128_local", "T_eps_from_abq@B_LE128_forward"
+
+
+def load_labels_by_mode(
+    z: np.lib.npyio.NpzFile,
+    path: Path,
+    n_total: int,
+    rows: np.ndarray,
+    *,
+    strain_coordinate_mode: str,
+) -> tuple[np.ndarray, np.ndarray, str, str, dict[str, Any]]:
+    mode = str(strain_coordinate_mode).strip().lower().replace("_", "-")
+    if mode not in STRAIN_COORDINATE_MODES:
+        raise ValueError(f"strain_coordinate_mode must be one of {STRAIN_COORDINATE_MODES}, got {strain_coordinate_mode!r}")
+    if mode == "source-local":
+        le, b, le_key, b_key = load_source_local_le_b_128(z, path, n_total, rows)
+        return le, b, le_key, b_key, {
+            "strain_coordinate_mode": "source-local",
+            "strain_output_coordinate": "source_local_frame_interpolated",
+            "strain_coordinate_note": "LE128_local and T_eps_from_abq@B_LE128_forward are interpolated component-wise; no Macro16 Q transform is applied.",
+        }
+    le, b, le_key, b_key = load_le_b_128(z, path, n_total, rows)
+    return le, b, le_key, b_key, {
+        "strain_coordinate_mode": "global-to-macro-local",
+        "strain_output_coordinate": "macro16_local_frame",
+        "strain_coordinate_note": "Source 128-IP labels are treated as global tensor components, interpolated, then transformed by Macro16 Q.",
+    }
+
+
 def load_ip_xyz(z: np.lib.npyio.NpzFile, n_total: int, rows: np.ndarray) -> np.ndarray | None:
     key = first_key(z.files, ("ip_xyz", "ip_coords", "ip_coordinates", "integration_point_xyz", "gauss_xyz"))
     if key is None:
@@ -379,6 +430,7 @@ def build_one(
     allow_missing_ip_keys: bool,
     source_geometry_tol: float,
     source_node_order: str,
+    strain_coordinate_mode: str,
 ) -> dict[str, Any]:
     path = Path(path).resolve()
     with np.load(str(path), allow_pickle=True) as z:
@@ -390,7 +442,13 @@ def build_one(
         q48, q_key = load_q48(z, path, n_total, rows)
         x16, x16_source = load_x16(z, path, n_total, rows)
         case_id = load_case_ids(z, path, n_total, rows)
-        le128, b128, le_key, b_key = load_le_b_128(z, path, n_total, rows)
+        le128, b128, le_key, b_key, strain_meta = load_labels_by_mode(
+            z,
+            path,
+            n_total,
+            rows,
+            strain_coordinate_mode=strain_coordinate_mode,
+        )
         source_xyz128 = load_ip_xyz(z, n_total, rows)
         strain_field = scalar_text(z, "strain_field", scalar_text(z, "strain_label_key", "LE"))
         b_strain_field = scalar_text(z, "B_label_strain_field", strain_field)
@@ -406,9 +464,13 @@ def build_one(
     le_global = np.einsum("pr,nra->npa", w, le128)
     b_global = np.einsum("pr,nraj->npaj", w, b128)
     q_frames, weights, target_xyz, geom_meta = macro16_geometry_fields(x16, point_table)
-    t_from, _t_to = strain_transform_matrices(q_frames)
-    le_macro = np.einsum("npab,npb->npa", t_from, le_global)
-    b_macro = np.einsum("npab,npbj->npaj", t_from, b_global)
+    if strain_meta["strain_coordinate_mode"] == "source-local":
+        le_macro = le_global
+        b_macro = b_global
+    else:
+        t_from, _t_to = strain_transform_matrices(q_frames)
+        le_macro = np.einsum("npab,npb->npa", t_from, le_global)
+        b_macro = np.einsum("npab,npbj->npaj", t_from, b_global)
 
     geometry_audit: dict[str, Any] = {"source_ip_xyz_available": source_xyz128 is not None}
     if source_xyz128 is not None:
@@ -452,9 +514,11 @@ def build_one(
         node_order_transform=np.asarray(node_order_meta["node_order_transform"], dtype=object),
         source_le128_key=np.asarray(le_key, dtype=object),
         source_b128_key=np.asarray(b_key, dtype=object),
+        source_strain_coordinate_mode=np.asarray(strain_meta["strain_coordinate_mode"], dtype=object),
+        source_strain_coordinate_note=np.asarray(strain_meta["strain_coordinate_note"], dtype=object),
         macro16_point_xi=point_table.xi.astype(np.float32),
         macro16_parent_interpolation_from_128=np.asarray("standard CSS8 8x8x2 parent-coordinate linear interpolation", dtype=object),
-        strain_output_coordinate=np.asarray("macro16_local_frame", dtype=object),
+        strain_output_coordinate=np.asarray(strain_meta["strain_output_coordinate"], dtype=object),
         strain_field=np.asarray(strain_field, dtype=object),
         B_label_strain_field=np.asarray(b_strain_field, dtype=object),
         B_label_q_coordinate=np.asarray("q48_raw", dtype=object),
@@ -475,7 +539,7 @@ def build_one(
         **node_order_meta,
         "source_le128_key": le_key,
         "source_b128_key": b_key,
-        "strain_output_coordinate": "macro16_local_frame",
+        **strain_meta,
         "label_source": "128-IP TRUE176/CSS8 teacher labels interpolated in macro parent coordinates",
         "model_visible_arrays": ["q48_raw", "X16", "macro16_point_features_generated_by_v4_loader"],
         "fine_grid_geometry_visible_to_model": False,
@@ -518,6 +582,7 @@ def build_all(args: argparse.Namespace) -> dict[str, Any]:
             allow_missing_ip_keys=bool(args.allow_missing_ip_keys),
             source_geometry_tol=float(args.source_geometry_tol),
             source_node_order=str(args.source_node_order),
+            strain_coordinate_mode=str(args.strain_coordinate_mode),
         )
         for i, path in enumerate(paths)
     ]
@@ -566,6 +631,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--plane-gauss-order", type=int, default=3)
     parser.add_argument("--thickness-gauss-order", type=int, default=2)
     parser.add_argument("--allow-missing-ip-keys", action="store_true")
+    parser.add_argument(
+        "--strain-coordinate-mode",
+        default="global-to-macro-local",
+        choices=STRAIN_COORDINATE_MODES,
+        help=(
+            "global-to-macro-local treats source LE/B as global tensor components and transforms to Macro16 local. "
+            "source-local uses LE128_local plus T_eps_from_abq@B_LE128_forward and does not apply Macro16 Q."
+        ),
+    )
     parser.add_argument(
         "--source-node-order",
         default="auto",

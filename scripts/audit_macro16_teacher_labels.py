@@ -225,9 +225,11 @@ def load_macro_compact(path: Path) -> dict[str, Any]:
             "node_order_transform": scalar_from_npz(z, "node_order_transform", "unknown"),
             "source_le128_key": scalar_from_npz(z, "source_le128_key", ""),
             "source_b128_key": scalar_from_npz(z, "source_b128_key", ""),
+            "source_strain_coordinate_mode": scalar_from_npz(z, "source_strain_coordinate_mode", "global-to-macro-local"),
             "standard_operator_contract_version": scalar_from_npz(z, "standard_operator_contract_version", ""),
             "macro16_teacher_contract_version": scalar_from_npz(z, "macro16_teacher_contract_version", ""),
             "B_label_q_coordinate": scalar_from_npz(z, "B_label_q_coordinate", ""),
+            "strain_output_coordinate": scalar_from_npz(z, "strain_output_coordinate", ""),
         }
 
 
@@ -296,12 +298,26 @@ def audit_plus_fd(
             raise ValueError(f"{source_path}: bad finite difference delta {delta:g}")
         h, h_source = load_length_scale(z, rows, n_total)
         meta = source_metadata(z)
+        t_eps_from = np.asarray(z["T_eps_from_abq"], dtype=np.float64) if "T_eps_from_abq" in z.files else None
 
-    q_frames, _weights, _target_xyz, _geom_meta = macro16_geometry_fields(np.asarray(macro["x16"], dtype=np.float64), point_table)
-    t_from, _t_to = strain_transform_matrices(q_frames)
     le_base = np.asarray(macro["le"], dtype=np.float64)
-    le_plus_global = np.einsum("pr,ndra->ndpa", interpolation_matrix, le_plus)
-    le_plus_macro = np.einsum("npab,ndpb->ndpa", t_from, le_plus_global)
+    mode = str(macro.get("source_strain_coordinate_mode", "global-to-macro-local")).strip().lower().replace("_", "-")
+    if mode == "source-local":
+        if t_eps_from is None:
+            raise KeyError(f"{source_path}: source-local audit requires T_eps_from_abq")
+        if t_eps_from.shape == (128, 6, 6):
+            t_rows = np.broadcast_to(t_eps_from.reshape(1, 128, 6, 6), (rows.size, 128, 6, 6)).copy()
+        elif t_eps_from.shape == (n_total, 128, 6, 6):
+            t_rows = t_eps_from[rows]
+        else:
+            raise ValueError(f"{source_path}: T_eps_from_abq must be [128,6,6] or [N,128,6,6], got {t_eps_from.shape}")
+        le_plus_local = np.einsum("nrab,ndrb->ndra", t_rows, le_plus)
+        le_plus_macro = np.einsum("pr,ndra->ndpa", interpolation_matrix, le_plus_local)
+    else:
+        q_frames, _weights, _target_xyz, _geom_meta = macro16_geometry_fields(np.asarray(macro["x16"], dtype=np.float64), point_table)
+        t_from, _t_to = strain_transform_matrices(q_frames)
+        le_plus_global = np.einsum("pr,ndra->ndpa", interpolation_matrix, le_plus)
+        le_plus_macro = np.einsum("npab,ndpb->ndpa", t_from, le_plus_global)
     fd_macro = (le_plus_macro - le_base[:, None, :, :]) / delta
     directions_macro = source_dirs_to_macro_dirs(directions_source, str(macro["source_node_order"]))
     b_dirs = np.asarray(macro["b"], dtype=np.float64)[:, :, :, directions_macro]
@@ -327,6 +343,7 @@ def audit_plus_fd(
         "direction_count": int(directions_source.shape[0]),
         "raw_coordinate": raw,
         "qhat_coordinate_scaled_consistently": qhat,
+        "source_strain_coordinate_mode": mode,
         "length_scale_source": h_source,
         "H_min": float(np.min(h)),
         "H_max": float(np.max(h)),
@@ -344,12 +361,28 @@ def audit_bq(macro: dict[str, Any]) -> dict[str, Any]:
     b = np.asarray(macro["b"], dtype=np.float64)
     bq = np.einsum("npaj,nj->npa", b, q)
     metric = rel_metric(bq, le)
+    le0 = le - bq
+    le0_norm = np.linalg.norm(le0.reshape(le0.shape[0], -1), axis=1)
+    le_norm = np.linalg.norm(le.reshape(le.shape[0], -1), axis=1)
+    le0_mean = np.mean(le0, axis=0, keepdims=True)
+    le0_centered = le0 - le0_mean
     q_norm = np.linalg.norm(q, axis=1)
     return {
         **metric,
         "q_norm_min": float(np.min(q_norm)),
         "q_norm_max": float(np.max(q_norm)),
         "q_norm_mean": float(np.mean(q_norm)),
+        "LE0_star_definition": "LE0_star = LE_macro - B_macro(q) @ q48",
+        "LE0_star_rms": rms(le0),
+        "LE0_star_norm_min": float(np.min(le0_norm)),
+        "LE0_star_norm_max": float(np.max(le0_norm)),
+        "LE0_star_norm_mean": float(np.mean(le0_norm)),
+        "LE0_star_rel_to_LE": rel_norm(le0, le),
+        "LE0_star_centered_rel_to_LE0": rel_norm(le0_centered, le0),
+        "LE0_star_centered_rms": rms(le0_centered),
+        "LE_norm_min": float(np.min(le_norm)),
+        "LE_norm_max": float(np.max(le_norm)),
+        "LE_norm_mean": float(np.mean(le_norm)),
     }
 
 
@@ -422,6 +455,8 @@ def audit_one(path: Path, point_table: Macro16PointTable, interpolation_matrix: 
         "node_order_transform": macro["node_order_transform"],
         "source_le128_key": macro["source_le128_key"],
         "source_b128_key": macro["source_b128_key"],
+        "source_strain_coordinate_mode": macro["source_strain_coordinate_mode"],
+        "strain_output_coordinate": macro["strain_output_coordinate"],
         "geometry_position": geometry,
         "plus_fd_B_consistency": plus,
         "LE_vs_Bq_at_frames": bq,
@@ -458,6 +493,8 @@ def aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
     out.update(stats("geometry_rel", ("geometry_position", "rel")))
     out.update(stats("plus_fd_rel", ("plus_fd_B_consistency", "raw_coordinate", "rel")))
     out.update(stats("bq_rel", ("LE_vs_Bq_at_frames", "rel")))
+    out.update(stats("LE0_star_rel", ("LE_vs_Bq_at_frames", "LE0_star_rel_to_LE")))
+    out.update(stats("LE0_star_centered_rel", ("LE_vs_Bq_at_frames", "LE0_star_centered_rel_to_LE0")))
     out.update(stats("frame_fd_rel", ("frame_to_frame_fd", "trapezoid_average_B", "rel")))
     warnings = []
     for row in rows:

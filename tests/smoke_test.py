@@ -83,6 +83,7 @@ from audit_macro16_teacher_labels import run_audit as run_macro16_teacher_audit
 from audit_macro16_force_stiffness import TRUE176_MACRO_TO_KEEP_FLAT
 from audit_macro16_force_stiffness import run_audit as run_macro16_force_stiffness_audit
 from audit_macro16_trained_force_closure import make_model as make_trained_macro16_force_model
+from audit_macro16_trained_force_closure import map_source_path, parse_path_map
 from plan_macro16_source128_generality_audit import build_plan as build_macro16_source128_generality_plan
 import prepare_macro16_source128_distortion_tasks as prepare_macro16_distortion_tasks
 from fit_macro16_point_b_prior import run as run_macro16_point_b_prior
@@ -836,6 +837,15 @@ def test_macro16_fixed128_state_b_training_checkpoint_loads_for_force_audit() ->
         pb = torch.zeros(1, 128, point_mean.size)
         out = loaded(xb, pb)
         assert out.shape == (1, 128, 6)
+
+
+def test_macro16_trained_force_audit_maps_windows_source_path() -> None:
+    path_map = parse_path_map([r"D:\IS-FEM=/home/ydh/IS-FEM"])
+    got = map_source_path(
+        r"D:\IS-FEM\outputs\query_point_v2_coordinate_pilot\case031\complete.npz",
+        path_map,
+    )
+    assert got.as_posix() == "/home/ydh/IS-FEM/outputs/query_point_v2_coordinate_pilot/case031/complete.npz"
 
 
 def test_macro16_training_le0_model_fits_nonzero_initial_strain_prior() -> None:

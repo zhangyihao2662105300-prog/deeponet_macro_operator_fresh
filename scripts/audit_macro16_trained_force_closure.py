@@ -118,9 +118,37 @@ def scalar_text(z: np.lib.npyio.NpzFile, key: str, default: str = "") -> str:
     return str(item)
 
 
-def qdef_projected_rf(compact_paths: list[str], source_index: np.ndarray, source_row: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def parse_path_map(entries: list[str]) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    for entry in entries:
+        text = str(entry).strip()
+        if not text:
+            continue
+        if "=" not in text:
+            raise ValueError(f"--source-path-map must be FROM=TO, got {entry!r}")
+        src, dst = text.split("=", 1)
+        out.append((src, dst))
+    return out
+
+
+def map_source_path(path_text: str, path_map: list[tuple[str, str]]) -> Path:
+    text = str(path_text)
+    for src, dst in path_map:
+        if text.startswith(src):
+            return Path(dst + text[len(src) :].replace("\\", "/"))
+    return Path(text)
+
+
+def qdef_projected_rf(
+    compact_paths: list[str],
+    source_index: np.ndarray,
+    source_row: np.ndarray,
+    *,
+    source_path_map: list[tuple[str, str]] | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return P^T RF_macro, selected-frame volume, and elastic D for loaded rows."""
 
+    path_map = list(source_path_map or [])
     rf_rows: list[np.ndarray] = []
     weight_rows: list[np.ndarray] = []
     d_rows: list[np.ndarray] = []
@@ -131,7 +159,7 @@ def qdef_projected_rf(compact_paths: list[str], source_index: np.ndarray, source
         with np.load(str(compact_path), allow_pickle=True) as z:
             if "source_compact" not in z.files:
                 raise KeyError(f"{compact_path}: missing source_compact")
-            source_path = Path(scalar_text(z, "source_compact"))
+            source_path = map_source_path(scalar_text(z, "source_compact"), path_map)
             source_order = scalar_text(z, "source_node_order", "macro16")
             n_total = int(np.asarray(z["q48_def_hat"]).shape[0])
             p_rigid_all = np.asarray(z["rigid_projection_P"], dtype=np.float64)
@@ -241,6 +269,7 @@ def evaluate_model(
     max_frames: int,
     batch_size: int,
     device: torch.device,
+    source_path_map: list[tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
     checkpoint = torch_load_cross_platform(checkpoint_path, device)
     if str(checkpoint.get("contract_version", "")) != MACRO16_CONTRACT_VERSION:
@@ -297,6 +326,7 @@ def evaluate_model(
         data.compact_paths,
         data.source_index[indices],
         data.source_row[indices],
+        source_path_map=source_path_map,
     )
     stress_pred = np.einsum("nab,npb->npa", elastic_d, le_pred)
     force_pred = np.einsum("npaj,npa,np->nj", b_pred_raw, stress_pred, weights_selected)
@@ -328,6 +358,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-frames", type=int, default=8)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--cuda", action="store_true")
+    parser.add_argument("--source-path-map", action="append", default=[])
     return parser.parse_args()
 
 
@@ -343,6 +374,7 @@ def main() -> None:
         max_frames=int(args.max_frames),
         batch_size=int(args.batch_size),
         device=device,
+        source_path_map=parse_path_map(list(args.source_path_map)),
     )
     payload["device"] = str(device)
     write_json(Path(args.out).resolve(), payload)

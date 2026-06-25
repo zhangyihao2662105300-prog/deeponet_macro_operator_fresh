@@ -53,6 +53,7 @@ class Macro16Arrays:
     le: np.ndarray
     b: np.ndarray
     weights: np.ndarray
+    elastic_d: np.ndarray
     length_scale: np.ndarray
     x_center: np.ndarray
     case_id: np.ndarray
@@ -61,7 +62,7 @@ class Macro16Arrays:
     point_meta: dict[str, Any]
 
 
-class Macro16Dataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]):
+class Macro16Dataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]):
     def __init__(
         self,
         branch: np.ndarray,
@@ -69,6 +70,7 @@ class Macro16Dataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor, tor
         le: np.ndarray,
         j: np.ndarray,
         weights: np.ndarray,
+        elastic_d: np.ndarray,
         indices: np.ndarray,
     ) -> None:
         self.branch = np.asarray(branch, dtype=np.float32)
@@ -76,12 +78,13 @@ class Macro16Dataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor, tor
         self.le = np.asarray(le, dtype=np.float32)
         self.j = np.asarray(j, dtype=np.float32)
         self.weights = np.asarray(weights, dtype=np.float32)
+        self.elastic_d = np.asarray(elastic_d, dtype=np.float32)
         self.indices = np.asarray(indices, dtype=np.int64)
 
     def __len__(self) -> int:
         return int(self.indices.size)
 
-    def __getitem__(self, item: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def __getitem__(self, item: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         idx = int(self.indices[item])
         return (
             torch.from_numpy(self.branch[idx]),
@@ -89,6 +92,7 @@ class Macro16Dataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor, tor
             torch.from_numpy(self.le[idx]),
             torch.from_numpy(self.j[idx]),
             torch.from_numpy(self.weights[idx]),
+            torch.from_numpy(self.elastic_d[idx]),
         )
 
 
@@ -335,6 +339,22 @@ def _as_weights_hat(
     return geometry_weights_hat.astype(np.float32), None, "generated_from_X16", ""
 
 
+def _as_elastic_d(z: np.lib.npyio.NpzFile, path: Path, n_total: int, rows: np.ndarray) -> tuple[np.ndarray, str]:
+    for key in ("elastic_D", "material_D"):
+        if key not in z.files:
+            continue
+        vals = np.asarray(z[key], dtype=np.float32)
+        if vals.shape == (6, 6):
+            return np.broadcast_to(vals.reshape(1, 6, 6), (rows.size, 6, 6)).copy(), key
+        if vals.shape == (1, 6, 6):
+            return np.broadcast_to(vals, (rows.size, 6, 6)).copy(), key
+        if vals.shape == (n_total, 6, 6):
+            return vals[rows].astype(np.float32), key
+        raise ValueError(f"{path}: {key} must be [6,6], [1,6,6], or [{n_total},6,6], got {vals.shape}")
+    ident = np.eye(6, dtype=np.float32)
+    return np.broadcast_to(ident.reshape(1, 6, 6), (rows.size, 6, 6)).copy(), "identity_fallback"
+
+
 def _rows(n_total: int, *, frame_stride: int, max_frames: int) -> np.ndarray:
     rows = np.arange(0, int(n_total), max(1, int(frame_stride)), dtype=np.int64)
     if int(max_frames) > 0:
@@ -381,6 +401,8 @@ def load_macro16_compacts(
     le_chunks: list[np.ndarray] = []
     b_chunks: list[np.ndarray] = []
     weight_chunks: list[np.ndarray] = []
+    elastic_d_chunks: list[np.ndarray] = []
+    elastic_d_sources: list[str] = []
     length_chunks: list[np.ndarray] = []
     center_chunks: list[np.ndarray] = []
     case_chunks: list[np.ndarray] = []
@@ -442,6 +464,7 @@ def load_macro16_compacts(
                 l_ref,
                 geometry_weights_hat,
             )
+            elastic_d, elastic_d_source = _as_elastic_d(z, path, n_total, rows)
             scale_audit = scale_consistency_report(
                 q48_raw=q_raw_for_audit,
                 q48_hat=q_hat,
@@ -468,6 +491,8 @@ def load_macro16_compacts(
             le_chunks.append(le.astype(np.float32))
             b_chunks.append(b.astype(np.float32))
             weight_chunks.append(weights.astype(np.float32))
+            elastic_d_chunks.append(elastic_d.astype(np.float32))
+            elastic_d_sources.append(str(elastic_d_source))
             length_chunks.append(l_ref.astype(np.float32))
             center_chunks.append(np.asarray(meta["X_center"], dtype=np.float32))
             case_chunks.append(case_id)
@@ -485,6 +510,7 @@ def load_macro16_compacts(
                     "model_visible_B": "B_macro_qdef" if b_hat_source == "B_macro_qdef" else b_hat_source,
                     "integration_weight_hat_source": weight_hat_source,
                     "integration_weight_phys_source_for_audit": weight_phys_source,
+                    "elastic_D_source": elastic_d_source,
                     "L_ref_source": l_ref_key or "computed_from_X16",
                     "scale_consistency": scale_audit,
                 }
@@ -496,6 +522,13 @@ def load_macro16_compacts(
 
     if not q_chunks:
         raise ValueError("no Macro16 frames loaded")
+    final_point_meta = dict(point_meta or {})
+    unique_elastic_sources = sorted(set(elastic_d_sources))
+    final_point_meta["elastic_D_sources"] = unique_elastic_sources
+    if len(unique_elastic_sources) == 1:
+        final_point_meta["elastic_D_source"] = unique_elastic_sources[0]
+    elif unique_elastic_sources:
+        final_point_meta["elastic_D_source"] = "mixed"
     return Macro16Arrays(
         compact_paths=compact_paths,
         q48_hat=np.concatenate(q_chunks, axis=0),
@@ -504,12 +537,13 @@ def load_macro16_compacts(
         le=np.concatenate(le_chunks, axis=0),
         b=np.concatenate(b_chunks, axis=0),
         weights=np.concatenate(weight_chunks, axis=0),
+        elastic_d=np.concatenate(elastic_d_chunks, axis=0),
         length_scale=np.concatenate(length_chunks, axis=0),
         x_center=np.concatenate(center_chunks, axis=0),
         case_id=np.concatenate(case_chunks, axis=0),
         source_index=np.concatenate(source_chunks, axis=0),
         source_row=np.concatenate(row_chunks, axis=0),
-        point_meta=point_meta or {},
+        point_meta=final_point_meta,
     )
 
 
@@ -730,6 +764,86 @@ def explicit_state_b_force_aware_loss(
         weight_min=weight_min,
         weight_max=weight_max,
     )
+
+
+def build_force_residual_scale(
+    le_train: np.ndarray,
+    b_train: np.ndarray,
+    weights_train: np.ndarray,
+    elastic_d_train: np.ndarray,
+    *,
+    floor_rel: float = 2.0e-2,
+    floor_abs: float = 1.0e-8,
+) -> np.ndarray:
+    le_arr = np.asarray(le_train, dtype=np.float64)
+    b_arr = np.asarray(b_train, dtype=np.float64)
+    w_arr = np.asarray(weights_train, dtype=np.float64)
+    d_arr = np.asarray(elastic_d_train, dtype=np.float64)
+    if le_arr.ndim != 3 or le_arr.shape[-1] != 6:
+        raise ValueError(f"le_train must have shape [N,P,6], got {le_arr.shape}")
+    if b_arr.shape != le_arr.shape[:2] + (6, 48):
+        raise ValueError(f"b_train must have shape [N,P,6,48], got {b_arr.shape}")
+    if w_arr.shape != le_arr.shape[:2]:
+        raise ValueError(f"weights_train must have shape [N,P], got {w_arr.shape}")
+    if d_arr.shape != (le_arr.shape[0], 6, 6):
+        raise ValueError(f"elastic_d_train must have shape [N,6,6], got {d_arr.shape}")
+    stress = np.einsum("nab,npb->npa", d_arr, le_arr)
+    force = np.einsum("npaj,npa,np->nj", b_arr, stress, w_arr)
+    rms = np.sqrt(np.mean(force * force, axis=0, keepdims=True))
+    global_rms = float(np.sqrt(np.mean(force * force))) if force.size else 0.0
+    floor = max(float(floor_abs), float(floor_rel) * global_rms, 1.0e-12)
+    return np.maximum(rms, floor).astype(np.float32)
+
+
+def canonical_force_residual_scale_mode(text: str) -> str:
+    mode = str(text).strip().lower().replace("_", "-")
+    if mode in {"component-rms", "component"}:
+        return "component-rms"
+    raise ValueError("force_residual_scale_mode must be component-rms")
+
+
+def canonical_force_residual_volume_mode(text: str) -> str:
+    mode = str(text).strip().lower().replace("_", "-")
+    if mode in {"hat", "integration-weight-hat"}:
+        return "hat"
+    raise ValueError("force_residual_volume_mode must be hat in the first implementation")
+
+
+def explicit_state_b_force_residual_loss(
+    model: nn.Module,
+    x_norm: torch.Tensor,
+    point_norm: torch.Tensor,
+    pred_norm: torch.Tensor,
+    j_target_norm: torch.Tensor,
+    le_true_norm: torch.Tensor,
+    weights_hat: torch.Tensor,
+    elastic_d: torch.Tensor,
+    *,
+    le_std_scale: torch.Tensor,
+    le_mean: torch.Tensor,
+    le_std: torch.Tensor,
+    q_std_cols: torch.Tensor,
+    columns: list[int],
+    force_scale_cols: torch.Tensor,
+) -> torch.Tensor:
+    if not hasattr(model, "_state_b_norm"):
+        raise ValueError("force residual loss requires a model with _state_b_norm")
+    col_idx = torch.as_tensor(columns, dtype=torch.long, device=x_norm.device)
+    state_b_norm = model._state_b_norm(x_norm, point_norm).index_select(-1, col_idx)  # type: ignore[attr-defined]
+    b_pred = j_norm_to_b_qhat_torch(state_b_norm, le_std_scale, q_std_cols)
+    b_true = j_norm_to_b_qhat_torch(j_target_norm, le_std_scale, q_std_cols)
+    le_mean_t = le_mean.to(dtype=pred_norm.dtype, device=pred_norm.device)
+    le_std_t = le_std.to(dtype=pred_norm.dtype, device=pred_norm.device)
+    le_pred = pred_norm * le_std_t + le_mean_t
+    le_true = le_true_norm * le_std_t + le_mean_t
+    d_t = elastic_d.to(dtype=pred_norm.dtype, device=pred_norm.device)
+    w_t = weights_hat.to(dtype=pred_norm.dtype, device=pred_norm.device)
+    sigma_pred = torch.einsum("nab,npb->npa", d_t, le_pred)
+    sigma_true = torch.einsum("nab,npb->npa", d_t, le_true)
+    force_pred = torch.einsum("npaj,npa,np->nj", b_pred, sigma_pred, w_t)
+    force_true = torch.einsum("npaj,npa,np->nj", b_true, sigma_true, w_t)
+    scale = torch.clamp(force_scale_cols.to(dtype=pred_norm.dtype, device=pred_norm.device), min=1.0e-12)
+    return (((force_pred - force_true) / scale.reshape(1, -1)) ** 2).mean()
 
 
 def sample_columns(columns: list[int], count: int, rng: np.random.Generator) -> list[int]:
@@ -1053,10 +1167,20 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     q_std = branch_std.reshape(-1)[:48]
     j_norm_target = (data.b * q_std.reshape(1, 1, 1, 48) / _le_std_scale(le_std, data.le.shape[1])).astype(np.float32)
     jacobian_loss_scale = canonical_jacobian_loss_scale(str(getattr(args, "jacobian_loss_scale", "physical-balanced")))
+    force_residual_volume_mode = canonical_force_residual_volume_mode(str(getattr(args, "force_residual_volume_mode", "hat")))
+    force_residual_scale_mode = canonical_force_residual_scale_mode(str(getattr(args, "force_residual_scale_mode", "component-rms")))
     b_loss_scale = build_physical_b_loss_scale(
         data.b[train_idx],
         floor_rel=float(getattr(args, "physical_b_loss_floor_rel", 2.0e-2)),
         floor_abs=float(getattr(args, "physical_b_loss_floor_abs", 1.0e-8)),
+    )
+    force_residual_scale = build_force_residual_scale(
+        data.le[train_idx],
+        data.b[train_idx],
+        data.weights[train_idx],
+        data.elastic_d[train_idx],
+        floor_rel=float(getattr(args, "force_residual_scale_floor_rel", 2.0e-2)),
+        floor_abs=float(getattr(args, "force_residual_scale_floor_abs", 1.0e-8)),
     )
     skip_init = np.mean(j_norm_target[train_idx], axis=0).astype(np.float32)
     if bool(args.global_b_prior):
@@ -1075,7 +1199,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "q_dim": np.asarray(48, dtype=np.int64),
     }
 
-    train_set = Macro16Dataset(branch_norm, point_norm, le_norm, j_norm_target, data.weights, train_idx)
+    train_set = Macro16Dataset(branch_norm, point_norm, le_norm, j_norm_target, data.weights, data.elastic_d, train_idx)
     num_workers = max(0, int(getattr(args, "num_workers", 0)))
     train_loader = DataLoader(
         train_set,
@@ -1184,13 +1308,20 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     le_std_t = torch.as_tensor(le_std.astype(np.float32), dtype=torch.float32, device=device)
     b_loss_scale_t = torch.as_tensor(b_loss_scale, dtype=torch.float32, device=device)
     q_std_t = torch.as_tensor(q_std.astype(np.float32), dtype=torch.float32, device=device)
+    force_residual_scale_t = torch.as_tensor(force_residual_scale.reshape(-1), dtype=torch.float32, device=device)
     jacobian_loss_weight = float(getattr(args, "jacobian_loss_weight", 1.0))
     direct_state_b_loss_weight = float(getattr(args, "direct_state_b_loss_weight", 0.0))
     force_aware_b_loss_weight = float(getattr(args, "force_aware_b_loss_weight", 0.0))
+    force_residual_loss_weight = float(getattr(args, "force_residual_loss_weight", 0.0))
     if direct_state_b_loss_weight > 0.0 and not hasattr(model, "_state_b_norm"):
         raise ValueError("--direct-state-b-loss-weight requires le0-state-b or le0-fixed128-state-b")
     if force_aware_b_loss_weight > 0.0 and not hasattr(model, "_state_b_norm"):
         raise ValueError("--force-aware-b-loss-weight requires le0-state-b or le0-fixed128-state-b")
+    if force_residual_loss_weight > 0.0 and not hasattr(model, "_state_b_norm"):
+        raise ValueError("--force-residual-loss-weight requires le0-state-b or le0-fixed128-state-b")
+    elastic_d_sources = [str(v) for v in data.point_meta.get("elastic_D_sources", [data.point_meta.get("elastic_D_source", "")])]
+    if force_residual_loss_weight > 0.0 and "identity_fallback" in elastic_d_sources:
+        raise ValueError("--force-residual-loss-weight requires compact elastic_D or material_D")
     history: list[dict[str, Any]] = []
     best_score = float("inf")
     best_report: dict[str, Any] | None = None
@@ -1239,6 +1370,12 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 "force_aware_b_weight_mode": str(getattr(args, "force_aware_b_weight_mode", "strain-volume")),
                 "force_aware_b_weight_min": float(getattr(args, "force_aware_b_weight_min", 0.1)),
                 "force_aware_b_weight_max": float(getattr(args, "force_aware_b_weight_max", 10.0)),
+                "force_residual_loss_weight": force_residual_loss_weight,
+                "force_residual_volume_mode": force_residual_volume_mode,
+                "force_residual_scale_mode": force_residual_scale_mode,
+                "force_residual_elastic_D_sources": elastic_d_sources,
+                "force_residual_scale_min": float(np.min(force_residual_scale)),
+                "force_residual_scale_max": float(np.max(force_residual_scale)),
                 "le0_enabled": bool(style in {"le0", "le0-state-b", "le0-fixed128-state-b"}),
                 "state_b": model.state_b_config() if hasattr(model, "state_b_config") else {"state_b_enabled": False},
                 "le0_init_definition": f"mean_train((LE_macro - {model_visible_b} @ {model_visible_q} - LE_mean) / LE_std)",
@@ -1260,14 +1397,15 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     for epoch in range(1, int(args.epochs) + 1):
         model.train()
         t0 = time.time()
-        sums = {"loss": 0.0, "le": 0.0, "j": 0.0, "direct_b": 0.0, "force_aware_b": 0.0, "rigid": 0.0}
+        sums = {"loss": 0.0, "le": 0.0, "j": 0.0, "direct_b": 0.0, "force_aware_b": 0.0, "force_residual": 0.0, "rigid": 0.0}
         count = 0
-        for xb, pb, leb, jb, wb in train_loader:
+        for xb, pb, leb, jb, wb, db in train_loader:
             xb = xb.to(device)
             pb = pb.to(device)
             leb = leb.to(device)
             jb = jb.to(device)
             wb = wb.to(device)
+            db = db.to(device)
             optimizer.zero_grad(set_to_none=True)
             pred = model(xb, pb)
             le_loss = nn.functional.mse_loss(pred, leb)
@@ -1322,10 +1460,30 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                         weight_min=float(getattr(args, "force_aware_b_weight_min", 0.1)),
                         weight_max=float(getattr(args, "force_aware_b_weight_max", 10.0)),
                     )
+                force_residual_loss = torch.zeros((), dtype=xb.dtype, device=device)
+                if force_residual_loss_weight > 0.0:
+                    col_idx = torch.as_tensor(columns, dtype=torch.long, device=device)
+                    force_residual_loss = explicit_state_b_force_residual_loss(
+                        model,
+                        xb,
+                        pb,
+                        pred,
+                        jb[:, :, :, columns],
+                        leb,
+                        wb,
+                        db,
+                        le_std_scale=le_std_scale_t,
+                        le_mean=le_mean_t,
+                        le_std=le_std_t,
+                        q_std_cols=q_std_t.index_select(0, col_idx),
+                        columns=columns,
+                        force_scale_cols=force_residual_scale_t.index_select(0, col_idx),
+                    )
             else:
                 j_loss = torch.zeros((), dtype=xb.dtype, device=device)
                 direct_b_loss = torch.zeros((), dtype=xb.dtype, device=device)
                 force_aware_b_loss = torch.zeros((), dtype=xb.dtype, device=device)
+                force_residual_loss = torch.zeros((), dtype=xb.dtype, device=device)
             rigid_loss = torch.zeros((), dtype=xb.dtype, device=device)
             if float(args.rigid_loss_weight) > 0.0:
                 batch_x16_norm = xb[:, 48:96] * torch.as_tensor(
@@ -1349,6 +1507,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 + jacobian_loss_weight * j_loss
                 + direct_state_b_loss_weight * direct_b_loss
                 + force_aware_b_loss_weight * force_aware_b_loss
+                + force_residual_loss_weight * force_residual_loss
                 + float(args.rigid_loss_weight) * rigid_loss
             )
             loss.backward()
@@ -1362,6 +1521,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             sums["j"] += float(j_loss.detach().cpu()) * batch_n
             sums["direct_b"] += float(direct_b_loss.detach().cpu()) * batch_n
             sums["force_aware_b"] += float(force_aware_b_loss.detach().cpu()) * batch_n
+            sums["force_residual"] += float(force_residual_loss.detach().cpu()) * batch_n
             sums["rigid"] += float(rigid_loss.detach().cpu()) * batch_n
         scheduler.step()
         denom = max(count, 1)
@@ -1375,6 +1535,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             "direct_state_b_loss_weight": direct_state_b_loss_weight,
             "force_aware_b_loss_norm_mse": sums["force_aware_b"] / denom,
             "force_aware_b_loss_weight": force_aware_b_loss_weight,
+            "force_residual_loss_norm_mse": sums["force_residual"] / denom,
+            "force_residual_loss_weight": force_residual_loss_weight,
             "rigid_loss_norm_mse": sums["rigid"] / denom,
             "lr": float(scheduler.get_last_lr()[0]),
             "seconds": time.time() - t0,
@@ -1475,6 +1637,12 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "force_aware_b_weight_mode": str(getattr(args, "force_aware_b_weight_mode", "strain-volume")),
         "force_aware_b_weight_min": float(getattr(args, "force_aware_b_weight_min", 0.1)),
         "force_aware_b_weight_max": float(getattr(args, "force_aware_b_weight_max", 10.0)),
+        "force_residual_loss_weight": force_residual_loss_weight,
+        "force_residual_volume_mode": force_residual_volume_mode,
+        "force_residual_scale_mode": force_residual_scale_mode,
+        "force_residual_elastic_D_sources": elastic_d_sources,
+        "force_residual_scale_min": float(np.min(force_residual_scale)),
+        "force_residual_scale_max": float(np.max(force_residual_scale)),
         "q_dim": 48,
         "rigid_modes_removed_from_input": False,
         "fine_grid_geometry_visible": False,
@@ -1539,6 +1707,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--force-aware-b-weight-mode", default="strain-volume", choices=["strain-volume"])
     p.add_argument("--force-aware-b-weight-min", type=float, default=0.1)
     p.add_argument("--force-aware-b-weight-max", type=float, default=10.0)
+    p.add_argument("--force-residual-loss-weight", type=float, default=0.0)
+    p.add_argument("--force-residual-volume-mode", default="hat", choices=["hat"])
+    p.add_argument("--force-residual-scale-mode", default="component-rms", choices=["component-rms"])
+    p.add_argument("--force-residual-scale-floor-rel", type=float, default=2.0e-2)
+    p.add_argument("--force-residual-scale-floor-abs", type=float, default=1.0e-8)
     p.add_argument("--physical-b-loss-floor-rel", type=float, default=2.0e-2)
     p.add_argument("--physical-b-loss-floor-abs", type=float, default=1.0e-8)
     p.add_argument("--rigid-loss-weight", type=float, default=0.1)

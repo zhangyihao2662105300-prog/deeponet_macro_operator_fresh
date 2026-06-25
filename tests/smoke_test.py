@@ -57,6 +57,7 @@ from macro_deeponet.train_true176_generic_sobolev import (
 )
 from macro_deeponet.train_macro16_boundary_sobolev import (
     build_physical_b_loss_scale,
+    explicit_state_b_force_residual_loss,
     explicit_state_b_physical_balanced_loss,
     explicit_state_b_force_aware_loss,
     force_aware_b_loss_from_j_norm,
@@ -89,6 +90,7 @@ from audit_macro16_trained_force_closure import map_source_path, parse_path_map
 from plan_macro16_source128_generality_audit import build_plan as build_macro16_source128_generality_plan
 import prepare_macro16_source128_distortion_tasks as prepare_macro16_distortion_tasks
 from fit_macro16_point_b_prior import run as run_macro16_point_b_prior
+from enrich_macro16_compact_elastic_d import run as run_macro16_elastic_d_enrich
 from run_v1_2_pilot_case041_fresh_abaqus import assert_linear_frames as assert_pilot_linear_frames
 
 
@@ -538,6 +540,134 @@ def test_macro16_j_norm_to_physical_b_formula_and_balanced_loss() -> None:
     assert float(loss1) > 0.0
 
 
+def test_macro16_loader_reads_elastic_d() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        compact = root / "case001_macro16_elastic_d.npz"
+        point_table = macro16_source128_point_table()
+        n = 3
+        x16 = macro16_flat_x16()
+        q = np.zeros((n, 48), dtype=np.float32)
+        b = np.zeros((n, point_table.xi.shape[0], 6, 48), dtype=np.float32)
+        le = np.zeros((n, point_table.xi.shape[0], 6), dtype=np.float32)
+        elastic_d = np.eye(6, dtype=np.float32)
+        elastic_d[0, 0] = 7.0
+        np.savez(
+            compact,
+            X16_raw=np.broadcast_to(x16.reshape(1, 16, 3), (n, 16, 3)).astype(np.float32),
+            q48_def_hat=q,
+            LE_macro=le,
+            B_macro_qdef=b,
+            macro16_point_xi=point_table.xi.astype(np.float32),
+            integration_weight_hat=np.ones((n, point_table.xi.shape[0]), dtype=np.float32),
+            elastic_D=elastic_d,
+            case_id=np.asarray([1, 1, 2], dtype=np.int64),
+        )
+        data = load_macro16_compacts(
+            [str(compact)],
+            point_table=macro16_standard_point_table(plane_order=4, thickness_order=4),
+        )
+        assert data.elastic_d.shape == (n, 6, 6)
+        assert np.allclose(data.elastic_d[:, 0, 0], 7.0)
+        assert data.point_meta["elastic_D_source"] == "elastic_D"
+
+
+def test_macro16_force_residual_loss_zero_for_teacher_force() -> None:
+    n, p = 2, 4
+    x_norm = torch.zeros(n, 97)
+    point_norm = torch.zeros(n, p, 3)
+    pred_norm = torch.zeros(n, p, 6)
+    le_true_norm = torch.zeros(n, p, 6)
+    j_target = torch.zeros(n, p, 6, 48)
+    j_target[:, :, 0, 0] = 0.5
+    weights = torch.ones(n, p)
+    elastic_d = torch.eye(6).reshape(1, 6, 6).repeat(n, 1, 1)
+    le_std = torch.ones(1, p, 6)
+    q_std = torch.ones(48)
+    force_scale = torch.ones(48)
+
+    class DummyStateB(torch.nn.Module):
+        def _state_b_norm(self, _x: torch.Tensor, _p: torch.Tensor) -> torch.Tensor:
+            return j_target
+
+    loss0 = explicit_state_b_force_residual_loss(
+        DummyStateB(),
+        x_norm,
+        point_norm,
+        pred_norm,
+        j_target,
+        le_true_norm,
+        weights,
+        elastic_d,
+        le_std_scale=le_std.reshape(1, p, 6, 1),
+        le_mean=torch.zeros(1, p, 6),
+        le_std=le_std,
+        q_std_cols=q_std,
+        columns=list(range(48)),
+        force_scale_cols=force_scale,
+    )
+    assert float(loss0) == 0.0
+
+    loss1 = explicit_state_b_force_residual_loss(
+        DummyStateB(),
+        x_norm,
+        point_norm,
+        pred_norm + 0.1,
+        j_target,
+        le_true_norm,
+        weights,
+        elastic_d,
+        le_std_scale=le_std.reshape(1, p, 6, 1),
+        le_mean=torch.zeros(1, p, 6),
+        le_std=le_std,
+        q_std_cols=q_std,
+        columns=list(range(48)),
+        force_scale_cols=force_scale,
+    )
+    assert float(loss1) > 0.0
+
+
+def test_macro16_enrich_compact_copies_source_elastic_d() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        source = root / "complete_case001.npz"
+        compact = root / "case001_macro16_no_elastic.npz"
+        out_dir = root / "enriched"
+        point_table = macro16_source128_point_table()
+        n_total = 5
+        rows = np.asarray([1, 3], dtype=np.int64)
+        elastic_d = np.broadcast_to(np.eye(6, dtype=np.float32).reshape(1, 6, 6), (n_total, 6, 6)).copy()
+        elastic_d[:, 1, 1] = np.arange(n_total, dtype=np.float32) + 10.0
+        np.savez(source, q48_raw=np.zeros((n_total, 48), dtype=np.float32), elastic_D=elastic_d)
+        np.savez(
+            compact,
+            X16_raw=np.broadcast_to(macro16_flat_x16().reshape(1, 16, 3), (rows.size, 16, 3)).astype(np.float32),
+            q48_def_hat=np.zeros((rows.size, 48), dtype=np.float32),
+            LE_macro=np.zeros((rows.size, point_table.xi.shape[0], 6), dtype=np.float32),
+            B_macro_qdef=np.zeros((rows.size, point_table.xi.shape[0], 6, 48), dtype=np.float32),
+            macro16_point_xi=point_table.xi.astype(np.float32),
+            integration_weight_hat=np.ones((rows.size, point_table.xi.shape[0]), dtype=np.float32),
+            source_compact=np.asarray(str(source), dtype=object),
+            source_row=rows,
+        )
+        summary = run_macro16_elastic_d_enrich(
+            SimpleNamespace(
+                compact=[str(compact)],
+                compact_list="",
+                out_dir=str(out_dir),
+                in_place=False,
+                summary_out="",
+                source_path_map=[],
+            )
+        )
+        enriched = Path(summary["items"][0]["out"])
+        with np.load(str(enriched), allow_pickle=True) as z:
+            got = np.asarray(z["elastic_D"], dtype=np.float32)
+            assert got.shape == (2, 6, 6)
+            assert np.allclose(got[:, 1, 1], [11.0, 13.0])
+            assert "LE_macro" in z.files
+
+
 def test_macro16_training_smoke_runs_one_epoch() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -823,6 +953,8 @@ def test_macro16_fixed128_state_b_training_checkpoint_loads_for_force_audit() ->
         b[:, :, 1, 1] = -0.1
         b[:, :, 2, 2] = 0.05 + 0.25 * q48[:, None, 0]
         le = np.einsum("npaj,nj->npa", b, q48).astype(np.float32)
+        elastic_d = np.eye(6, dtype=np.float32)
+        elastic_d[0, 0] = 2.0
         np.savez(
             compact,
             standard_operator_contract_version=np.asarray(MACRO16_CONTRACT_VERSION, dtype=object),
@@ -831,6 +963,7 @@ def test_macro16_fixed128_state_b_training_checkpoint_loads_for_force_audit() ->
             LE_macro=le,
             B_macro=b,
             macro16_point_xi=macro16_source128_point_table().xi.astype(np.float32),
+            elastic_D=elastic_d,
             case_id=np.asarray([1, 1, 2, 2], dtype=np.int64),
         )
         args = SimpleNamespace(
@@ -882,6 +1015,11 @@ def test_macro16_fixed128_state_b_training_checkpoint_loads_for_force_audit() ->
             force_aware_b_weight_mode="strain-volume",
             force_aware_b_weight_min=0.1,
             force_aware_b_weight_max=10.0,
+            force_residual_loss_weight=0.25,
+            force_residual_volume_mode="hat",
+            force_residual_scale_mode="component-rms",
+            force_residual_scale_floor_rel=0.02,
+            force_residual_scale_floor_abs=1.0e-8,
             physical_b_loss_floor_rel=0.02,
             physical_b_loss_floor_abs=1.0e-8,
             rigid_loss_weight=0.0,
@@ -903,7 +1041,10 @@ def test_macro16_fixed128_state_b_training_checkpoint_loads_for_force_audit() ->
         assert summary["model_style"] == "macro16-boundary-deeponet-with-le0-fixed128-state-b"
         assert summary["state_b"]["has_static_b_norm"] is True
         assert summary["force_aware_b_loss_weight"] == 0.5
+        assert summary["force_residual_loss_weight"] == 0.25
+        assert summary["force_residual_elastic_D_sources"] == ["elastic_D"]
         assert summary["latest_report"]["force_aware_b_loss_norm_mse"] >= 0.0
+        assert summary["latest_report"]["force_residual_loss_norm_mse"] >= 0.0
         checkpoint = torch.load(Path(summary["latest_checkpoint"]), map_location="cpu", weights_only=False)
         loaded = make_trained_macro16_force_model(
             checkpoint,

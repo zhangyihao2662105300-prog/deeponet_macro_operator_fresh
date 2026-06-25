@@ -97,6 +97,7 @@ fixed parent integration points.
 | Gate 25 force error diagnosis | diagnosis PASS, training release FAIL | `reports/25_force_error_diagnosis.md`; Gate 24 lowers LE/B rel but worsens force. Error is concentrated in the largest-q frame, shifts from Gate 23 G13 dominance to Gate 24 E11 dominance, and shows force magnitude underprediction. Next step is force-weighted B loss planning. |
 | Gate 26 force weighted loss plan | PLAN PASS | `reports/26_force_weighted_loss_plan.md`; proposes first implementing a non-default `force-aware-b-loss-weight` using `abs(LE_true) * integration_weight_hat` as a strain-volume proxy, then running three Linux rank12 small experiments. No training release yet. |
 | Gate 27 force aware B loss smoke | FAIL | `reports/27_force_aware_b_loss_smoke.md`; default-off strain-volume force-aware B loss is implemented and tested, but Linux small training best force rel is `0.1149584190`, worse than Gate 23 best `0.1073731865`. Large training remains blocked. |
+| Gate 28 force residual loss plan | PLAN PASS | `reports/28_force_residual_loss_plan.md`; plans a true force residual loss using `F = sum(B * D * LE * dV)`, with `elastic_D` added to Macro16 training data via compact enrichment before training. No training release yet. |
 
 Training is allowed only within the limited LE/B release boundary.
 
@@ -168,6 +169,9 @@ Current verified or adopted conclusions:
 - Gate 27 implements that default-off strain-volume proxy loss and runs Linux
   three-way small training. The code works, but the best force rel is
   `0.1149584190`, so the proxy does not improve on Gate 23.
+- Gate 28 records the next route: add `elastic_D` to the training data and use
+  teacher assembled force residual loss, still keeping selected-frame Abaqus RF
+  as the post-training audit rather than the first training target.
 
 ## Pending Issues That Are Not Data Errors
 
@@ -204,6 +208,9 @@ data is bad:
 - Gate 27 shows the first strain-volume proxy is insufficient. The next step
   should either implement a true force residual loss or diagnose why the proxy
   weighting does not match the actual force error contribution.
+- Gate 28 is a plan only. It requires Gate 29 implementation of compact
+  `elastic_D` enrichment, loader expansion, and a default-off force residual
+  loss before any new Linux training.
 
 These issues must not be hidden inside network training as if a network could
 repair a definition mismatch. They do not block the limited LE/B training

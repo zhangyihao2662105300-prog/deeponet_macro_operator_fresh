@@ -104,6 +104,7 @@ fixed parent integration points.
 | Gate 32 wind shell diagnosis | DIAGNOSIS PASS | `reports/32_wind_shell_generalization_diagnosis.md`; teacher force is good, data is not bad, wind shell branch input is strongly out of distribution, and `case060` is a near-zero-force special sample. |
 | Gate 33 branch outlier columns | DIAGNOSIS PASS | `reports/33_branch_outlier_columns_diagnosis.md`; the largest branch outlier comes from `X16_hat_z`, especially `case073` columns such as `X01_z`, because train-split per-column geometry std is about `1.0e-08`. |
 | Gate 34 branch normalization replay | REPLAY PASS | `reports/34_branch_normalization_replay.md`; normalization-only replay shows `X16_hat` std floor `0.05` reduces wind branch max from about `2.2546e6` to `48.56` and is the minimum passing candidate. |
+| Gate 35 branch X16 std floor training | TRAINING FAIL | `reports/35_branch_x16_std_floor_training.md`; guarded `--branch-x16-std-floor 0.05` is implemented and tested, but the Linux small training still fails selected-frame force audit on wind shell validation cases. |
 
 Training is allowed only within the limited LE/B release boundary.
 
@@ -193,6 +194,10 @@ Current verified or adopted conclusions:
 - Gate 34 shows a guarded `X16_hat` std floor fixes the input-scale explosion
   in replay. This does not prove force closure; it only clears the next safe
   normalization candidate.
+- Gate 35 shows the std floor alone does not solve wind shell generalization.
+  Teacher force still closes, but trained model force remains far above the
+  gate. This points to a geometry-family split problem or missing wind-shell
+  representation, not only input scaling.
 
 ## Pending Issues That Are Not Data Errors
 
@@ -297,12 +302,12 @@ Required after training:
 Recommended next tasks, in order:
 
 1. Keep material-only K diagnostics separate from full tangent claims.
-2. Implement a guarded `--branch-x16-std-floor` training option with default old
-   behavior.
-3. Run a Linux small training with `--branch-x16-std-floor 0.05`.
-4. Rerun selected-frame force audit on the trained checkpoint.
-5. Decide from force audit, not training loss, whether the normalization fix is
-   useful.
+2. Run Gate 36 wind-shell in-split small training.
+3. Put some wind shell cases in train and hold one wind shell case out for
+   validation.
+4. Keep `--branch-x16-std-floor 0.05` active.
+5. Decide from selected-frame force audit whether wind shell failure is pure
+   OOD split or a model-capacity/loss issue.
 
 ## Currently Forbidden
 

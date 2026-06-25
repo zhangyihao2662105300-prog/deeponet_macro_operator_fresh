@@ -42,6 +42,10 @@ Gate 34 update: normalization replay passed with `X16_hat` std floor `0.05`.
 The next allowed training is only a small Linux test with an explicit guarded
 normalization option, followed by selected-frame force audit.
 
+Gate 35 update: guarded `--branch-x16-std-floor 0.05` implementation passed
+tests, but the Linux small training failed force audit. Do not continue the
+same OOD split training; next step is wind-shell in-split diagnosis.
+
 This checklist defines what must be true before network training is allowed.
 It does not start training, change the model, or modify the data contract.
 
@@ -101,6 +105,8 @@ Current status:
   not larger training.
 - Gate 34: normalization replay passed; next step is guarded implementation and
   small Linux training, not larger training.
+- Gate 35: guarded std-floor training failed force audit; next step is
+  wind-shell in-split small diagnosis, not larger training.
 
 Do not treat this as a full tangent or solver-readiness release.
 
@@ -149,6 +155,9 @@ be treated as proof that the data is corrupt:
   standardization, not in `q48_def_hat`, `LE`, `B`, or the 128 point rule.
 - Gate 34 confirms `X16_hat` std floor `0.05` fixes the input-scale explosion
   in replay, but it does not prove trained force closure.
+- Gate 35 confirms the normalization fix alone is insufficient. The failure is
+  now more likely an out-of-distribution geometry-family split or model/loss
+  issue.
 
 These issues no longer block the limited LE/B training release, but they remain
 unresolved mechanics items and are not the same as q48 ordering corruption, LE
@@ -265,3 +274,4 @@ Not allowed by this checklist:
 - Ignore Gate 31 failure and continue training before Gate 32 diagnosis.
 - Continue training before Gate 34 resolves or tests branch normalization.
 - Treat Gate 34 replay as a trained model pass.
+- Repeat the same Gate 35 OOD split training and hope more epochs fix it.

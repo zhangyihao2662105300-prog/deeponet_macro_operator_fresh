@@ -217,7 +217,11 @@ def make_train_args(args: argparse.Namespace | SimpleNamespace, subset_list: Pat
         branch_depth=int(getattr(args, "branch_depth", 3)),
         trunk_depth=int(getattr(args, "trunk_depth", 3)),
         activation=str(getattr(args, "activation", "tanh")),
+        model_style=str(getattr(args, "model_style", "le0")),
         residual_scale=float(getattr(args, "residual_scale", 1.0)),
+        le0_scale=float(getattr(args, "le0_scale", 1.0)),
+        freeze_le0_static=bool(getattr(args, "freeze_le0_static", False)),
+        freeze_le0_point=bool(getattr(args, "freeze_le0_point", False)),
         fe_baseline_scale=float(getattr(args, "fe_baseline_scale", 1.0)),
         freeze_fe_point_baseline=bool(getattr(args, "freeze_fe_point_baseline", False)),
         freeze_skip=bool(getattr(args, "freeze_skip", False)),
@@ -351,7 +355,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--branch-depth", type=int, default=3)
     p.add_argument("--trunk-depth", type=int, default=3)
     p.add_argument("--activation", default="tanh")
+    p.add_argument("--model-style", default="le0", choices=["le0", "zero-anchor"])
     p.add_argument("--residual-scale", type=float, default=1.0)
+    p.add_argument("--le0-scale", type=float, default=1.0)
+    p.add_argument("--freeze-le0-static", action="store_true")
+    p.add_argument("--freeze-le0-point", action="store_true")
     p.add_argument("--fe-baseline-scale", type=float, default=1.0)
     p.add_argument("--freeze-fe-point-baseline", action="store_true")
     p.add_argument("--freeze-skip", action="store_true")

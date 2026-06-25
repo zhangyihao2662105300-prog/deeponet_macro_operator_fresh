@@ -664,6 +664,196 @@ class Macro16BoundaryDeepONet(QueryFEAnchoredLinearResidualDeepONet):
         )
 
 
+class QueryFELE0LinearResidualDeepONet(QueryFEAnchoredLinearResidualDeepONet):
+    """Query FE-linear residual model with a q-independent LE0 field.
+
+    The normalized strain is written as
+
+        LE_norm = LE0_norm(point)
+                  + B_base_norm(point) @ (q_norm - q0_norm)
+                  + gate(q_raw) * (R(q_norm, point) - R(q0_norm, point)).
+
+    ``LE0_norm`` depends on point features only, so its derivative with respect
+    to q is zero and the Sobolev B target remains the derivative of the
+    q-dependent part.
+    """
+
+    supports_dynamic_points = True
+    le0_head = True
+
+    def __init__(
+        self,
+        *,
+        input_dim: int,
+        point_dim: int,
+        q_start: int,
+        q_dim: int = 48,
+        ip_count: int = 0,
+        strain_dim: int = 6,
+        basis_dim: int = 96,
+        hidden_dim: int = 384,
+        branch_depth: int = 5,
+        trunk_depth: int = 5,
+        activation: str = "tanh",
+        skip_init: torch.Tensor | None = None,
+        train_skip: bool = True,
+        residual_scale: float = 1.0,
+        baseline_scale: float = 1.0,
+        train_point_baseline: bool = True,
+        zero_init_residual: bool = True,
+        q_zero_norm: torch.Tensor | None = None,
+        q_raw_mean: torch.Tensor | None = None,
+        q_raw_std: torch.Tensor | None = None,
+        gate_q0: float = 0.0,
+        le0_init_norm: torch.Tensor | None = None,
+        le0_scale: float = 1.0,
+        train_le0_static: bool = True,
+        train_le0_point: bool = True,
+    ) -> None:
+        super().__init__(
+            input_dim=input_dim,
+            point_dim=point_dim,
+            q_start=q_start,
+            q_dim=q_dim,
+            ip_count=ip_count,
+            strain_dim=strain_dim,
+            basis_dim=basis_dim,
+            hidden_dim=hidden_dim,
+            branch_depth=branch_depth,
+            trunk_depth=trunk_depth,
+            activation=activation,
+            skip_init=skip_init,
+            train_skip=train_skip,
+            residual_scale=residual_scale,
+            baseline_scale=baseline_scale,
+            train_point_baseline=train_point_baseline,
+            zero_init_residual=zero_init_residual,
+            q_zero_norm=q_zero_norm,
+            le_zero_norm=torch.zeros(strain_dim, dtype=torch.float32),
+            q_raw_mean=q_raw_mean,
+            q_raw_std=q_raw_std,
+            gate_q0=gate_q0,
+        )
+        act = activation_module(activation)
+        self.le0_scale = float(le0_scale)
+        self.point_le0_net = MLP(
+            self.point_dim,
+            self.strain_dim,
+            hidden_dim=hidden_dim,
+            depth=trunk_depth,
+            activation=act,
+            zero_last=True,
+        )
+        for p in self.point_le0_net.parameters():
+            p.requires_grad_(bool(train_le0_point))
+
+        if le0_init_norm is None:
+            rows = max(1, int(ip_count))
+            static = torch.zeros(rows, self.strain_dim, dtype=torch.float32)
+        else:
+            static = torch.as_tensor(le0_init_norm, dtype=torch.float32)
+            if static.shape == (self.strain_dim,):
+                static = static.reshape(1, self.strain_dim)
+            elif static.ndim != 2 or static.shape[-1] != self.strain_dim:
+                raise ValueError(f"le0_init_norm must have shape [6], [1,6], or [P,6], got {tuple(static.shape)}")
+        self.static_le0_norm = nn.Parameter(static, requires_grad=bool(train_le0_static))
+
+    def _le0_norm(self, point_norm: torch.Tensor) -> torch.Tensor:
+        if point_norm.ndim != 3:
+            raise ValueError("point_norm must have shape [B,P,F]")
+        batch, point_count, _ = point_norm.shape
+        delta = self.point_le0_net(point_norm.reshape(-1, self.point_dim)).view(batch, point_count, self.strain_dim)
+        static = self.static_le0_norm.to(dtype=point_norm.dtype, device=point_norm.device)
+        if static.shape[0] == 1:
+            base = static.view(1, 1, self.strain_dim)
+        elif static.shape[0] == point_count:
+            base = static.view(1, point_count, self.strain_dim)
+        else:
+            base = torch.mean(static, dim=0, keepdim=True).view(1, 1, self.strain_dim)
+        return base + self.le0_scale * delta
+
+    def forward(self, x_norm: torch.Tensor, point_norm: torch.Tensor) -> torch.Tensor:
+        if x_norm.ndim != 2:
+            raise ValueError(f"x_norm must have shape [B,{self.input_dim}]")
+        if point_norm.ndim != 3:
+            raise ValueError("point_norm must have shape [B,P,F]")
+        if x_norm.shape[-1] != self.input_dim:
+            raise ValueError(f"x_norm last dimension must be {self.input_dim}")
+        if point_norm.shape[-1] != self.point_dim:
+            raise ValueError(f"point_norm last dimension must be {self.point_dim}")
+        if point_norm.shape[0] != x_norm.shape[0]:
+            raise ValueError("x_norm and point_norm batch dimensions must match")
+
+        qn = x_norm[:, self.q_start : self.q_start + self.q_dim]
+        b_base = self._linear_b_norm(point_norm)
+        q0 = self.q_zero_norm.to(dtype=x_norm.dtype, device=x_norm.device).view(1, self.q_dim)
+        linear = torch.einsum("bpaj,bj->bpa", b_base, qn - q0)
+        return self._le0_norm(point_norm) + linear + self.residual_offset_norm(x_norm, point_norm)
+
+
+class Macro16BoundaryDeepONetWithLE0(QueryFELE0LinearResidualDeepONet):
+    """Macro16 boundary operator with a q-independent initial strain field."""
+
+    macro16_contract = "v4-macro16-boundary-operator-001"
+
+    def __init__(
+        self,
+        *,
+        input_dim: int = 99,
+        point_dim: int,
+        q_start: int = 0,
+        q_dim: int = 48,
+        ip_count: int = 0,
+        strain_dim: int = 6,
+        basis_dim: int = 96,
+        hidden_dim: int = 384,
+        branch_depth: int = 5,
+        trunk_depth: int = 5,
+        activation: str = "tanh",
+        skip_init: torch.Tensor | None = None,
+        train_skip: bool = True,
+        residual_scale: float = 1.0,
+        baseline_scale: float = 1.0,
+        train_point_baseline: bool = True,
+        zero_init_residual: bool = True,
+        q_zero_norm: torch.Tensor | None = None,
+        q_raw_mean: torch.Tensor | None = None,
+        q_raw_std: torch.Tensor | None = None,
+        gate_q0: float = 0.0,
+        le0_init_norm: torch.Tensor | None = None,
+        le0_scale: float = 1.0,
+        train_le0_static: bool = True,
+        train_le0_point: bool = True,
+    ) -> None:
+        super().__init__(
+            input_dim=input_dim,
+            point_dim=point_dim,
+            q_start=q_start,
+            q_dim=q_dim,
+            ip_count=ip_count,
+            strain_dim=strain_dim,
+            basis_dim=basis_dim,
+            hidden_dim=hidden_dim,
+            branch_depth=branch_depth,
+            trunk_depth=trunk_depth,
+            activation=activation,
+            skip_init=skip_init,
+            train_skip=train_skip,
+            residual_scale=residual_scale,
+            baseline_scale=baseline_scale,
+            train_point_baseline=train_point_baseline,
+            zero_init_residual=zero_init_residual,
+            q_zero_norm=q_zero_norm,
+            q_raw_mean=q_raw_mean,
+            q_raw_std=q_raw_std,
+            gate_q0=gate_q0,
+            le0_init_norm=le0_init_norm,
+            le0_scale=le0_scale,
+            train_le0_static=train_le0_static,
+            train_le0_point=train_le0_point,
+        )
+
+
 class NOEMStyleMIONet(nn.Module):
     """NOEM/MIONet-style TRUE176 operator model.
 

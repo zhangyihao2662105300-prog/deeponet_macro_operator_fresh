@@ -32,7 +32,7 @@ from .macro16_geometry import (
     build_macro16_feature_batch,
     macro16_standard_point_table,
 )
-from .models import Macro16BoundaryDeepONet
+from .models import Macro16BoundaryDeepONet, Macro16BoundaryDeepONetWithLE0
 from .train_true176_deeponet_sobolev import ad_jacobian, cos_np, rel_np, write_json
 from .true176_data import stats
 
@@ -401,6 +401,28 @@ def parse_int_list(text: str) -> list[int]:
     return [int(v) for v in raw.replace(";", ",").split(",") if v.strip()]
 
 
+def model_style_key(value: str) -> str:
+    key = str(value).strip().lower().replace("_", "-")
+    aliases = {
+        "anchored": "zero-anchor",
+        "zero": "zero-anchor",
+        "zero-anchored": "zero-anchor",
+        "macro16-boundary-deeponet": "zero-anchor",
+        "le0": "le0",
+        "with-le0": "le0",
+        "le0-linear": "le0",
+        "le0-linear-residual": "le0",
+        "macro16-boundary-deeponet-with-le0": "le0",
+    }
+    return aliases.get(key, key)
+
+
+def norm_ratio_np(num: np.ndarray, den: np.ndarray) -> float:
+    num_flat = np.asarray(num, dtype=np.float64).reshape(-1)
+    den_flat = np.asarray(den, dtype=np.float64).reshape(-1)
+    return float(np.linalg.norm(num_flat) / max(float(np.linalg.norm(den_flat)), 1.0e-300))
+
+
 def evaluate(
     model: nn.Module,
     *,
@@ -493,6 +515,9 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     skip_init = np.mean(j_norm_target[train_idx], axis=0).astype(np.float32)
     if bool(args.global_b_prior):
         skip_init = np.mean(skip_init, axis=0)
+    le0_star = data.le - np.einsum("npaj,nj->npa", data.b, data.q48_hat)
+    le0_init_norm = ((le0_star[train_idx] - le_mean) / le_std).astype(np.float32)
+    le0_init_norm = np.mean(le0_init_norm, axis=0).astype(np.float32)
     norms = {
         "branch_mean": branch_mean.astype(np.float32),
         "branch_std": branch_std.astype(np.float32),
@@ -506,7 +531,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
 
     train_set = Macro16Dataset(branch_norm, point_norm, le_norm, j_norm_target, data.weights, train_idx)
     train_loader = DataLoader(train_set, batch_size=int(args.batch_size), shuffle=True, drop_last=False)
-    model = Macro16BoundaryDeepONet(
+    style = model_style_key(getattr(args, "model_style", "le0"))
+    common_model_kwargs = dict(
         input_dim=int(branch_norm.shape[-1]),
         point_dim=int(point_norm.shape[-1]),
         ip_count=int(point_norm.shape[1]),
@@ -523,11 +549,29 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         baseline_scale=float(args.fe_baseline_scale),
         train_point_baseline=not bool(args.freeze_fe_point_baseline),
         q_zero_norm=((0.0 - branch_mean.reshape(-1)[:48]) / branch_std.reshape(-1)[:48]).astype(np.float32),
-        le_zero_norm=((0.0 - le_mean) / le_std).astype(np.float32),
         q_raw_mean=branch_mean.reshape(-1)[:48].astype(np.float32),
         q_raw_std=branch_std.reshape(-1)[:48].astype(np.float32),
         gate_q0=float(args.anchored_residual_gate_q0),
-    ).to(device)
+    )
+    if style == "zero-anchor":
+        model = Macro16BoundaryDeepONet(
+            **common_model_kwargs,
+            le_zero_norm=((0.0 - le_mean) / le_std).astype(np.float32),
+        ).to(device)
+        model_meta_style = "macro16-boundary-deeponet-zero-anchor"
+        rigid_loss_target = "LE(q_rigid) ~= 0"
+    elif style == "le0":
+        model = Macro16BoundaryDeepONetWithLE0(
+            **common_model_kwargs,
+            le0_init_norm=torch.as_tensor(le0_init_norm, dtype=torch.float32),
+            le0_scale=float(getattr(args, "le0_scale", 1.0)),
+            train_le0_static=not bool(getattr(args, "freeze_le0_static", False)),
+            train_le0_point=not bool(getattr(args, "freeze_le0_point", False)),
+        ).to(device)
+        model_meta_style = "macro16-boundary-deeponet-with-le0"
+        rigid_loss_target = "LE(q_rigid) - LE(0) ~= 0"
+    else:
+        raise ValueError("model_style must be le0 or zero-anchor")
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(args.lr), weight_decay=float(args.weight_decay))
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=float(args.lr_decay))
     columns_all = parse_int_list(str(args.jacobian_columns))
@@ -555,11 +599,24 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             "point_meta": data.point_meta,
             "point_feature_names": data.point_meta.get("point_feature_names", []),
             "model_meta": {
-                "model_style": "macro16-boundary-deeponet",
+                "model_style": model_meta_style,
                 "input_dim": int(branch_norm.shape[-1]),
                 "point_dim": int(point_norm.shape[-1]),
                 "ip_count": int(point_norm.shape[1]),
                 "ad_target": "dLE/dq48_hat",
+                "le0_enabled": bool(style == "le0"),
+                "le0_init_definition": "mean_train((LE_macro - B_macro @ q48_hat - LE_mean) / LE_std)",
+                "le0_star_train_norm_rel_to_LE": norm_ratio_np(le0_star[train_idx], data.le[train_idx]),
+                "le0_star_val_norm_rel_to_LE": norm_ratio_np(le0_star[val_idx], data.le[val_idx]),
+                "le0_star_train_centered_rel_to_LE_centered": norm_ratio_np(
+                    le0_star[train_idx] - np.mean(le0_star[train_idx], axis=0, keepdims=True),
+                    data.le[train_idx] - le_mean,
+                ),
+                "le0_star_val_centered_rel_to_LE_centered": norm_ratio_np(
+                    le0_star[val_idx] - np.mean(le0_star[train_idx], axis=0, keepdims=True),
+                    data.le[val_idx] - le_mean,
+                ),
+                "rigid_loss_target": rigid_loss_target,
             },
         },
     )
@@ -597,8 +654,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 rigid_branch = xb.detach().clone()
                 rigid_branch[:, :48] = torch.as_tensor((q_rigid - q_mean) / q_scale, dtype=xb.dtype, device=device)
                 rigid_pred = model(rigid_branch, pb)
-                rigid_zero = torch.as_tensor((0.0 - le_mean) / le_std, dtype=xb.dtype, device=device)
-                rigid_loss = nn.functional.mse_loss(rigid_pred, rigid_zero.expand_as(rigid_pred))
+                zero_branch = xb.detach().clone()
+                zero_branch[:, :48] = torch.as_tensor((0.0 - q_mean) / q_scale, dtype=xb.dtype, device=device)
+                zero_pred = model(zero_branch, pb)
+                rigid_loss = nn.functional.mse_loss(rigid_pred, zero_pred)
             loss = float(args.le_loss_weight) * le_loss + float(args.jacobian_loss_weight) * j_loss + float(args.rigid_loss_weight) * rigid_loss
             loss.backward()
             if float(args.grad_clip) > 0.0:
@@ -667,6 +726,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                         "point_meta": data.point_meta,
                         "validation_split": split_meta,
                         "best_report": best_report,
+                        "model_style": model_meta_style,
                     },
                     out_dir / "best.pt",
                 )
@@ -681,6 +741,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 "validation_split": split_meta,
                 "latest_report": row,
                 "best_report": best_report,
+                "model_style": model_meta_style,
             },
             out_dir / "latest.pt",
         )
@@ -697,6 +758,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "best_checkpoint": str(out_dir / "best.pt"),
         "latest_checkpoint": str(out_dir / "latest.pt"),
         "model_visible_inputs": ["q48_hat", "X16_hat", "macro16_point_features_hat"],
+        "model_style": model_meta_style,
         "q_dim": 48,
         "rigid_modes_removed_from_input": False,
         "fine_grid_geometry_visible": False,
@@ -725,7 +787,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--branch-depth", type=int, default=5)
     p.add_argument("--trunk-depth", type=int, default=5)
     p.add_argument("--activation", default="tanh")
+    p.add_argument("--model-style", default="le0", choices=["le0", "zero-anchor"])
     p.add_argument("--residual-scale", type=float, default=1.0)
+    p.add_argument("--le0-scale", type=float, default=1.0)
+    p.add_argument("--freeze-le0-static", action="store_true")
+    p.add_argument("--freeze-le0-point", action="store_true")
     p.add_argument("--fe-baseline-scale", type=float, default=1.0)
     p.add_argument("--freeze-fe-point-baseline", action="store_true")
     p.add_argument("--freeze-skip", action="store_true")

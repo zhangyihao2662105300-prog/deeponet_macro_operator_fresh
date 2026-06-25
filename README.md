@@ -492,6 +492,13 @@ The audit also reports `LE0_star = LE_macro - B_macro @ q48`; a large value is
 evidence that the labels are not a zero-anchored `LE=Bq` response and may
 conflict with a model that forces `q=0` to zero strain.
 
+The Macro16 trainer defaults to `--model-style le0`, which writes the model as
+`LE(q,X,ip)=LE0(X,ip)+DeltaLE(q,X,ip)`.  The `LE0` term is initialized from the
+training-set mean of `LE_macro - B_macro @ q48`, and it is independent of q, so
+it does not contribute to the AD B target.  The rigid-mode loss is therefore a
+relative constraint, `LE(q_rigid)-LE(0)≈0`.  Use `--model-style zero-anchor`
+only as an old-route ablation.
+
 Windows smoke run:
 
 ```powershell

@@ -28,6 +28,7 @@ from macro_deeponet.macro16_geometry import (
 from macro_deeponet.models import (
     FELinearResidualDeepONet,
     Macro16BoundaryDeepONet,
+    Macro16BoundaryDeepONetWithLE0,
     MacroDeepONet,
     NOEMStyleMIONet,
     QueryFEAnchoredLinearResidualDeepONet,
@@ -188,6 +189,50 @@ def test_macro16_shape_geometry_and_ad_shapes() -> None:
     assert torch.isfinite(j).all()
 
 
+def test_macro16_le0_model_keeps_initial_strain_out_of_ad_b() -> None:
+    point_table = macro16_standard_point_table(plane_order=3, thickness_order=2)
+    x16 = macro16_flat_x16()
+    point, _names, _fields = Macro16GeometryMap(x16).build_point_features(point_table)
+    le0 = torch.zeros((point.shape[0], 6), dtype=torch.float32)
+    le0[:, 2] = torch.linspace(0.1, 0.2, point.shape[0])
+    skip = torch.zeros((6, 48), dtype=torch.float32)
+    skip[0, 0] = 0.25
+    model = Macro16BoundaryDeepONetWithLE0(
+        input_dim=99,
+        point_dim=point.shape[-1],
+        ip_count=point.shape[0],
+        basis_dim=12,
+        hidden_dim=32,
+        branch_depth=2,
+        trunk_depth=2,
+        q_start=0,
+        q_dim=48,
+        skip_init=skip,
+        train_skip=False,
+        residual_scale=0.0,
+        train_point_baseline=False,
+        le0_init_norm=le0,
+        le0_scale=0.0,
+    )
+    x_norm = torch.zeros(2, 99)
+    p_norm = torch.as_tensor(np.broadcast_to(point.reshape(1, *point.shape), (2, *point.shape)).copy(), dtype=torch.float32)
+    out0 = model(x_norm, p_norm)
+    assert torch.allclose(out0[:, :, 2], le0[:, 2].reshape(1, -1), atol=1.0e-6)
+    assert torch.max(torch.abs(out0[:, :, 0])).item() < 1.0e-6
+    x_shift = x_norm.clone()
+    x_shift[:, 0] = 2.0
+    out_shift = model(x_shift, p_norm)
+    assert torch.allclose(out_shift[:, :, 2], out0[:, :, 2], atol=1.0e-6)
+    assert torch.allclose(out_shift[:, :, 0] - out0[:, :, 0], torch.full((2, point.shape[0]), 0.5), atol=1.0e-6)
+    j = ad_jacobian(model, x_norm, p_norm, [0, 1], create_graph=False, method="forward")
+    assert torch.allclose(j[:, :, 0, 0], torch.full((2, point.shape[0]), 0.25), atol=1.0e-6)
+    assert torch.max(torch.abs(j[:, :, 2, :])).item() < 1.0e-6
+    p_query = p_norm[:, :5, :]
+    out_query = model(x_norm, p_query)
+    assert out_query.shape == (2, 5, 6)
+    assert torch.allclose(out_query[:, :, 2], torch.full((2, 5), float(torch.mean(le0[:, 2]))), atol=1.0e-6)
+
+
 def test_macro16_loader_rejects_missing_x16_and_keeps_q48() -> None:
     point_table = macro16_standard_point_table(plane_order=3, thickness_order=2)
     with tempfile.TemporaryDirectory() as tmp:
@@ -298,6 +343,88 @@ def test_macro16_training_smoke_runs_one_epoch() -> None:
         assert summary["fine_grid_geometry_visible"] is False
         assert summary["latest_report"]["rigid_loss_norm_mse"] >= 0.0
         assert Path(summary["latest_checkpoint"]).exists()
+
+
+def test_macro16_training_le0_model_fits_nonzero_initial_strain_prior() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        compact = root / "case001_macro16_le0.npz"
+        out_dir = root / "out"
+        n = 4
+        x16 = macro16_flat_x16()
+        q48 = np.zeros((n, 48), dtype=np.float32)
+        q48[:, 0] = np.asarray([-0.2, 0.1, -0.1, 0.2], dtype=np.float32)
+        q48[:, 1] = np.asarray([0.3, -0.15, 0.15, -0.3], dtype=np.float32)
+        le0 = np.zeros((18, 6), dtype=np.float32)
+        le0[:, 2] = np.linspace(0.01, 0.02, 18, dtype=np.float32)
+        b = np.zeros((n, 18, 6, 48), dtype=np.float32)
+        b[:, :, 0, 0] = 0.2
+        b[:, :, 1, 1] = -0.1
+        le = le0.reshape(1, 18, 6) + np.einsum("npaj,nj->npa", b, q48).astype(np.float32)
+        np.savez(
+            compact,
+            standard_operator_contract_version=np.asarray(MACRO16_CONTRACT_VERSION, dtype=object),
+            q48_raw=q48,
+            X16=x16,
+            LE_macro=le.astype(np.float32),
+            B_macro=b,
+            case_id=np.asarray([1, 1, 2, 2], dtype=np.int64),
+        )
+        args = SimpleNamespace(
+            seed=22,
+            out_dir=out_dir,
+            compact=[str(compact)],
+            compact_list="",
+            plane_gauss_order=3,
+            thickness_gauss_order=2,
+            scale_mode="normalized",
+            b_label_coordinate="auto",
+            epochs=1,
+            batch_size=2,
+            eval_batch_size=2,
+            frame_stride=1,
+            max_frames_per_compact=0,
+            max_eval_frames=4,
+            basis_dim=8,
+            hidden_dim=16,
+            branch_depth=2,
+            trunk_depth=2,
+            activation="tanh",
+            model_style="le0",
+            residual_scale=0.0,
+            le0_scale=0.0,
+            freeze_le0_static=False,
+            freeze_le0_point=True,
+            fe_baseline_scale=1.0,
+            freeze_fe_point_baseline=True,
+            freeze_skip=True,
+            global_b_prior=True,
+            anchored_residual_gate_q0=0.0,
+            le_loss_weight=1.0,
+            jacobian_loss_weight=0.1,
+            rigid_loss_weight=0.0,
+            rigid_mode_scale=0.1,
+            jacobian_columns="0,1",
+            jacobian_columns_per_batch=2,
+            eval_columns="0,1",
+            lr=1.0e-6,
+            lr_decay=1.0,
+            weight_decay=0.0,
+            grad_clip=10.0,
+            val_fraction=0.5,
+            val_cases="2",
+            eval_every=1,
+            cuda=False,
+        )
+        train_macro16_boundary(args)
+        config = json.loads((out_dir / "config.json").read_text(encoding="utf-8"))
+        summary = json.loads((out_dir / "training_summary.json").read_text(encoding="utf-8"))
+        assert config["model_meta"]["le0_enabled"] is True
+        assert config["model_meta"]["le0_star_train_norm_rel_to_LE"] > 0.0
+        assert config["model_meta"]["rigid_loss_target"] == "LE(q_rigid) - LE(0) ~= 0"
+        assert summary["model_style"] == "macro16-boundary-deeponet-with-le0"
+        assert summary["latest_report"]["train_LE_rel"] < 1.0e-5
+        assert summary["latest_report"]["train_AD_B_rel"] < 1.0e-5
 
 
 def test_macro16_detj_rejects_flipped_surface_order() -> None:
@@ -448,6 +575,8 @@ def test_macro16_two_geometry_smoke_script_runs_on_synthetic_compact() -> None:
         assert summary["validation_split"]["val_cases"] == [2]
         train_config = json.loads(Path(summary["training_config"]).read_text(encoding="utf-8"))
         assert train_config["validation_split"]["val_cases"] == [2]
+        assert train_config["model_meta"]["model_style"] == "macro16-boundary-deeponet-with-le0"
+        assert train_config["model_meta"]["rigid_loss_target"] == "LE(q_rigid) - LE(0) ~= 0"
 
 
 def test_macro16_from_128_teacher_builder_writes_v4_contract_only() -> None:

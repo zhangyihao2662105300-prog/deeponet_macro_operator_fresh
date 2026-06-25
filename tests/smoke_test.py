@@ -821,6 +821,92 @@ def test_macro16_force_stiffness_audit_assembles_source_ordered_rf() -> None:
         assert row["plus_Kdq_vs_dF"]["rel"] < 1.0e-6
 
 
+def test_macro16_force_stiffness_audit_reports_source128_candidate() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        source = root / "source128_force.npz"
+        compact = root / "macro16_from_source128.npz"
+        out = root / "force128_audit.json"
+        n = 1
+        p_macro = 2
+        p_source = 128
+        x16 = macro16_flat_x16()
+        q48 = np.zeros((n, 48), dtype=np.float32)
+        elastic_d = np.diag([3.0, 4.0, 5.0, 6.0, 7.0, 8.0]).astype(np.float64)
+        le128 = np.zeros((n, p_source, 6), dtype=np.float64)
+        le128[:, :, 0] = np.linspace(0.1, 0.4, p_source).reshape(1, p_source)
+        le128[:, :, 2] = np.linspace(-0.2, 0.2, p_source).reshape(1, p_source)
+        b128 = np.zeros((n, p_source, 6, 48), dtype=np.float64)
+        b128[:, :, 0, 0] = 0.8
+        b128[:, :, 2, 7] = np.linspace(0.2, 0.5, p_source).reshape(1, p_source)
+        ivol = np.full((1, p_source), 0.01 / p_source, dtype=np.float64)
+        stress128 = np.einsum("ab,nrb->nra", elastic_d, le128)
+        force_macro_order = np.einsum("nraj,nra,nr->nj", b128, stress128, np.broadcast_to(ivol, (n, p_source)))
+        stiffness_macro_order = np.einsum("nraj,ab,nrbk,nr->njk", b128, elastic_d, b128, np.broadcast_to(ivol, (n, p_source)))
+        source_to_macro = np.empty(48, dtype=np.int64)
+        source_to_macro[TRUE176_MACRO_TO_KEEP_FLAT] = np.arange(48, dtype=np.int64)
+        force_source_order = np.zeros_like(force_macro_order)
+        force_source_order[:, TRUE176_MACRO_TO_KEEP_FLAT] = force_macro_order
+        delta = 1.0e-6
+        directions_source = TRUE176_MACRO_TO_KEEP_FLAT.copy()
+        plus_source = np.empty((n, 48, 48), dtype=np.float64)
+        for pos, source_dir in enumerate(directions_source.tolist()):
+            macro_dir = int(source_to_macro[source_dir])
+            plus_macro = force_macro_order + delta * stiffness_macro_order[:, :, macro_dir]
+            plus_source[:, pos, TRUE176_MACRO_TO_KEEP_FLAT] = plus_macro
+        le_macro_bad = np.zeros((n, p_macro, 6), dtype=np.float64)
+        b_macro_bad = np.zeros((n, p_macro, 6, 48), dtype=np.float64)
+        weights_bad = np.ones((n, p_macro), dtype=np.float64)
+        np.savez(
+            source,
+            RF_projected=force_source_order,
+            RF_projected_plus=plus_source,
+            perturb_directions=directions_source,
+            delta=np.asarray(delta, dtype=np.float64),
+            elastic_D=elastic_d,
+            LE128_base=le128,
+            B_LE128_forward=b128,
+            ip_IVOL_abaqus=ivol,
+            IVOL128_inferred_from_DLE=np.broadcast_to(ivol, (n, p_source)),
+        )
+        np.savez_compressed(
+            compact,
+            q48_raw=q48,
+            X16=np.broadcast_to(x16.reshape(1, 16, 3), (n, 16, 3)).astype(np.float32),
+            LE_macro=le_macro_bad.astype(np.float32),
+            B_macro=b_macro_bad.astype(np.float32),
+            integration_weight_hat=weights_bad.astype(np.float32),
+            source_compact=np.asarray(str(source), dtype=object),
+            source_row=np.arange(n, dtype=np.int64),
+            source_node_order=np.asarray("true176-keep", dtype=object),
+            strain_output_coordinate=np.asarray("macro16_local_frame", dtype=object),
+            B_label_q_coordinate=np.asarray("q48_raw", dtype=object),
+        )
+        args = SimpleNamespace(
+            compact=[compact],
+            compact_list=[],
+            compact_glob=[],
+            out=out,
+            case_limit=0,
+            weight_mode="as-stored",
+            max_force_rel=0.0,
+            max_stiffness_rel=0.0,
+            max_macro_stiffness_symmetry_rel=0.0,
+            max_plus_kdq_rel=0.0,
+            max_source_force_rel=0.0,
+            max_source_128_force_rel=0.0,
+            strict=False,
+        )
+        summary = run_macro16_force_stiffness_audit(args)
+        row = summary["compacts"][0]
+        assert row["force"]["rel"] > 0.9
+        source128 = row["candidates"]["source128_ip_volume"]
+        assert source128["available"] is True
+        assert source128["force"]["rel"] < 1.0e-6
+        assert source128["stiffness"]["rel"] < 1.0e-6
+        assert source128["plus_Kdq_vs_dF"]["rel"] < 1.0e-6
+
+
 def test_macro16_from_128_teacher_source_local_mode_uses_local_labels() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)

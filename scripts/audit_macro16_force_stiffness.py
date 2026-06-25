@@ -157,6 +157,14 @@ def source_vectors_to_macro(vals: np.ndarray, source_node_order: str) -> np.ndar
     return arr[..., macro_to_source_order(source_node_order)]
 
 
+def source_stiffness_to_macro(vals: np.ndarray, source_node_order: str) -> np.ndarray:
+    arr = np.asarray(vals, dtype=np.float64)
+    if arr.ndim != 3 or arr.shape[1:] != (48, 48):
+        raise ValueError(f"source stiffness must be [N,48,48], got {arr.shape}")
+    order = macro_to_source_order(source_node_order)
+    return arr[:, order, :][:, :, order]
+
+
 def source_stiffness_to_macro_subset(
     rf_base_source: np.ndarray,
     rf_plus_source: np.ndarray,
@@ -256,9 +264,13 @@ def load_source(path: Path, rows: np.ndarray) -> dict[str, Any]:
                 out["perturb_directions"] = np.arange(rf_plus.shape[1], dtype=np.int64)
         if "F_DLE_IVOL" in z.files:
             out["F_DLE_IVOL"] = row_select_or_broadcast(np.asarray(z["F_DLE_IVOL"], dtype=np.float64), rows, (48,), "F_DLE_IVOL")
-        if {"LE128_base", "B_LE128_forward", "ip_IVOL_abaqus"}.issubset(z.files):
+        if "LE128_base" in z.files:
             le128 = row_select_or_broadcast(np.asarray(z["LE128_base"], dtype=np.float64), rows, (128, 6), "LE128_base")
+            out["LE128_base"] = le128
+        if "B_LE128_forward" in z.files:
             b128 = row_select_or_broadcast(np.asarray(z["B_LE128_forward"], dtype=np.float64), rows, (128, 6, 48), "B_LE128_forward")
+            out["B_LE128_forward"] = b128
+        if {"LE128_base", "B_LE128_forward", "ip_IVOL_abaqus"}.issubset(z.files):
             ivol = row_select_or_broadcast(np.asarray(z["ip_IVOL_abaqus"], dtype=np.float64), rows, (128,), "ip_IVOL_abaqus")
             stress128 = np.einsum("ab,nrb->nra", elastic_d, le128)
             out["F128_D_IVOL"] = np.einsum("nraj,nra,nr->nj", b128, stress128, ivol)
@@ -312,6 +324,91 @@ def assemble_force_stiffness(le: np.ndarray, b: np.ndarray, weights: np.ndarray,
     stiffness = np.einsum("npaj,ab,npbk,np->njk", b, elastic_d, b, weights)
     energy_density_twice = np.einsum("npa,npa,np->n", le, stress, weights)
     return force, stiffness, energy_density_twice
+
+
+def candidate_report(
+    *,
+    name: str,
+    point_count: int,
+    force: np.ndarray,
+    stiffness: np.ndarray,
+    energy_twice: np.ndarray,
+    source_rf_macro: np.ndarray,
+    macro: dict[str, Any],
+    kfd_subset: np.ndarray | None,
+    dirs_macro: np.ndarray | None,
+) -> dict[str, Any]:
+    force_metric = metric(force, source_rf_macro)
+    stiffness_report: dict[str, Any] = {"available": False, "reason": "source compact lacks RF_projected_plus"}
+    plus_kdq_report: dict[str, Any] = {"available": False, "reason": "source compact lacks RF_projected_plus"}
+    if kfd_subset is not None and dirs_macro is not None:
+        subset = stiffness[:, :, dirs_macro]
+        stiffness_report = {
+            "available": True,
+            "direction_count": int(dirs_macro.size),
+            "macro_directions_first16": dirs_macro[:16].astype(int).tolist(),
+            **metric(subset, kfd_subset),
+        }
+        plus_kdq_report = {
+            "available": True,
+            "definition": "K_candidate[:, dir] * delta versus RF_projected_plus(dir) - RF_projected",
+            **metric(subset, kfd_subset),
+        }
+    return {
+        "name": name,
+        "point_count": int(point_count),
+        "force": force_metric,
+        "force_dof_max_abs_error": float(np.max(np.abs(force - source_rf_macro), axis=None)),
+        "stiffness": stiffness_report,
+        "stiffness_symmetry": stiffness_symmetry(stiffness),
+        "plus_Kdq_vs_dF": plus_kdq_report,
+        "frame_to_frame_Kdq_vs_dF_source_RF": frame_to_frame_kdq(macro, source_rf_macro, stiffness),
+        "energy": energy_checks(np.asarray(macro["q"], dtype=np.float64), force, source_rf_macro, energy_twice),
+    }
+
+
+def source128_candidate(
+    *,
+    name: str,
+    source: dict[str, Any],
+    source_order: str,
+    weights_key: str,
+    source_rf_macro: np.ndarray,
+    macro: dict[str, Any],
+    kfd_subset: np.ndarray | None,
+    dirs_macro: np.ndarray | None,
+) -> dict[str, Any] | None:
+    required = {"LE128_base", "B_LE128_forward", weights_key}
+    missing = sorted(key for key in required if key not in source)
+    if missing:
+        return {"name": name, "available": False, "reason": f"missing source fields {missing}"}
+    le128 = np.asarray(source["LE128_base"], dtype=np.float64)
+    b128 = np.asarray(source["B_LE128_forward"], dtype=np.float64)
+    weights = np.asarray(source[weights_key], dtype=np.float64)
+    force_src, stiffness_src, energy_twice = assemble_force_stiffness(
+        le128,
+        b128,
+        weights,
+        np.asarray(source["elastic_D"], dtype=np.float64),
+    )
+    force = source_vectors_to_macro(force_src, source_order)
+    stiffness = source_stiffness_to_macro(stiffness_src, source_order)
+    report = candidate_report(
+        name=name,
+        point_count=128,
+        force=force,
+        stiffness=stiffness,
+        energy_twice=energy_twice,
+        source_rf_macro=source_rf_macro,
+        macro=macro,
+        kfd_subset=kfd_subset,
+        dirs_macro=dirs_macro,
+    )
+    report["available"] = True
+    report["weights_key"] = weights_key
+    report["weight_sum_min"] = float(np.min(np.sum(weights, axis=1)))
+    report["weight_sum_max"] = float(np.max(np.sum(weights, axis=1)))
+    return report
 
 
 def stiffness_symmetry(stiffness: np.ndarray) -> dict[str, float]:
@@ -377,9 +474,8 @@ def audit_one(path: Path, weight_mode: str) -> dict[str, Any]:
         weights,
         np.asarray(source["elastic_D"], dtype=np.float64),
     )
-    force_metric = metric(force_macro, source_rf_macro)
-    stiffness_report: dict[str, Any] = {"available": False, "reason": "source compact lacks RF_projected_plus"}
-    plus_kdq_report: dict[str, Any] = {"available": False, "reason": "source compact lacks RF_projected_plus"}
+    kfd_subset: np.ndarray | None = None
+    dirs_macro: np.ndarray | None = None
     source_kfd_symmetry: dict[str, Any] | None = None
     if "rf_plus" in source:
         if source.get("delta") is None:
@@ -391,24 +487,42 @@ def audit_one(path: Path, weight_mode: str) -> dict[str, Any]:
             float(source["delta"]),
             source_order,
         )
-        kmacro_subset = stiffness_macro[:, :, dirs_macro]
-        stiffness_report = {
-            "available": True,
-            "direction_count": int(dirs_macro.size),
-            "macro_directions_first16": dirs_macro[:16].astype(int).tolist(),
-            **metric(kmacro_subset, kfd_subset),
-        }
-        dq_delta = float(source["delta"])
-        plus_kdq_report = {
-            "available": True,
-            "definition": "K_macro[:, dir] * delta versus RF_projected_plus(dir) - RF_projected",
-            **metric(kmacro_subset * dq_delta, kfd_subset * dq_delta),
-        }
         if dirs_macro.size == 48 and sorted(dirs_macro.astype(int).tolist()) == list(range(48)):
             full_kfd = np.empty_like(stiffness_macro)
             for pos, macro_dir in enumerate(dirs_macro.tolist()):
                 full_kfd[:, :, int(macro_dir)] = kfd_subset[:, :, pos]
             source_kfd_symmetry = stiffness_symmetry(full_kfd)
+    macro18 = candidate_report(
+        name="macro16_18pt",
+        point_count=int(np.asarray(macro["le"]).shape[1]),
+        force=force_macro,
+        stiffness=stiffness_macro,
+        energy_twice=energy_twice,
+        source_rf_macro=source_rf_macro,
+        macro=macro,
+        kfd_subset=kfd_subset,
+        dirs_macro=dirs_macro,
+    )
+    source128_ip_volume = source128_candidate(
+        name="source128_ip_volume",
+        source=source,
+        source_order=source_order,
+        weights_key="source_ip_volume",
+        source_rf_macro=source_rf_macro,
+        macro=macro,
+        kfd_subset=kfd_subset,
+        dirs_macro=dirs_macro,
+    )
+    source128_inferred_volume = source128_candidate(
+        name="source128_inferred_volume",
+        source=source,
+        source_order=source_order,
+        weights_key="source_inferred_volume",
+        source_rf_macro=source_rf_macro,
+        macro=macro,
+        kfd_subset=kfd_subset,
+        dirs_macro=dirs_macro,
+    )
     source_force_checks: dict[str, Any] = {}
     if "F_DLE_IVOL" in source:
         source_force_checks["F_DLE_IVOL_vs_RF_projected"] = metric(
@@ -429,18 +543,23 @@ def audit_one(path: Path, weight_mode: str) -> dict[str, Any]:
         "strain_output_coordinate": macro["strain_output_coordinate"],
         "B_label_q_coordinate": macro["B_label_q_coordinate"],
         "weight": weight_meta,
-        "force": force_metric,
-        "force_dof_max_abs_error": float(np.max(np.abs(force_macro - source_rf_macro), axis=None)),
-        "stiffness": stiffness_report,
-        "stiffness_symmetry_macro": stiffness_symmetry(stiffness_macro),
+        "force": macro18["force"],
+        "force_dof_max_abs_error": macro18["force_dof_max_abs_error"],
+        "stiffness": macro18["stiffness"],
+        "stiffness_symmetry_macro": macro18["stiffness_symmetry"],
         "stiffness_symmetry_source_fd": source_kfd_symmetry,
-        "plus_Kdq_vs_dF": plus_kdq_report,
-        "frame_to_frame_Kdq_vs_dF_source_RF": frame_to_frame_kdq(macro, source_rf_macro, stiffness_macro),
-        "energy": energy_checks(np.asarray(macro["q"], dtype=np.float64), force_macro, source_rf_macro, energy_twice),
+        "plus_Kdq_vs_dF": macro18["plus_Kdq_vs_dF"],
+        "frame_to_frame_Kdq_vs_dF_source_RF": macro18["frame_to_frame_Kdq_vs_dF_source_RF"],
+        "energy": macro18["energy"],
+        "candidates": {
+            "macro16_18pt": macro18,
+            "source128_ip_volume": source128_ip_volume,
+            "source128_inferred_volume": source128_inferred_volume,
+        },
         "source_force_checks": source_force_checks,
         "interpretation_note": (
             "Large Macro16 force/stiffness errors here are teacher-label assembly errors, not network training errors. "
-            "This check uses LE_macro, B_macro, elastic_D and Macro16 integration weights directly."
+            "Compare candidates.macro16_18pt against candidates.source128_ip_volume to separate 18-point reduction error from source 128-point closure."
         ),
     }
 

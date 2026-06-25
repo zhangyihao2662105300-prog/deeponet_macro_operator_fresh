@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Audit Macro16 rigid-motion preprocessing before any training run."""
+"""Audit Macro16 source128 compact data contract before any training run."""
 
 from __future__ import annotations
 
@@ -23,7 +23,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from macro_deeponet.macro16_geometry import (  # noqa: E402
+    macro16_source128_point_table,
     macro16_standard_point_table,
+    normalize_macro16_x16_batch,
     scale_consistency_report,
 )
 from macro_deeponet.macro16_rigid import remove_rigid_motion, rigid_consistency_report  # noqa: E402
@@ -40,13 +42,17 @@ REQUIRED_RIGID_COMPACT_FIELDS = (
     "q48_rigid_raw",
     "q48_def_raw",
     "q48_def_hat",
+    "LE_macro",
     "B_macro_qraw",
     "B_macro_qhat",
     "B_macro_qdef_raw",
     "B_macro_qdef",
     "integration_weight_hat",
     "integration_weight_phys",
+    "rigid_rotation_R",
+    "rigid_translation_t",
     "rigid_projection_P",
+    "macro16_point_xi",
 )
 
 
@@ -308,19 +314,47 @@ def audit_compact(path: Path, args: argparse.Namespace) -> dict[str, Any]:
             return base
 
         x16 = frame_array(z, path, n_total, rows, "X16_raw", (16, 3))
+        x_center = frame_array(z, path, n_total, rows, "X_center", (3,))
         l_ref = frame_array(z, path, n_total, rows, "L_ref", (1,))
+        x16_hat = frame_array(z, path, n_total, rows, "X16_hat", (16, 3))
         q_raw = frame_array(z, path, n_total, rows, "q48_raw", (48,))
         q_hat = frame_array(z, path, n_total, rows, "q48_hat", (48,))
         q_rigid = frame_array(z, path, n_total, rows, "q48_rigid_raw", (48,))
         q_def = frame_array(z, path, n_total, rows, "q48_def_raw", (48,))
         q_def_hat = frame_array(z, path, n_total, rows, "q48_def_hat", (48,))
+        le_macro = frame_array(z, path, n_total, rows, "LE_macro", (np.asarray(z["LE_macro"]).shape[1], 6))
         b_qraw = frame_array(z, path, n_total, rows, "B_macro_qraw", (np.asarray(z["B_macro_qraw"]).shape[1], 6, 48))
         b_qhat = frame_array(z, path, n_total, rows, "B_macro_qhat", (b_qraw.shape[1], 6, 48))
         b_qdef_raw = frame_array(z, path, n_total, rows, "B_macro_qdef_raw", (b_qraw.shape[1], 6, 48))
         b_qdef = frame_array(z, path, n_total, rows, "B_macro_qdef", (b_qraw.shape[1], 6, 48))
         w_hat = frame_array(z, path, n_total, rows, "integration_weight_hat", (b_qraw.shape[1],))
         w_phys = frame_array(z, path, n_total, rows, "integration_weight_phys", (b_qraw.shape[1],))
+        rotations = frame_array(z, path, n_total, rows, "rigid_rotation_R", (3, 3))
+        translations = frame_array(z, path, n_total, rows, "rigid_translation_t", (3,))
         p_rigid = frame_array(z, path, n_total, rows, "rigid_projection_P", (48, 48))
+        point_xi = frame_array(z, path, n_total, rows, "macro16_point_xi", (128, 3))
+
+        computed_x16_hat, computed_x_center, computed_l_ref = normalize_macro16_x16_batch(x16)
+        geometry_audit = {
+            "X_center_vs_computed": metric(x_center, computed_x_center),
+            "L_ref_vs_computed": metric(l_ref, computed_l_ref),
+            "X16_hat_vs_computed": metric(x16_hat, computed_x16_hat),
+        }
+
+        source128 = macro16_source128_point_table()
+        point_xi_ref = np.broadcast_to(source128.xi.reshape(1, 128, 3), point_xi.shape)
+        point_contract = {
+            "point_count": int(le_macro.shape[1]),
+            "LE_macro_shape": list(le_macro.shape),
+            "B_macro_qraw_shape": list(b_qraw.shape),
+            "B_macro_qdef_shape": list(b_qdef.shape),
+            "integration_weight_hat_shape": list(w_hat.shape),
+            "integration_weight_phys_shape": list(w_phys.shape),
+            "macro16_point_xi_shape": list(point_xi.shape),
+            "point_count_is_128": bool(le_macro.shape[1] == 128 and b_qraw.shape[1] == 128 and w_hat.shape[1] == 128),
+            "macro16_point_xi_matches_standard_source128": bool(np.allclose(point_xi, point_xi_ref, rtol=1.0e-7, atol=1.0e-7)),
+            "macro16_point_xi_vs_standard_source128_max_abs": float(np.max(np.abs(point_xi - point_xi_ref))),
+        }
 
         rigid = rigid_consistency_report(
             x16_raw=x16,
@@ -342,24 +376,64 @@ def audit_compact(path: Path, args: argparse.Namespace) -> dict[str, Any]:
         )
         b_qdef_scale = metric(b_qdef, b_qdef_raw * l_ref.reshape(l_ref.shape[0], 1, 1, 1))
         b_qdef_projection = metric(b_qdef_raw, np.einsum("npak,nkj->npaj", b_qraw, p_rigid))
-        rotations = frame_array(z, path, n_total, rows, "rigid_rotation_R", (3, 3)) if "rigid_rotation_R" in z.files else None
-        rotation_audit: dict[str, Any] = {"available": rotations is not None}
-        if rotations is not None:
-            eye = np.eye(3, dtype=np.float64).reshape(1, 3, 3)
-            rtr = np.einsum("nki,nkj->nij", rotations, rotations)
-            dets = np.linalg.det(rotations)
-            rotation_audit.update(
-                {
-                    "rotation_orthogonality_max_abs": float(np.max(np.abs(rtr - eye))),
-                    "rotation_det_min": float(np.min(dets)),
-                    "rotation_det_max": float(np.max(dets)),
-                }
-            )
+        x_rigid_from_rt = np.einsum("nij,nkj->nki", rotations, x16) + translations.reshape(translations.shape[0], 1, 3)
+        q_rigid_from_rt = (x_rigid_from_rt - x16).reshape(q_rigid.shape)
+        rigid_transform_audit = {
+            "rigid_rotation_R_shape": list(rotations.shape),
+            "rigid_translation_t_shape": list(translations.shape),
+            "q48_rigid_raw_vs_Rt_transform": metric(q_rigid, q_rigid_from_rt),
+        }
+        eye = np.eye(3, dtype=np.float64).reshape(1, 3, 3)
+        rtr = np.einsum("nki,nkj->nij", rotations, rotations)
+        dets = np.linalg.det(rotations)
+        rotation_audit: dict[str, Any] = {
+            "available": True,
+            "rotation_orthogonality_max_abs": float(np.max(np.abs(rtr - eye))),
+            "rotation_det_min": float(np.min(dets)),
+            "rotation_det_max": float(np.max(dets)),
+        }
 
     loader = audit_loader(path, frame_stride=int(args.frame_stride), max_frames_per_compact=int(args.max_frames_per_compact))
     checks = [
         {"name": "required_new_fields", "passed": True, "enforced": True},
+        {
+            "name": "standard_source128_point_count",
+            "passed": bool(point_contract["point_count_is_128"]),
+            "enforced": True,
+            "value": point_contract["point_count"],
+            "limit": 128,
+        },
+        {
+            "name": "macro16_point_xi_matches_standard_source128",
+            "passed": bool(point_contract["macro16_point_xi_matches_standard_source128"]),
+            "enforced": True,
+            "value": point_contract["macro16_point_xi_vs_standard_source128_max_abs"],
+            "limit": 1.0e-7,
+        },
         {"name": "training_loader_uses_q48_def_hat_and_B_macro_qdef", "passed": bool(loader.get("passed")), "enforced": True},
+        check_leq("X_center_vs_computed_rel", geometry_audit["X_center_vs_computed"]["rel"], float(args.max_scale_rel)),
+        check_leq("X_center_vs_computed_max_abs", geometry_audit["X_center_vs_computed"]["max_abs"], float(args.max_scale_abs)),
+        check_leq("L_ref_vs_computed_rel", geometry_audit["L_ref_vs_computed"]["rel"], float(args.max_scale_rel)),
+        check_leq("L_ref_vs_computed_max_abs", geometry_audit["L_ref_vs_computed"]["max_abs"], float(args.max_scale_abs)),
+        check_leq("X16_hat_vs_computed_rel", geometry_audit["X16_hat_vs_computed"]["rel"], float(args.max_scale_rel)),
+        check_leq("X16_hat_vs_computed_max_abs", geometry_audit["X16_hat_vs_computed"]["max_abs"], float(args.max_scale_abs)),
+        check_leq(
+            "q48_rigid_raw_vs_Rt_transform_max_abs",
+            rigid_transform_audit["q48_rigid_raw_vs_Rt_transform"]["max_abs"],
+            float(args.max_rigid_closure_abs),
+        ),
+        check_leq(
+            "rigid_rotation_R_orthogonality_max_abs",
+            rotation_audit.get("rotation_orthogonality_max_abs"),
+            float(args.max_rotation_matrix_orthogonality),
+        ),
+        {
+            "name": "rigid_rotation_R_det_positive",
+            "value": rotation_audit.get("rotation_det_min"),
+            "limit": 0.0,
+            "enforced": True,
+            "passed": bool(float(rotation_audit.get("rotation_det_min", -1.0)) > 0.0),
+        },
         check_leq("q48_raw_vs_rigid_plus_def_rel", rigid.get("q48_raw_vs_rigid_plus_def_rel"), float(args.max_rigid_closure_rel)),
         check_leq("q48_raw_vs_rigid_plus_def_max_abs", rigid.get("q48_raw_vs_rigid_plus_def_max_abs"), float(args.max_rigid_closure_abs)),
         check_leq("q48_def_hat_times_L_ref_vs_q48_def_raw_rel", rigid.get("q48_def_hat_times_L_ref_vs_q48_def_raw_rel"), float(args.max_scale_rel)),
@@ -389,37 +463,29 @@ def audit_compact(path: Path, args: argparse.Namespace) -> dict[str, Any]:
             float(args.max_qdef_rotation_orthogonality),
         ),
     ]
-    if rotation_audit.get("available"):
-        checks.append(
-            check_leq(
-                "rigid_rotation_R_orthogonality_max_abs",
-                rotation_audit.get("rotation_orthogonality_max_abs"),
-                float(args.max_rotation_matrix_orthogonality),
-            )
-        )
-        checks.append(
-            {
-                "name": "rigid_rotation_R_det_positive",
-                "value": rotation_audit.get("rotation_det_min"),
-                "limit": 0.0,
-                "enforced": True,
-                "passed": bool(float(rotation_audit.get("rotation_det_min", -1.0)) > 0.0),
-            }
-        )
     passed = bool(all(bool(check.get("passed")) for check in checks))
     return {
         **base,
         "passed": passed,
         "point_count": int(b_qraw.shape[1]),
         "dimension_checks": {
+            "X16_raw_shape": list(x16.shape),
+            "X_center_shape": list(x_center.shape),
+            "L_ref_shape": list(l_ref.shape),
+            "X16_hat_shape": list(x16_hat.shape),
             "q48_raw_shape": list(q_raw.shape),
             "q48_def_hat_shape": list(q_def_hat.shape),
+            "LE_macro_shape": list(le_macro.shape),
+            "B_macro_qraw_shape": list(b_qraw.shape),
             "B_macro_qdef_shape": list(b_qdef.shape),
             "q_input_remains_48d": bool(q_raw.shape[-1] == 48 and q_def_hat.shape[-1] == 48 and b_qdef.shape[-1] == 48),
             "no_42d_input": bool(q_def_hat.shape[-1] != 42 and b_qdef.shape[-1] != 42),
         },
+        "geometry_scale_consistency": geometry_audit,
+        "source128_point_contract": point_contract,
         "loader": loader,
         "rigid_consistency": rigid,
+        "rigid_transform_consistency": rigid_transform_audit,
         "scale_consistency": scale,
         "B_macro_qdef_scale_consistency": b_qdef_scale,
         "B_macro_qdef_linear_projection_consistency": b_qdef_projection,

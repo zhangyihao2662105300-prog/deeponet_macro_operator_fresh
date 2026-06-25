@@ -14,8 +14,9 @@ Training is allowed only after:
 - rigid preprocessing audit passes,
 - recovery-force audit passes,
 - stiffness audit passes,
-- medium and strong non-inverted geometry generality audits pass or are
-  explicitly waived.
+- medium and required wind-turbine shell geometry generality audits pass or are
+  explicitly waived. Strong non-inverted distortion is a non-blocking robustness
+  boundary test.
 
 ## Default Contract
 

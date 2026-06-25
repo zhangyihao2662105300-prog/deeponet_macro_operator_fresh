@@ -10,7 +10,9 @@ rules can preserve force and stiffness closure.
 ## Entry Criteria
 
 Do not run this task until standard 128-point Macro16 passes regular, light,
-medium, and strong non-inverted geometry audits.
+medium, and required wind-turbine shell geometry audits. Strong non-inverted
+distortion is a non-blocking robustness boundary test and does not block this
+task by itself.
 
 ## Required Checks
 

@@ -212,11 +212,14 @@ Gate 04 should test at least:
 - regular geometry;
 - light distortion;
 - medium distortion;
-- strong non-inverted distortion;
 - cylindrical shell geometry;
 - conical shell geometry;
 - thickness-varying shell geometry;
 - mild double-curvature shell geometry.
+
+Strong non-inverted distortion is useful as a robustness boundary test, but it
+is not the main wind-turbine shell geometry gate. It should not block the main
+route if regular, light, medium, and typical wind-turbine shell families pass.
 
 For each geometry family, Gate 04 must check:
 

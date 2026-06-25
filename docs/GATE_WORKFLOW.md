@@ -108,22 +108,39 @@ Current result:
 
 Goal:
 
-- Confirm the route is not only valid on the current 10-case set.
+- Confirm the route is not only valid on the current 10-case set and remains
+  stable on geometry classes relevant to wind-turbine shell meshes.
 
-Geometry families:
+Required geometry families:
 
 - Regular geometry.
 - Light distortion.
 - Medium distortion.
-- Strong non-inverted distortion.
 - Cylindrical shell.
 - Conical shell.
 - Thickness-varying shell.
 - Mild double-curvature shell.
 
+Non-blocking robustness family:
+
+- Strong non-inverted distortion.
+
+Strong non-inverted distortion is useful as a robustness boundary test, but it
+is not a hard Gate 04 requirement for the main route. If it is present, it must
+still have positive `detJ` and valid `X16_raw`, but failure or missing data in
+this class should be recorded separately and should not block the main
+wind-turbine shell geometry route.
+
 Current result:
 
-- Gate result: not complete.
+- Gate result: incomplete.
+- Regular, light-distortion, and medium-distortion selected-frame force closure
+  pass in `reports/04_distortion_generality_audit.md`.
+- Strong non-inverted data is invalid because the intended strong compact
+  duplicates medium-distortion geometry; it is now classified as a non-blocking
+  robustness-data issue.
+- Cylindrical, conical, thickness-varying, and mild double-curvature shell
+  families remain to be audited.
 
 ## Gate 05: Integration-Point Reduction Audit
 
@@ -168,7 +185,8 @@ Current result:
 
 - Gate result: blocked.
 - Reason: Gate 02 fails full teacher stiffness closure, Gate 03 full tangent
-  closure is incomplete, and Gate 04/05 are incomplete.
+  closure is incomplete, and Gate 04 required wind-turbine shell geometry
+  families plus Gate 05 are incomplete.
 
 ## Required Report Template
 

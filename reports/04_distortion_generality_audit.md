@@ -62,6 +62,12 @@ py -3 scripts\audit_macro16_force_stiffness.py --compact-list runs\gate04_genera
 
 强畸变但不翻转本应来自 `case061`，但实际 compact 中的 `shape4` 和 `X16` 与 `case060` 一致，因此本轮只能记为“强畸变意图数据无效”。
 
+After route correction, strong non-inverted distortion is treated as a
+non-blocking robustness boundary test, not a hard Gate 04 main-route
+requirement. The required main-route Gate 04 families are regular, light
+distortion, medium distortion, and typical wind-turbine shell geometries such
+as cylindrical, conical, thickness-varying, and mild double-curvature shells.
+
 ## 5. Required Metrics
 
 Force closure 使用 selected-frame physical volume，即 `ip_IVOL_abaqus_selected_frames`。
@@ -72,8 +78,8 @@ Force closure 使用 selected-frame physical volume，即 `ip_IVOL_abaqus_select
 |---|---:|---:|---|---|---:|---:|---:|---:|---|
 | Regular | 3 | 30 | yes, min `0.001245609` | PASS | `0.003506506` | `0.008585725` | `0.011443767` | `0.031962110` | yes |
 | Light distortion | 7 | 70 | yes, min `0.000744175` | PASS | `0.000315474` | `0.000575427` | `0.000330240` | `0.000472802` | yes |
-| Medium distortion | 21 | 210 | yes, min `0.002315427` | PASS | `0.000137256` | `0.000248711` | `0.001706392` | `0.007058560` | yes, but strong data must be regenerated |
-| Strong non-inverted | 21 | 210 | yes, min `0.002315427` | PASS | `0.000111752` | `0.000218634` | `0.001906917` | `0.006931154` | no |
+| Medium distortion | 21 | 210 | yes, min `0.002315427` | PASS | `0.000137256` | `0.000248711` | `0.001706392` | `0.007058560` | yes |
+| Strong non-inverted robustness | 21 | 210 | yes, min `0.002315427` | PASS | `0.000111752` | `0.000218634` | `0.001906917` | `0.006931154` | non-blocking invalid robustness data |
 
 ## 6. Strong Geometry Finding
 
@@ -102,18 +108,18 @@ Passed so far:
 
 Not passed yet:
 
-1. Strong non-inverted geometry has not been verified because the generated compact is not actually strong-distorted.
-2. Cylindrical, conical, thickness-varying, and mild double-curvature families remain outside this report.
+1. Cylindrical, conical, thickness-varying, and mild double-curvature families remain outside this report.
+2. Strong non-inverted geometry has not been verified because the generated compact is not actually strong-distorted. This is now a non-blocking robustness boundary issue, not a hard Gate 04 main-route blocker.
 
 ## 8. Unresolved Issues
 
-1. Regenerate true strong non-inverted geometry and verify that `shape4`, `X16`, and detJ match the intended class before force audit.
-2. Material-only stiffness remains a diagnostic only. The full Gate 03 tangent is still pending and not resolved here.
-3. The current medium and strong-intended distorted sets are generated from cylindrical shape4-style data; broader shape families remain to be audited.
+1. Typical wind-turbine shell geometry families remain to be audited: cylindrical, conical, thickness-varying, and mild double-curvature.
+2. Regenerate true strong non-inverted geometry only as a robustness boundary test, not as a main-route blocker.
+3. Material-only stiffness remains a diagnostic only. The full Gate 03 tangent is still pending and not resolved here.
 
 ## 9. Recommended Next Action
 
-1. Fix strong-distortion generation so the complete compact preserves `shape4 = [1.0, 0.02, 1.3, 0.2]` and the corresponding `X16`.
-2. Rebuild Macro16 source128 compacts for the corrected strong non-inverted set.
+1. Prioritize typical wind-turbine shell geometry families: cylindrical, conical, thickness-varying, and mild double-curvature.
+2. Rebuild Macro16 source128 compacts for those required families.
 3. Rerun Gate 04 data contract and selected-frame force closure.
-4. Only after true strong non-inverted geometry passes, proceed to additional geometry families.
+4. Regenerate true strong non-inverted geometry later as a robustness boundary test if needed.

@@ -58,6 +58,8 @@ Current verified range:
 - Covers regular geometry and lightly distorted geometry.
 - Gate 04 has now audited regular, lightly distorted, and medium-distortion
   source128 compacts with selected-frame force closure.
+- Strong non-inverted distortion is now a non-blocking robustness boundary test,
+  not a hard main-route Gate 04 requirement.
 
 Theory status: 待验证
 
@@ -65,7 +67,8 @@ Theory status: 待验证
   `reports/04_distortion_generality_audit.md`.
 - Strong-distortion geometry is still not complete: the intended strong
   non-inverted `case061` compact contains the same `shape4` and `X16` as the
-  medium-distortion `case060` compact.
+  medium-distortion `case060` compact. This is recorded as a non-blocking
+  robustness-data issue.
 - Generality has not fully passed.
 - The E-drive path mentioned in older context is not formally confirmed in this
   project brief. Treat it as a historical path to confirm, not as the unique
@@ -226,7 +229,9 @@ Theory status: 待验证
   geometric/stress stiffness when applicable, block Gate 03.
 - Medium-distortion selected-frame force closure has been audited and passes.
 - Strong-distortion cases have not been verified because the current intended
-  strong compact duplicates the medium-distortion geometry.
+  strong compact duplicates the medium-distortion geometry. This no longer
+  blocks the main Gate 04 wind-turbine shell geometry route, but it remains an
+  optional robustness boundary test.
 - `B_macro_qdef` is currently based on a small-rotation linear projection
   approximation, not a strict nonlinear Kabsch Jacobian.
 
@@ -268,7 +273,7 @@ Status values in theory documents are limited to `已验证`, `待验证`, `待�
 | 01 | Data contract audit | PASS | `reports/macro16_source128_data_audit.md` | 已验证 |
 | 02 | TRUE176/CSS8 teacher closure audit | FAIL on full teacher stiffness closure | `reports/02_teacher_closure_audit.md` | 待验证 |
 | 03 | Macro16 source128 force/stiffness audit | split: force closure PASS; material-only stiffness diagnostic residual; full tangent incomplete | `reports/03_macro16_force_stiffness_reaudit.md`, `reports/macro16_case031_mechanics_diagnosis.md` | 待验证 |
-| 04 | Distortion/general geometry audit | incomplete: regular, light, and medium selected-frame force closure pass; strong non-inverted data invalid | `reports/04_distortion_generality_audit.md` | 待验证 |
+| 04 | Distortion/general geometry audit | incomplete: regular, light, and medium selected-frame force closure pass; typical wind-turbine shell families remain; strong non-inverted is non-blocking robustness data | `reports/04_distortion_generality_audit.md` | 待验证 |
 | 05 | Integration-point reduction audit | incomplete | no canonical report yet | 待验证 |
 | 06 | Training gate | blocked | blocked by Gate 02/03/04/05 | 待验证 |
 
@@ -324,12 +329,14 @@ Next steps:
    `B^T D B dV`.
 2. Resolve or explicitly waive Gate 02 full teacher stiffness closure with
    consistent-tangent evidence.
-3. Generate medium-distortion geometries.
-4. Generate strong but non-inverted distortion geometries.
-5. Rebuild source128 compacts.
+3. Audit typical wind-turbine shell geometry families: cylindrical, conical,
+   thickness-varying, and mild double-curvature shells.
+4. Keep strong non-inverted distortion as an optional robustness boundary test;
+   fix its duplicated data when useful, but do not let it block the main route.
+5. Rebuild source128 compacts for the required geometry families.
 6. Rerun rigid preprocessing audit.
-7. Rerun recovery-force and stiffness audit.
-8. If 128 points stably closes, run the generality audit.
+7. Rerun selected-frame recovery-force audit.
+8. If 128 points stably closes, mark Gate 04 required families complete.
 9. Only after 128-point mechanics and generality gates pass, consider 96/64/32
    point reduction.
 10. Train the network only after the gate workflow permits it.

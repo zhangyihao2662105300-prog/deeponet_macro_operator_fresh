@@ -37,10 +37,15 @@ from audit_macro16_force_stiffness import (  # noqa: E402
     source_vectors_to_macro,
 )
 from macro_deeponet.macro16_geometry import MACRO16_CONTRACT_VERSION, macro16_standard_point_table  # noqa: E402
-from macro_deeponet.models import Macro16BoundaryDeepONet, Macro16BoundaryDeepONetWithLE0  # noqa: E402
+from macro_deeponet.models import (  # noqa: E402
+    Macro16BoundaryDeepONet,
+    Macro16BoundaryDeepONetWithLE0,
+    Macro16BoundaryDeepONetWithLE0StateB,
+)
 from macro_deeponet.train_macro16_boundary_sobolev import (  # noqa: E402
     ad_jacobian,
     load_macro16_compacts,
+    model_style_key,
     parse_int_list,
     read_path_list,
 )
@@ -158,6 +163,9 @@ def make_model(checkpoint: dict[str, Any], norms: dict[str, np.ndarray], device:
         ip_count = int(state.get("static_le0_norm", torch.zeros(1, 6)).shape[0])
     q_dim = int(np.asarray(norms.get("q_dim", 48)).reshape(-1)[0])
     model_style = str(checkpoint.get("model_style", "")).lower()
+    state_b_meta = checkpoint.get("state_b", {})
+    if not isinstance(state_b_meta, dict):
+        state_b_meta = {}
     common = dict(
         input_dim=int(branch_mean.size),
         point_dim=int(point_mean.size),
@@ -179,7 +187,21 @@ def make_model(checkpoint: dict[str, Any], norms: dict[str, np.ndarray], device:
         q_raw_std=branch_std[:q_dim].astype(np.float32),
         gate_q0=float(args.get("anchored_residual_gate_q0", 0.0)),
     )
-    if "with-le0" in model_style or str(args.get("model_style", "le0")).lower() == "le0":
+    style_key = model_style_key(str(args.get("model_style", "le0")))
+    if "state-b" in model_style or style_key == "le0-state-b":
+        model = Macro16BoundaryDeepONetWithLE0StateB(
+            **common,
+            le0_init_norm=torch.zeros((ip_count, 6), dtype=torch.float32),
+            le0_scale=float(args.get("le0_scale", 1.0)),
+            train_le0_static=True,
+            train_le0_point=True,
+            state_b_rank=int(args.get("state_b_rank", state_b_meta.get("state_b_rank", 8))),
+            state_b_scale=float(args.get("state_b_scale", state_b_meta.get("state_b_scale", 1.0))),
+            detach_state_b=bool(args.get("detach_state_b", state_b_meta.get("detach_state_b", True))),
+            state_b_kind=str(args.get("state_b_kind", state_b_meta.get("state_b_kind", "low_rank_uv"))),
+            state_b_zero_init=not bool(args.get("state_b_random_init", False)),
+        )
+    elif "with-le0" in model_style or style_key == "le0":
         model = Macro16BoundaryDeepONetWithLE0(
             **common,
             le0_init_norm=torch.zeros((ip_count, 6), dtype=torch.float32),

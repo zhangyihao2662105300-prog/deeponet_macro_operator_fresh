@@ -854,6 +854,147 @@ class Macro16BoundaryDeepONetWithLE0(QueryFELE0LinearResidualDeepONet):
         )
 
 
+class Macro16BoundaryDeepONetWithLE0StateB(QueryFELE0LinearResidualDeepONet):
+    """Macro16 LE0 model with an optional state-dependent B baseline.
+
+    The state B term is a guarded low-rank correction to the point-only
+    baseline.  With ``detach_state_b=True`` its q-state input is detached, so
+    AD-B treats the state correction as the selected local baseline rather than
+    adding ``dB_state/dq`` terms.
+    """
+
+    macro16_contract = "v4-macro16-boundary-operator-001"
+    state_b_head = True
+
+    def __init__(
+        self,
+        *,
+        input_dim: int = 99,
+        point_dim: int,
+        q_start: int = 0,
+        q_dim: int = 48,
+        ip_count: int = 0,
+        strain_dim: int = 6,
+        basis_dim: int = 96,
+        hidden_dim: int = 384,
+        branch_depth: int = 5,
+        trunk_depth: int = 5,
+        activation: str = "tanh",
+        skip_init: torch.Tensor | None = None,
+        train_skip: bool = True,
+        residual_scale: float = 1.0,
+        baseline_scale: float = 1.0,
+        train_point_baseline: bool = True,
+        zero_init_residual: bool = True,
+        q_zero_norm: torch.Tensor | None = None,
+        q_raw_mean: torch.Tensor | None = None,
+        q_raw_std: torch.Tensor | None = None,
+        gate_q0: float = 0.0,
+        le0_init_norm: torch.Tensor | None = None,
+        le0_scale: float = 1.0,
+        train_le0_static: bool = True,
+        train_le0_point: bool = True,
+        state_b_rank: int = 8,
+        state_b_scale: float = 1.0,
+        detach_state_b: bool = True,
+        state_b_kind: str = "low_rank_uv",
+        state_b_zero_init: bool = True,
+    ) -> None:
+        super().__init__(
+            input_dim=input_dim,
+            point_dim=point_dim,
+            q_start=q_start,
+            q_dim=q_dim,
+            ip_count=ip_count,
+            strain_dim=strain_dim,
+            basis_dim=basis_dim,
+            hidden_dim=hidden_dim,
+            branch_depth=branch_depth,
+            trunk_depth=trunk_depth,
+            activation=activation,
+            skip_init=skip_init,
+            train_skip=train_skip,
+            residual_scale=residual_scale,
+            baseline_scale=baseline_scale,
+            train_point_baseline=train_point_baseline,
+            zero_init_residual=zero_init_residual,
+            q_zero_norm=q_zero_norm,
+            q_raw_mean=q_raw_mean,
+            q_raw_std=q_raw_std,
+            gate_q0=gate_q0,
+            le0_init_norm=le0_init_norm,
+            le0_scale=le0_scale,
+            train_le0_static=train_le0_static,
+            train_le0_point=train_le0_point,
+        )
+        key = str(state_b_kind).strip().lower().replace("_", "-")
+        if key not in {"low-rank-uv", "low-rank", "lowrank", "low-rank-uv-detached"}:
+            raise ValueError(f"unsupported state_b_kind {state_b_kind!r}")
+        rank = int(state_b_rank)
+        if rank <= 0:
+            raise ValueError("state_b_rank must be positive")
+        self.state_b_rank = rank
+        self.state_b_scale = float(state_b_scale)
+        self.detach_state_b = bool(detach_state_b)
+        self.state_b_kind = "low_rank_uv"
+        act = activation_module(activation)
+        self.state_b_point_net = MLP(
+            self.point_dim,
+            self.strain_dim * self.state_b_rank,
+            hidden_dim=hidden_dim,
+            depth=trunk_depth,
+            activation=act,
+            zero_last=False,
+        )
+        self.state_b_coeff_net = MLP(
+            self.input_dim,
+            self.state_b_rank * self.q_dim,
+            hidden_dim=hidden_dim,
+            depth=branch_depth,
+            activation=act,
+            zero_last=bool(state_b_zero_init),
+        )
+
+    def state_b_config(self) -> dict[str, float | int | bool | str]:
+        return {
+            "state_b_enabled": True,
+            "state_b_kind": self.state_b_kind,
+            "state_b_rank": int(self.state_b_rank),
+            "state_b_scale": float(self.state_b_scale),
+            "detach_state_b": bool(self.detach_state_b),
+        }
+
+    def _state_b_delta_norm(self, x_norm: torch.Tensor, point_norm: torch.Tensor) -> torch.Tensor:
+        state_x = x_norm.detach() if self.detach_state_b else x_norm
+        state_point = point_norm.detach() if self.detach_state_b else point_norm
+        batch, point_count, _ = point_norm.shape
+        u = self.state_b_point_net(state_point.reshape(-1, self.point_dim)).view(
+            batch, point_count, self.strain_dim, self.state_b_rank
+        )
+        v = self.state_b_coeff_net(state_x).view(batch, self.state_b_rank, self.q_dim)
+        return torch.einsum("bpar,brj->bpaj", u, v)
+
+    def _state_b_norm(self, x_norm: torch.Tensor, point_norm: torch.Tensor) -> torch.Tensor:
+        return self._linear_b_norm(point_norm) + self.state_b_scale * self._state_b_delta_norm(x_norm, point_norm)
+
+    def forward(self, x_norm: torch.Tensor, point_norm: torch.Tensor) -> torch.Tensor:
+        if x_norm.ndim != 2:
+            raise ValueError(f"x_norm must have shape [B,{self.input_dim}]")
+        if point_norm.ndim != 3:
+            raise ValueError("point_norm must have shape [B,P,F]")
+        if x_norm.shape[-1] != self.input_dim:
+            raise ValueError(f"x_norm last dimension must be {self.input_dim}")
+        if point_norm.shape[-1] != self.point_dim:
+            raise ValueError(f"point_norm last dimension must be {self.point_dim}")
+        if point_norm.shape[0] != x_norm.shape[0]:
+            raise ValueError("x_norm and point_norm batch dimensions must match")
+
+        qn = x_norm[:, self.q_start : self.q_start + self.q_dim]
+        q0 = self.q_zero_norm.to(dtype=x_norm.dtype, device=x_norm.device).view(1, self.q_dim)
+        linear = torch.einsum("bpaj,bj->bpa", self._state_b_norm(x_norm, point_norm), qn - q0)
+        return self._le0_norm(point_norm) + linear + self.residual_offset_norm(x_norm, point_norm)
+
+
 class NOEMStyleMIONet(nn.Module):
     """NOEM/MIONet-style TRUE176 operator model.
 

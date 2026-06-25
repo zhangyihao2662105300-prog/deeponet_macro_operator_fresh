@@ -88,6 +88,7 @@ fixed parent integration points.
 | Gate 16 q dependent B diagnosis | diagnosis PASS, large training release FAIL | `reports/16_q_dependent_b_diagnosis.md`; B varies with `q48_def_hat`; point-only B prior is insufficient; formal large training remains blocked. |
 | Gate 17 state B prototype | prototype PASS, production release FAIL | `reports/17_state_b_baseline_prototype.md`; state-dependent B baseline reduces force rel to `0.0919`, below the prototype `0.10` target but above final `0.02`. |
 | Gate 18 state B migration plan | PLAN PASS | `reports/18_state_b_migration_plan.md`; next step is guarded implementation of a new state B model variant, not formal large training. |
+| Gate 19 state B main model smoke | implementation smoke PASS, numeric reproduction pending | `reports/19_state_b_main_model_smoke.md`; `le0-state-b` model variant, checkpoint path, and force-audit loading are implemented; Linux case031 first6 numeric reproduction still pending. |
 
 Training is allowed only within the limited LE/B release boundary.
 
@@ -130,6 +131,8 @@ Current verified or adopted conclusions:
 - Gate 18 records the safe migration plan: add a separate state-dependent B
   model variant, keep default LE0 route intact, and require a six-frame
   reproduction before any larger training.
+- Gate 19 implements the separate `le0-state-b` model variant and verifies
+  local smoke tests, while leaving the default `le0` route unchanged.
 
 ## Pending Issues That Are Not Data Errors
 
@@ -149,11 +152,9 @@ data is bad:
   approximation; strict nonlinear Kabsch Jacobian remains a future audit topic.
 - Full consistent tangent K is still an unresolved route decision or
   implementation task.
-- Current `Macro16BoundaryDeepONetWithLE0` expresses q dependent B only through
-  the residual derivative. Gate 17 shows a state-dependent B baseline prototype
-  is better, but it has not yet been migrated into the production trainer and
-  still does not meet the final `0.02` force closure target.
-- Gate 18 is only a plan. It does not prove the migrated main model works.
+- The new `Macro16BoundaryDeepONetWithLE0StateB` implementation has only passed
+  local smoke tests. Gate 19 Linux numeric reproduction is still pending, so it
+  does not yet meet the final `0.02` force closure target.
 
 These issues must not be hidden inside network training as if a network could
 repair a definition mismatch. They do not block the limited LE/B training
@@ -218,7 +219,7 @@ Required after training:
 Recommended next tasks, in order:
 
 1. Keep material-only K diagnostics separate from full tangent claims.
-2. Implement Gate 19 as a guarded state-dependent B model variant.
+2. Run Gate 19 Linux case031 first6 reproduction for `le0-state-b`.
 3. Keep migration staged behind tests and six-frame reproduction.
 4. After any migrated prototype training, rerun selected-frame force closure before
    claiming mechanical usability.

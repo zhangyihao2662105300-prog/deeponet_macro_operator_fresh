@@ -14,6 +14,9 @@ Gate 18 update: state-dependent B migration plan is complete. The next allowed
 step is a guarded implementation and six-frame reproduction, not formal large
 training.
 
+Gate 19 update: the guarded `le0-state-b` implementation smoke is complete.
+Linux six-frame numeric reproduction is still required before larger training.
+
 This checklist defines what must be true before network training is allowed.
 It does not start training, change the model, or modify the data contract.
 
@@ -59,6 +62,8 @@ Current status:
   the final `0.02` target.
 - Gate 18: migration plan passed; it permits only a guarded state B model
   implementation and small reproduction in Gate 19.
+- Gate 19: implementation smoke passed; numeric reproduction on Linux remains
+  pending and formal large training is still not released.
 
 Do not treat this as a full tangent or solver-readiness release.
 
@@ -90,6 +95,8 @@ be treated as proof that the data is corrupt:
   training.
 - Gate 18 defines that guarded implementation route, including a separate model
   variant and detach-state default.
+- Gate 19 adds the separate `le0-state-b` model variant. This is still a
+  limited implementation smoke until Linux force closure reproduces the target.
 
 These issues no longer block the limited LE/B training release, but they remain
 unresolved mechanics items and are not the same as q48 ordering corruption, LE
@@ -126,6 +133,18 @@ The current default model remains:
 
 ```text
 Macro16BoundaryDeepONetWithLE0
+```
+
+The guarded state B candidate is:
+
+```text
+Macro16BoundaryDeepONetWithLE0StateB
+```
+
+It is selected only by:
+
+```text
+--model-style le0-state-b
 ```
 
 ## Prohibited Training Routes
@@ -187,3 +206,4 @@ Not allowed by this checklist:
 - Start formal large training before the state-dependent B baseline is migrated,
   tested, and force-audited below the active gate target.
 - Treat the Gate 18 migration plan as proof that the main model already works.
+- Treat the Gate 19 smoke as proof that case031 force closure has passed.

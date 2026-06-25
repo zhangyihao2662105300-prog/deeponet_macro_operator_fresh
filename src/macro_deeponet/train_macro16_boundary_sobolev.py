@@ -34,7 +34,7 @@ from .macro16_geometry import (
     macro16_standard_point_table,
     scale_consistency_report,
 )
-from .models import Macro16BoundaryDeepONet, Macro16BoundaryDeepONetWithLE0
+from .models import Macro16BoundaryDeepONet, Macro16BoundaryDeepONetWithLE0, Macro16BoundaryDeepONetWithLE0StateB
 from .train_true176_deeponet_sobolev import ad_jacobian, cos_np, rel_np, write_json
 from .true176_data import stats
 
@@ -665,6 +665,11 @@ def model_style_key(value: str) -> str:
         "le0-linear": "le0",
         "le0-linear-residual": "le0",
         "macro16-boundary-deeponet-with-le0": "le0",
+        "le0-state-b": "le0-state-b",
+        "le0-stateb": "le0-state-b",
+        "state-b": "le0-state-b",
+        "stateb": "le0-state-b",
+        "macro16-boundary-deeponet-with-le0-state-b": "le0-state-b",
     }
     return aliases.get(key, key)
 
@@ -853,16 +858,19 @@ def build_macro16_optimizer(
     weight_decay: float,
     global_b_lr_scale: float,
     point_b_lr_scale: float,
+    state_b_lr_scale: float,
     freeze_b_prior: bool,
 ) -> tuple[torch.optim.Optimizer, dict[str, Any]]:
     frozen: list[str] = []
-    groups: dict[str, list[nn.Parameter]] = {"main": [], "global_b": [], "point_b": []}
+    groups: dict[str, list[nn.Parameter]] = {"main": [], "global_b": [], "point_b": [], "state_b": []}
     seen: set[int] = set()
     for name, param in model.named_parameters():
         if name in {"global_b_norm", "static_b_norm"}:
             key = "global_b"
         elif name.startswith("point_b_net."):
             key = "point_b"
+        elif name.startswith("state_b_"):
+            key = "state_b"
         else:
             key = "main"
         if freeze_b_prior and key in {"global_b", "point_b"}:
@@ -880,8 +888,9 @@ def build_macro16_optimizer(
         "main": float(lr),
         "global_b": float(lr) * float(global_b_lr_scale),
         "point_b": float(lr) * float(point_b_lr_scale),
+        "state_b": float(lr) * float(state_b_lr_scale),
     }
-    for key in ("main", "global_b", "point_b"):
+    for key in ("main", "global_b", "point_b", "state_b"):
         params = groups[key]
         if params and lr_map[key] > 0.0:
             param_groups.append({"params": params, "lr": lr_map[key], "name": key})
@@ -895,6 +904,7 @@ def build_macro16_optimizer(
     meta = {
         "global_b_lr_scale": float(global_b_lr_scale),
         "point_b_lr_scale": float(point_b_lr_scale),
+        "state_b_lr_scale": float(state_b_lr_scale),
         "freeze_b_prior": bool(freeze_b_prior),
         "frozen_b_prior_parts": sorted(set(frozen)),
         "param_counts": {key: int(sum(p.numel() for p in params if p.requires_grad)) for key, params in groups.items()},
@@ -1018,8 +1028,23 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         ).to(device)
         model_meta_style = "macro16-boundary-deeponet-with-le0"
         rigid_loss_target = "LE(q_rigid) - LE(0) ~= 0"
+    elif style == "le0-state-b":
+        model = Macro16BoundaryDeepONetWithLE0StateB(
+            **common_model_kwargs,
+            le0_init_norm=torch.as_tensor(le0_init_norm, dtype=torch.float32),
+            le0_scale=float(getattr(args, "le0_scale", 1.0)),
+            train_le0_static=not bool(getattr(args, "freeze_le0_static", False)),
+            train_le0_point=not bool(getattr(args, "freeze_le0_point", False)),
+            state_b_rank=int(getattr(args, "state_b_rank", 8)),
+            state_b_scale=float(getattr(args, "state_b_scale", 1.0)),
+            detach_state_b=bool(getattr(args, "detach_state_b", True)),
+            state_b_kind=str(getattr(args, "state_b_kind", "low_rank_uv")),
+            state_b_zero_init=not bool(getattr(args, "state_b_random_init", False)),
+        ).to(device)
+        model_meta_style = "macro16-boundary-deeponet-with-le0-state-b"
+        rigid_loss_target = "LE(q_rigid) - LE(0) ~= 0"
     else:
-        raise ValueError("model_style must be le0 or zero-anchor")
+        raise ValueError("model_style must be le0, le0-state-b, or zero-anchor")
     b_prior_warmstart_meta = load_macro16_b_prior_warmstart(
         model,
         checkpoint_path=str(getattr(args, "b_prior_warmstart_checkpoint", "")),
@@ -1034,6 +1059,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         weight_decay=float(args.weight_decay),
         global_b_lr_scale=float(getattr(args, "global_b_lr_scale", 1.0)),
         point_b_lr_scale=float(getattr(args, "point_b_lr_scale", 1.0)),
+        state_b_lr_scale=float(getattr(args, "state_b_lr_scale", 1.0)),
         freeze_b_prior=bool(getattr(args, "freeze_b_prior_after_warmstart", False)),
     )
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=float(args.lr_decay))
@@ -1087,7 +1113,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 "physical_b_loss_scale_shape": list(b_loss_scale.shape),
                 "physical_b_loss_scale_min": float(np.min(b_loss_scale)),
                 "physical_b_loss_scale_max": float(np.max(b_loss_scale)),
-                "le0_enabled": bool(style == "le0"),
+                "le0_enabled": bool(style in {"le0", "le0-state-b"}),
+                "state_b": model.state_b_config() if hasattr(model, "state_b_config") else {"state_b_enabled": False},
                 "le0_init_definition": f"mean_train((LE_macro - {model_visible_b} @ {model_visible_q} - LE_mean) / LE_std)",
                 "le0_star_train_norm_rel_to_LE": norm_ratio_np(le0_star[train_idx], data.le[train_idx]),
                 "le0_star_val_norm_rel_to_LE": norm_ratio_np(le0_star[val_idx], data.le[val_idx]),
@@ -1223,6 +1250,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                         "validation_split": split_meta,
                         "best_report": best_report,
                         "model_style": model_meta_style,
+                        "state_b": model.state_b_config() if hasattr(model, "state_b_config") else {"state_b_enabled": False},
                     },
                     out_dir / "best.pt",
                 )
@@ -1238,6 +1266,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 "latest_report": row,
                 "best_report": best_report,
                 "model_style": model_meta_style,
+                "state_b": model.state_b_config() if hasattr(model, "state_b_config") else {"state_b_enabled": False},
             },
             out_dir / "latest.pt",
         )
@@ -1258,6 +1287,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "rigid_motion_removed_by_preprocessing": rigid_preprocessed,
         "q_input_dim": 48,
         "model_style": model_meta_style,
+        "state_b": model.state_b_config() if hasattr(model, "state_b_config") else {"state_b_enabled": False},
         "jacobian_loss_scale": jacobian_loss_scale,
         "jacobian_target_relation": "J_norm = B_macro_qdef * q_std / LE_std; B_macro_qdef = J_norm * LE_std / q_std",
         "physical_b_loss_scale_shape": list(b_loss_scale.shape),
@@ -1299,7 +1329,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--branch-depth", type=int, default=5)
     p.add_argument("--trunk-depth", type=int, default=5)
     p.add_argument("--activation", default="tanh")
-    p.add_argument("--model-style", default="le0", choices=["le0", "zero-anchor"])
+    p.add_argument("--model-style", default="le0", choices=["le0", "le0-state-b", "zero-anchor"])
     p.add_argument("--residual-scale", type=float, default=1.0)
     p.add_argument("--le0-scale", type=float, default=1.0)
     p.add_argument("--freeze-le0-static", action="store_true")
@@ -1312,6 +1342,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--freeze-b-prior-after-warmstart", action="store_true")
     p.add_argument("--global-b-lr-scale", type=float, default=1.0)
     p.add_argument("--point-b-lr-scale", type=float, default=1.0)
+    p.add_argument("--state-b-lr-scale", type=float, default=1.0)
+    p.add_argument("--state-b-rank", type=int, default=8)
+    p.add_argument("--state-b-scale", type=float, default=1.0)
+    p.add_argument("--state-b-kind", default="low_rank_uv")
+    p.add_argument("--detach-state-b", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--state-b-random-init", action="store_true")
     p.add_argument("--anchored-residual-gate-q0", type=float, default=0.0)
     p.add_argument("--le-loss-weight", type=float, default=1.0)
     p.add_argument("--jacobian-loss-weight", type=float, default=1.0)

@@ -40,6 +40,7 @@ from macro_deeponet.macro16_geometry import MACRO16_CONTRACT_VERSION, macro16_st
 from macro_deeponet.models import (  # noqa: E402
     Macro16BoundaryDeepONet,
     Macro16BoundaryDeepONetWithLE0,
+    Macro16BoundaryDeepONetWithLE0Fixed128StateB,
     Macro16BoundaryDeepONetWithLE0StateB,
 )
 from macro_deeponet.train_macro16_boundary_sobolev import (  # noqa: E402
@@ -188,7 +189,19 @@ def make_model(checkpoint: dict[str, Any], norms: dict[str, np.ndarray], device:
         gate_q0=float(args.get("anchored_residual_gate_q0", 0.0)),
     )
     style_key = model_style_key(str(args.get("model_style", "le0")))
-    if "state-b" in model_style or style_key == "le0-state-b":
+    if "fixed128-state-b" in model_style or style_key == "le0-fixed128-state-b":
+        model = Macro16BoundaryDeepONetWithLE0Fixed128StateB(
+            **common,
+            le0_init_norm=torch.zeros((ip_count, 6), dtype=torch.float32),
+            le0_scale=float(args.get("le0_scale", 1.0)),
+            train_le0_static=True,
+            train_le0_point=True,
+            state_b_rank=int(args.get("state_b_rank", state_b_meta.get("state_b_rank", 8))),
+            state_b_scale=float(args.get("state_b_scale", state_b_meta.get("state_b_scale", 1.0))),
+            detach_state_b=bool(args.get("detach_state_b", state_b_meta.get("detach_state_b", True))),
+            state_b_zero_init=not bool(args.get("state_b_random_init", False)),
+        )
+    elif "state-b" in model_style or style_key == "le0-state-b":
         model = Macro16BoundaryDeepONetWithLE0StateB(
             **common,
             le0_init_norm=torch.zeros((ip_count, 6), dtype=torch.float32),

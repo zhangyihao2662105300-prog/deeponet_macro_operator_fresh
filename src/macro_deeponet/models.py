@@ -1016,6 +1016,214 @@ class Macro16BoundaryDeepONetWithLE0StateB(QueryFELE0LinearResidualDeepONet):
         return self._le0_norm(point_norm) + linear + self.residual_offset_norm(x_norm, point_norm)
 
 
+class Macro16BoundaryDeepONetWithLE0Fixed128StateB(FELinearResidualDeepONet):
+    """Fixed-128 Macro16 LE0 model with a direct state-dependent B baseline.
+
+    This variant intentionally mirrors the Gate 17 prototype more closely than
+    the dynamic query-point state-B model.  It keeps a fixed
+    ``static_b_norm[128,6,48]`` table and the state-B term is the sole
+    q-derivative path when ``residual_scale=0`` and ``detach_state_b=True``.
+    """
+
+    macro16_contract = "v4-macro16-boundary-operator-001"
+    state_b_head = True
+    fixed128_state_b_head = True
+
+    def __init__(
+        self,
+        *,
+        input_dim: int = 99,
+        point_dim: int,
+        q_start: int = 0,
+        q_dim: int = 48,
+        ip_count: int = 128,
+        strain_dim: int = 6,
+        basis_dim: int = 96,
+        hidden_dim: int = 384,
+        branch_depth: int = 5,
+        trunk_depth: int = 5,
+        activation: str = "tanh",
+        skip_init: torch.Tensor | None = None,
+        train_skip: bool = True,
+        residual_scale: float = 0.0,
+        baseline_scale: float = 1.0,
+        train_point_baseline: bool = True,
+        zero_init_residual: bool = True,
+        q_zero_norm: torch.Tensor | None = None,
+        q_raw_mean: torch.Tensor | None = None,
+        q_raw_std: torch.Tensor | None = None,
+        gate_q0: float = 0.0,
+        le0_init_norm: torch.Tensor | None = None,
+        le0_scale: float = 1.0,
+        train_le0_static: bool = True,
+        train_le0_point: bool = True,
+        state_b_rank: int = 8,
+        state_b_scale: float = 1.0,
+        detach_state_b: bool = True,
+        state_b_zero_init: bool = True,
+    ) -> None:
+        if int(ip_count) != 128:
+            raise ValueError("Macro16BoundaryDeepONetWithLE0Fixed128StateB requires ip_count=128")
+        super().__init__(
+            input_dim=input_dim,
+            point_dim=point_dim,
+            q_start=q_start,
+            q_dim=q_dim,
+            ip_count=ip_count,
+            strain_dim=strain_dim,
+            basis_dim=basis_dim,
+            hidden_dim=hidden_dim,
+            branch_depth=branch_depth,
+            trunk_depth=trunk_depth,
+            activation=activation,
+            skip_init=skip_init,
+            train_skip=train_skip,
+            residual_scale=residual_scale,
+            baseline_scale=baseline_scale,
+            train_point_baseline=train_point_baseline,
+            zero_init_residual=zero_init_residual,
+        )
+        if q_zero_norm is None:
+            q_zero = torch.zeros(self.q_dim, dtype=torch.float32)
+        else:
+            q_zero = torch.as_tensor(q_zero_norm, dtype=torch.float32).reshape(self.q_dim)
+        if q_raw_mean is None:
+            q_mean = torch.zeros(self.q_dim, dtype=torch.float32)
+        else:
+            q_mean = torch.as_tensor(q_raw_mean, dtype=torch.float32).reshape(self.q_dim)
+        if q_raw_std is None:
+            q_std = torch.ones(self.q_dim, dtype=torch.float32)
+        else:
+            q_std = torch.clamp(torch.as_tensor(q_raw_std, dtype=torch.float32).reshape(self.q_dim), min=1.0e-12)
+        self.register_buffer("q_zero_norm", q_zero)
+        self.register_buffer("q_raw_mean", q_mean)
+        self.register_buffer("q_raw_std", q_std)
+        self.gate_q0 = float(max(0.0, gate_q0))
+
+        act = activation_module(activation)
+        self.le0_scale = float(le0_scale)
+        self.point_le0_net = MLP(
+            self.point_dim,
+            self.strain_dim,
+            hidden_dim=hidden_dim,
+            depth=trunk_depth,
+            activation=act,
+            zero_last=True,
+        )
+        for p in self.point_le0_net.parameters():
+            p.requires_grad_(bool(train_le0_point))
+        if le0_init_norm is None:
+            static_le0 = torch.zeros(self.ip_count, self.strain_dim, dtype=torch.float32)
+        else:
+            static_le0 = torch.as_tensor(le0_init_norm, dtype=torch.float32)
+            if static_le0.shape == (self.strain_dim,):
+                static_le0 = static_le0.reshape(1, self.strain_dim).expand(self.ip_count, self.strain_dim).clone()
+            elif static_le0.shape == (1, self.strain_dim):
+                static_le0 = static_le0.expand(self.ip_count, self.strain_dim).clone()
+            elif static_le0.shape != (self.ip_count, self.strain_dim):
+                raise ValueError(f"le0_init_norm must have shape [128,6], got {tuple(static_le0.shape)}")
+        self.static_le0_norm = nn.Parameter(static_le0, requires_grad=bool(train_le0_static))
+
+        rank = int(state_b_rank)
+        if rank <= 0:
+            raise ValueError("state_b_rank must be positive")
+        self.state_b_rank = rank
+        self.state_b_scale = float(state_b_scale)
+        self.detach_state_b = bool(detach_state_b)
+        self.state_b_kind = "fixed128_point_q_rank"
+        self.state_b_point_net = MLP(
+            self.point_dim,
+            self.strain_dim * self.q_dim * self.state_b_rank,
+            hidden_dim=hidden_dim,
+            depth=trunk_depth,
+            activation=act,
+            zero_last=False,
+        )
+        self.state_b_coeff_net = MLP(
+            self.input_dim,
+            self.state_b_rank,
+            hidden_dim=hidden_dim,
+            depth=branch_depth,
+            activation=act,
+            zero_last=bool(state_b_zero_init),
+        )
+
+    def state_b_config(self) -> dict[str, float | int | bool | str]:
+        return {
+            "state_b_enabled": True,
+            "state_b_kind": self.state_b_kind,
+            "state_b_rank": int(self.state_b_rank),
+            "state_b_scale": float(self.state_b_scale),
+            "detach_state_b": bool(self.detach_state_b),
+            "fixed_ip_count": int(self.ip_count),
+            "has_static_b_norm": True,
+            "residual_scale": float(self.residual_scale),
+        }
+
+    def _le0_norm(self, point_norm: torch.Tensor) -> torch.Tensor:
+        batch, point_count, _ = point_norm.shape
+        if int(point_count) != self.ip_count:
+            raise ValueError(f"fixed128 state B model requires {self.ip_count} points, got {point_count}")
+        delta = self.point_le0_net(point_norm.reshape(-1, self.point_dim)).view(batch, point_count, self.strain_dim)
+        return self.static_le0_norm.to(dtype=point_norm.dtype, device=point_norm.device).view(
+            1, self.ip_count, self.strain_dim
+        ) + self.le0_scale * delta
+
+    def _state_b_delta_norm(self, x_norm: torch.Tensor, point_norm: torch.Tensor) -> torch.Tensor:
+        state_x = x_norm.detach() if self.detach_state_b else x_norm
+        state_point = point_norm.detach() if self.detach_state_b else point_norm
+        batch, point_count, _ = point_norm.shape
+        if int(point_count) != self.ip_count:
+            raise ValueError(f"fixed128 state B model requires {self.ip_count} points, got {point_count}")
+        basis = self.state_b_point_net(state_point.reshape(-1, self.point_dim)).view(
+            batch, point_count, self.strain_dim, self.q_dim, self.state_b_rank
+        )
+        coeff = self.state_b_coeff_net(state_x).view(batch, self.state_b_rank)
+        return torch.einsum("bpajr,br->bpaj", basis, coeff)
+
+    def _state_b_norm(self, x_norm: torch.Tensor, point_norm: torch.Tensor) -> torch.Tensor:
+        return self._linear_b_norm(point_norm) + self.state_b_scale * self._state_b_delta_norm(x_norm, point_norm)
+
+    def _residual_gate(self, x_norm: torch.Tensor) -> torch.Tensor:
+        qn = x_norm[:, self.q_start : self.q_start + self.q_dim]
+        q_raw = qn * self.q_raw_std.to(dtype=x_norm.dtype, device=x_norm.device) + self.q_raw_mean.to(
+            dtype=x_norm.dtype,
+            device=x_norm.device,
+        )
+        norm = torch.linalg.norm(q_raw, dim=-1, keepdim=True)
+        if self.gate_q0 <= 0.0:
+            return torch.ones_like(norm)
+        return norm / (norm + torch.as_tensor(self.gate_q0, dtype=x_norm.dtype, device=x_norm.device))
+
+    def forward(self, x_norm: torch.Tensor, point_norm: torch.Tensor) -> torch.Tensor:
+        if x_norm.ndim != 2:
+            raise ValueError(f"x_norm must have shape [B,{self.input_dim}]")
+        if point_norm.ndim != 3:
+            raise ValueError("point_norm must have shape [B,P,F]")
+        if x_norm.shape[-1] != self.input_dim:
+            raise ValueError(f"x_norm last dimension must be {self.input_dim}")
+        if point_norm.shape[-1] != self.point_dim:
+            raise ValueError(f"point_norm last dimension must be {self.point_dim}")
+        if point_norm.shape[0] != x_norm.shape[0]:
+            raise ValueError("x_norm and point_norm batch dimensions must match")
+        if int(point_norm.shape[1]) != self.ip_count:
+            raise ValueError(f"fixed128 state B model requires {self.ip_count} points, got {point_norm.shape[1]}")
+
+        qn = x_norm[:, self.q_start : self.q_start + self.q_dim]
+        q0 = self.q_zero_norm.to(dtype=x_norm.dtype, device=x_norm.device).view(1, self.q_dim)
+        linear = torch.einsum("bpaj,bj->bpa", self._state_b_norm(x_norm, point_norm), qn - q0)
+        residual = torch.zeros_like(linear)
+        if self.residual_scale != 0.0:
+            b = self.branch(x_norm).view(-1, self.strain_dim, self.basis_dim)
+            t = self.trunk(point_norm.reshape(-1, self.point_dim)).view(
+                x_norm.shape[0], self.ip_count, self.strain_dim, self.basis_dim
+            )
+            residual = self._residual_gate(x_norm).view(-1, 1, 1) * torch.einsum("bak,bpak->bpa", b, t) / (
+                self.basis_dim**0.5
+            )
+        return self._le0_norm(point_norm) + linear + self.residual_scale * residual
+
+
 class NOEMStyleMIONet(nn.Module):
     """NOEM/MIONet-style TRUE176 operator model.
 

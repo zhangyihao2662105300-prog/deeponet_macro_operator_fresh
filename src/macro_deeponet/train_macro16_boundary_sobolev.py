@@ -34,7 +34,12 @@ from .macro16_geometry import (
     macro16_standard_point_table,
     scale_consistency_report,
 )
-from .models import Macro16BoundaryDeepONet, Macro16BoundaryDeepONetWithLE0, Macro16BoundaryDeepONetWithLE0StateB
+from .models import (
+    Macro16BoundaryDeepONet,
+    Macro16BoundaryDeepONetWithLE0,
+    Macro16BoundaryDeepONetWithLE0Fixed128StateB,
+    Macro16BoundaryDeepONetWithLE0StateB,
+)
 from .train_true176_deeponet_sobolev import ad_jacobian, cos_np, rel_np, write_json
 from .true176_data import stats
 
@@ -639,6 +644,30 @@ def physical_balanced_b_loss_from_j_norm(
     return err2.mean(dim=(0, 1)).mean()
 
 
+def explicit_state_b_physical_balanced_loss(
+    model: nn.Module,
+    x_norm: torch.Tensor,
+    point_norm: torch.Tensor,
+    j_target_norm: torch.Tensor,
+    *,
+    le_std_scale: torch.Tensor,
+    q_std_cols: torch.Tensor,
+    b_scale: torch.Tensor,
+    columns: list[int],
+) -> torch.Tensor:
+    if not hasattr(model, "_state_b_norm"):
+        raise ValueError("direct physical B loss requires a model with _state_b_norm")
+    col_idx = torch.as_tensor(columns, dtype=torch.long, device=x_norm.device)
+    state_b_norm = model._state_b_norm(x_norm, point_norm).index_select(-1, col_idx)  # type: ignore[attr-defined]
+    return physical_balanced_b_loss_from_j_norm(
+        state_b_norm,
+        j_target_norm,
+        le_std_scale=le_std_scale,
+        q_std_cols=q_std_cols,
+        b_scale=b_scale,
+    )
+
+
 def sample_columns(columns: list[int], count: int, rng: np.random.Generator) -> list[int]:
     if int(count) <= 0 or int(count) >= len(columns):
         return list(columns)
@@ -670,6 +699,10 @@ def model_style_key(value: str) -> str:
         "state-b": "le0-state-b",
         "stateb": "le0-state-b",
         "macro16-boundary-deeponet-with-le0-state-b": "le0-state-b",
+        "le0-fixed128-state-b": "le0-fixed128-state-b",
+        "fixed128-state-b": "le0-fixed128-state-b",
+        "fixed-128-state-b": "le0-fixed128-state-b",
+        "macro16-boundary-deeponet-with-le0-fixed128-state-b": "le0-fixed128-state-b",
     }
     return aliases.get(key, key)
 
@@ -1043,8 +1076,22 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         ).to(device)
         model_meta_style = "macro16-boundary-deeponet-with-le0-state-b"
         rigid_loss_target = "LE(q_rigid) - LE(0) ~= 0"
+    elif style == "le0-fixed128-state-b":
+        model = Macro16BoundaryDeepONetWithLE0Fixed128StateB(
+            **common_model_kwargs,
+            le0_init_norm=torch.as_tensor(le0_init_norm, dtype=torch.float32),
+            le0_scale=float(getattr(args, "le0_scale", 1.0)),
+            train_le0_static=not bool(getattr(args, "freeze_le0_static", False)),
+            train_le0_point=not bool(getattr(args, "freeze_le0_point", False)),
+            state_b_rank=int(getattr(args, "state_b_rank", 8)),
+            state_b_scale=float(getattr(args, "state_b_scale", 1.0)),
+            detach_state_b=bool(getattr(args, "detach_state_b", True)),
+            state_b_zero_init=not bool(getattr(args, "state_b_random_init", False)),
+        ).to(device)
+        model_meta_style = "macro16-boundary-deeponet-with-le0-fixed128-state-b"
+        rigid_loss_target = "LE(q_rigid) - LE(0) ~= 0"
     else:
-        raise ValueError("model_style must be le0, le0-state-b, or zero-anchor")
+        raise ValueError("model_style must be le0, le0-state-b, le0-fixed128-state-b, or zero-anchor")
     b_prior_warmstart_meta = load_macro16_b_prior_warmstart(
         model,
         checkpoint_path=str(getattr(args, "b_prior_warmstart_checkpoint", "")),
@@ -1071,6 +1118,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     le_std_scale_t = torch.as_tensor(le_std_scale_np, dtype=torch.float32, device=device)
     b_loss_scale_t = torch.as_tensor(b_loss_scale, dtype=torch.float32, device=device)
     q_std_t = torch.as_tensor(q_std.astype(np.float32), dtype=torch.float32, device=device)
+    jacobian_loss_weight = float(getattr(args, "jacobian_loss_weight", 1.0))
+    direct_state_b_loss_weight = float(getattr(args, "direct_state_b_loss_weight", 0.0))
+    if direct_state_b_loss_weight > 0.0 and not hasattr(model, "_state_b_norm"):
+        raise ValueError("--direct-state-b-loss-weight requires le0-state-b or le0-fixed128-state-b")
     history: list[dict[str, Any]] = []
     best_score = float("inf")
     best_report: dict[str, Any] | None = None
@@ -1113,7 +1164,9 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 "physical_b_loss_scale_shape": list(b_loss_scale.shape),
                 "physical_b_loss_scale_min": float(np.min(b_loss_scale)),
                 "physical_b_loss_scale_max": float(np.max(b_loss_scale)),
-                "le0_enabled": bool(style in {"le0", "le0-state-b"}),
+                "direct_state_b_loss_weight": direct_state_b_loss_weight,
+                "direct_state_b_loss_target": "explicit _state_b_norm converted to physical B_macro_qdef",
+                "le0_enabled": bool(style in {"le0", "le0-state-b", "le0-fixed128-state-b"}),
                 "state_b": model.state_b_config() if hasattr(model, "state_b_config") else {"state_b_enabled": False},
                 "le0_init_definition": f"mean_train((LE_macro - {model_visible_b} @ {model_visible_q} - LE_mean) / LE_std)",
                 "le0_star_train_norm_rel_to_LE": norm_ratio_np(le0_star[train_idx], data.le[train_idx]),
@@ -1134,7 +1187,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     for epoch in range(1, int(args.epochs) + 1):
         model.train()
         t0 = time.time()
-        sums = {"loss": 0.0, "le": 0.0, "j": 0.0, "rigid": 0.0}
+        sums = {"loss": 0.0, "le": 0.0, "j": 0.0, "direct_b": 0.0, "rigid": 0.0}
         count = 0
         for xb, pb, leb, jb, _wb in train_loader:
             xb = xb.to(device)
@@ -1146,22 +1199,39 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             le_loss = nn.functional.mse_loss(pred, leb)
             columns = sample_columns(columns_all, int(args.jacobian_columns_per_batch), col_rng)
             if columns:
-                j_pred = ad_jacobian(model, xb, pb, columns, create_graph=True, method="forward")
-                if jacobian_loss_scale == "j-norm":
-                    j_loss = nn.functional.mse_loss(j_pred, jb[:, :, :, columns])
-                elif jacobian_loss_scale == "physical-balanced":
+                if jacobian_loss_weight > 0.0:
+                    j_pred = ad_jacobian(model, xb, pb, columns, create_graph=True, method="forward")
+                    if jacobian_loss_scale == "j-norm":
+                        j_loss = nn.functional.mse_loss(j_pred, jb[:, :, :, columns])
+                    elif jacobian_loss_scale == "physical-balanced":
+                        col_idx = torch.as_tensor(columns, dtype=torch.long, device=device)
+                        j_loss = physical_balanced_b_loss_from_j_norm(
+                            j_pred,
+                            jb[:, :, :, columns],
+                            le_std_scale=le_std_scale_t,
+                            q_std_cols=q_std_t.index_select(0, col_idx),
+                            b_scale=b_loss_scale_t[:, :, :, columns],
+                        )
+                    else:
+                        raise ValueError("unsupported jacobian_loss_scale")
+                else:
+                    j_loss = torch.zeros((), dtype=xb.dtype, device=device)
+                direct_b_loss = torch.zeros((), dtype=xb.dtype, device=device)
+                if direct_state_b_loss_weight > 0.0:
                     col_idx = torch.as_tensor(columns, dtype=torch.long, device=device)
-                    j_loss = physical_balanced_b_loss_from_j_norm(
-                        j_pred,
+                    direct_b_loss = explicit_state_b_physical_balanced_loss(
+                        model,
+                        xb,
+                        pb,
                         jb[:, :, :, columns],
                         le_std_scale=le_std_scale_t,
                         q_std_cols=q_std_t.index_select(0, col_idx),
                         b_scale=b_loss_scale_t[:, :, :, columns],
+                        columns=columns,
                     )
-                else:
-                    raise ValueError("unsupported jacobian_loss_scale")
             else:
                 j_loss = torch.zeros((), dtype=xb.dtype, device=device)
+                direct_b_loss = torch.zeros((), dtype=xb.dtype, device=device)
             rigid_loss = torch.zeros((), dtype=xb.dtype, device=device)
             if float(args.rigid_loss_weight) > 0.0:
                 batch_x16_norm = xb[:, 48:96] * torch.as_tensor(
@@ -1180,7 +1250,12 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 zero_branch[:, :48] = torch.as_tensor((0.0 - q_mean) / q_scale, dtype=xb.dtype, device=device)
                 zero_pred = model(zero_branch, pb)
                 rigid_loss = nn.functional.mse_loss(rigid_pred, zero_pred)
-            loss = float(args.le_loss_weight) * le_loss + float(args.jacobian_loss_weight) * j_loss + float(args.rigid_loss_weight) * rigid_loss
+            loss = (
+                float(args.le_loss_weight) * le_loss
+                + jacobian_loss_weight * j_loss
+                + direct_state_b_loss_weight * direct_b_loss
+                + float(args.rigid_loss_weight) * rigid_loss
+            )
             loss.backward()
             if float(args.grad_clip) > 0.0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), float(args.grad_clip))
@@ -1190,6 +1265,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             sums["loss"] += float(loss.detach().cpu()) * batch_n
             sums["le"] += float(le_loss.detach().cpu()) * batch_n
             sums["j"] += float(j_loss.detach().cpu()) * batch_n
+            sums["direct_b"] += float(direct_b_loss.detach().cpu()) * batch_n
             sums["rigid"] += float(rigid_loss.detach().cpu()) * batch_n
         scheduler.step()
         denom = max(count, 1)
@@ -1199,6 +1275,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             "le_loss_norm_mse": sums["le"] / denom,
             "j_loss_norm_mse": sums["j"] / denom,
             "jacobian_loss_scale": jacobian_loss_scale,
+            "direct_state_b_loss_norm_mse": sums["direct_b"] / denom,
+            "direct_state_b_loss_weight": direct_state_b_loss_weight,
             "rigid_loss_norm_mse": sums["rigid"] / denom,
             "lr": float(scheduler.get_last_lr()[0]),
             "seconds": time.time() - t0,
@@ -1293,6 +1371,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "physical_b_loss_scale_shape": list(b_loss_scale.shape),
         "physical_b_loss_scale_min": float(np.min(b_loss_scale)),
         "physical_b_loss_scale_max": float(np.max(b_loss_scale)),
+        "direct_state_b_loss_weight": direct_state_b_loss_weight,
+        "direct_state_b_loss_target": "explicit _state_b_norm converted to physical B_macro_qdef",
         "q_dim": 48,
         "rigid_modes_removed_from_input": False,
         "fine_grid_geometry_visible": False,
@@ -1329,7 +1409,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--branch-depth", type=int, default=5)
     p.add_argument("--trunk-depth", type=int, default=5)
     p.add_argument("--activation", default="tanh")
-    p.add_argument("--model-style", default="le0", choices=["le0", "le0-state-b", "zero-anchor"])
+    p.add_argument("--model-style", default="le0", choices=["le0", "le0-state-b", "le0-fixed128-state-b", "zero-anchor"])
     p.add_argument("--residual-scale", type=float, default=1.0)
     p.add_argument("--le0-scale", type=float, default=1.0)
     p.add_argument("--freeze-le0-static", action="store_true")
@@ -1352,6 +1432,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--le-loss-weight", type=float, default=1.0)
     p.add_argument("--jacobian-loss-weight", type=float, default=1.0)
     p.add_argument("--jacobian-loss-scale", default="physical-balanced", choices=["physical-balanced", "j-norm"])
+    p.add_argument("--direct-state-b-loss-weight", type=float, default=0.0)
     p.add_argument("--physical-b-loss-floor-rel", type=float, default=2.0e-2)
     p.add_argument("--physical-b-loss-floor-abs", type=float, default=1.0e-8)
     p.add_argument("--rigid-loss-weight", type=float, default=0.1)

@@ -30,6 +30,7 @@ from macro_deeponet.models import (
     FELinearResidualDeepONet,
     Macro16BoundaryDeepONet,
     Macro16BoundaryDeepONetWithLE0,
+    Macro16BoundaryDeepONetWithLE0Fixed128StateB,
     Macro16BoundaryDeepONetWithLE0StateB,
     MacroDeepONet,
     NOEMStyleMIONet,
@@ -56,6 +57,7 @@ from macro_deeponet.train_true176_generic_sobolev import (
 )
 from macro_deeponet.train_macro16_boundary_sobolev import (
     build_physical_b_loss_scale,
+    explicit_state_b_physical_balanced_loss,
     j_norm_to_b_qhat_torch,
     load_macro16_compacts,
     physical_balanced_b_loss_from_j_norm,
@@ -297,6 +299,106 @@ def test_macro16_le0_state_b_model_shapes_and_detach_semantics() -> None:
     assert detach_model.state_b_config()["detach_state_b"] is True
     assert detach_model.state_b_config()["state_b_rank"] == 3
     assert detach_model.state_b_config()["state_b_kind"] == "point_q_rank"
+
+
+def test_macro16_fixed128_state_b_model_has_static_b_and_ad_matches_when_detached() -> None:
+    point_table = macro16_source128_point_table()
+    x16 = macro16_flat_x16()
+    point, _names, _fields = Macro16GeometryMap(x16).build_point_features(point_table)
+    p_norm = torch.as_tensor(np.broadcast_to(point.reshape(1, *point.shape), (2, *point.shape)).copy(), dtype=torch.float32)
+    x_norm = torch.randn(2, 97)
+    x_norm[:, :48] = x_norm[:, :48] * 0.1
+    q0 = torch.randn(48) * 0.05
+    skip = torch.zeros(128, 6, 48)
+    skip[:, 0, 0] = 0.2
+    skip[:, 1, 1] = -0.1
+    torch.manual_seed(20260626)
+    model = Macro16BoundaryDeepONetWithLE0Fixed128StateB(
+        input_dim=97,
+        point_dim=point.shape[-1],
+        ip_count=128,
+        basis_dim=10,
+        hidden_dim=24,
+        branch_depth=2,
+        trunk_depth=2,
+        q_start=0,
+        q_dim=48,
+        skip_init=skip,
+        residual_scale=0.0,
+        le0_scale=0.0,
+        q_zero_norm=q0,
+        state_b_rank=3,
+        detach_state_b=True,
+        state_b_zero_init=False,
+    )
+    out = model(x_norm, p_norm)
+    assert out.shape == (2, 128, 6)
+    assert tuple(model.static_b_norm.shape) == (128, 6, 48)
+    explicit = model._state_b_norm(x_norm, p_norm)
+    j = ad_jacobian(model, x_norm, p_norm, [0, 1, 2], create_graph=False, method="forward")
+    assert torch.allclose(j, explicit[:, :, :, :3], atol=1.0e-5, rtol=1.0e-5)
+    assert model.state_b_config()["state_b_kind"] == "fixed128_point_q_rank"
+    try:
+        model(x_norm, p_norm[:, :127])
+    except ValueError as exc:
+        assert "128" in str(exc)
+    else:
+        raise AssertionError("fixed128 state B accepted non-128 point input")
+
+
+def test_macro16_fixed128_direct_state_b_loss_uses_explicit_physical_b() -> None:
+    point_table = macro16_source128_point_table()
+    x16 = macro16_flat_x16()
+    point, _names, _fields = Macro16GeometryMap(x16).build_point_features(point_table)
+    p_norm = torch.as_tensor(np.broadcast_to(point.reshape(1, *point.shape), (2, *point.shape)).copy(), dtype=torch.float32)
+    x_norm = torch.randn(2, 97)
+    skip = torch.zeros(128, 6, 48)
+    skip[:, 0, 0] = 0.2
+    skip[:, 1, 1] = -0.1
+    model = Macro16BoundaryDeepONetWithLE0Fixed128StateB(
+        input_dim=97,
+        point_dim=point.shape[-1],
+        ip_count=128,
+        basis_dim=10,
+        hidden_dim=24,
+        branch_depth=2,
+        trunk_depth=2,
+        q_start=0,
+        q_dim=48,
+        skip_init=skip,
+        residual_scale=0.0,
+        le0_scale=0.0,
+        state_b_rank=3,
+        detach_state_b=True,
+        state_b_zero_init=True,
+    )
+    columns = [0, 1, 2]
+    le_std = torch.ones(1, 128, 6, 1)
+    q_std = torch.ones(len(columns))
+    target = model._state_b_norm(x_norm, p_norm).detach()[:, :, :, columns]
+    b_scale = torch.ones(1, 1, 6, len(columns))
+    loss0 = explicit_state_b_physical_balanced_loss(
+        model,
+        x_norm,
+        p_norm,
+        target,
+        le_std_scale=le_std,
+        q_std_cols=q_std,
+        b_scale=b_scale,
+        columns=columns,
+    )
+    assert float(loss0.detach()) == 0.0
+    loss1 = explicit_state_b_physical_balanced_loss(
+        model,
+        x_norm,
+        p_norm,
+        target + 0.1,
+        le_std_scale=le_std,
+        q_std_cols=q_std,
+        b_scale=b_scale,
+        columns=columns,
+    )
+    assert float(loss1.detach()) > 0.0
 
 
 def test_macro16_loader_rejects_missing_x16_and_keeps_q48() -> None:
@@ -629,6 +731,111 @@ def test_macro16_state_b_training_checkpoint_loads_for_force_audit() -> None:
         pb = torch.zeros(1, 18, point_mean.size)
         out = loaded(xb, pb)
         assert out.shape == (1, 18, 6)
+
+
+def test_macro16_fixed128_state_b_training_checkpoint_loads_for_force_audit() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        compact = root / "case001_macro16_fixed128_state_b.npz"
+        out_dir = root / "out"
+        n = 4
+        x16 = macro16_flat_x16()
+        rng = np.random.default_rng(86420)
+        q48 = rng.normal(scale=0.05, size=(n, 48)).astype(np.float32)
+        point_count = 128
+        b = np.zeros((n, point_count, 6, 48), dtype=np.float32)
+        b[:, :, 0, 0] = 0.2
+        b[:, :, 1, 1] = -0.1
+        b[:, :, 2, 2] = 0.05 + 0.25 * q48[:, None, 0]
+        le = np.einsum("npaj,nj->npa", b, q48).astype(np.float32)
+        np.savez(
+            compact,
+            standard_operator_contract_version=np.asarray(MACRO16_CONTRACT_VERSION, dtype=object),
+            q48_raw=q48,
+            X16=x16,
+            LE_macro=le,
+            B_macro=b,
+            macro16_point_xi=macro16_source128_point_table().xi.astype(np.float32),
+            case_id=np.asarray([1, 1, 2, 2], dtype=np.int64),
+        )
+        args = SimpleNamespace(
+            seed=25,
+            out_dir=out_dir,
+            compact=[str(compact)],
+            compact_list="",
+            plane_gauss_order=4,
+            thickness_gauss_order=4,
+            scale_mode="normalized",
+            b_label_coordinate="auto",
+            epochs=1,
+            batch_size=2,
+            eval_batch_size=2,
+            num_workers=0,
+            pin_memory=False,
+            frame_stride=1,
+            max_frames_per_compact=0,
+            max_eval_frames=4,
+            basis_dim=8,
+            hidden_dim=16,
+            branch_depth=2,
+            trunk_depth=2,
+            activation="tanh",
+            model_style="le0-fixed128-state-b",
+            residual_scale=0.0,
+            le0_scale=0.0,
+            freeze_le0_static=False,
+            freeze_le0_point=True,
+            fe_baseline_scale=1.0,
+            freeze_fe_point_baseline=True,
+            freeze_skip=False,
+            global_b_prior=False,
+            b_prior_warmstart_checkpoint="",
+            freeze_b_prior_after_warmstart=False,
+            global_b_lr_scale=1.0,
+            point_b_lr_scale=1.0,
+            state_b_lr_scale=1.0,
+            state_b_rank=4,
+            state_b_scale=1.0,
+            state_b_kind="point_q_rank",
+            detach_state_b=True,
+            state_b_random_init=False,
+            anchored_residual_gate_q0=0.0,
+            le_loss_weight=1.0,
+            jacobian_loss_weight=0.1,
+            jacobian_loss_scale="physical-balanced",
+            physical_b_loss_floor_rel=0.02,
+            physical_b_loss_floor_abs=1.0e-8,
+            rigid_loss_weight=0.0,
+            rigid_mode_scale=0.1,
+            jacobian_columns="0,1,2",
+            jacobian_columns_per_batch=3,
+            eval_columns="0,1,2",
+            lr=1.0e-4,
+            lr_decay=1.0,
+            weight_decay=0.0,
+            grad_clip=10.0,
+            val_fraction=0.5,
+            val_cases="2",
+            eval_every=1,
+            cuda=False,
+        )
+        train_macro16_boundary(args)
+        summary = json.loads((out_dir / "training_summary.json").read_text(encoding="utf-8"))
+        assert summary["model_style"] == "macro16-boundary-deeponet-with-le0-fixed128-state-b"
+        assert summary["state_b"]["has_static_b_norm"] is True
+        checkpoint = torch.load(Path(summary["latest_checkpoint"]), map_location="cpu", weights_only=False)
+        loaded = make_trained_macro16_force_model(
+            checkpoint,
+            {key: np.asarray(value) for key, value in checkpoint["norms"].items()},
+            torch.device("cpu"),
+        )
+        assert isinstance(loaded, Macro16BoundaryDeepONetWithLE0Fixed128StateB)
+        branch_mean = np.asarray(checkpoint["norms"]["branch_mean"], dtype=np.float32).reshape(-1)
+        point_mean = np.asarray(checkpoint["norms"]["point_mean"], dtype=np.float32).reshape(-1)
+        xb = torch.zeros(1, branch_mean.size)
+        pb = torch.zeros(1, 128, point_mean.size)
+        out = loaded(xb, pb)
+        assert out.shape == (1, 128, 6)
 
 
 def test_macro16_training_le0_model_fits_nonzero_initial_strain_prior() -> None:

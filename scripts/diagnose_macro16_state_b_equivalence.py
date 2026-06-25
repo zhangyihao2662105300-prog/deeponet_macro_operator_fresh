@@ -29,7 +29,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from audit_macro16_trained_force_closure import torch_load_cross_platform  # noqa: E402
 from macro_deeponet.macro16_geometry import macro16_source128_point_table  # noqa: E402
-from macro_deeponet.models import Macro16BoundaryDeepONetWithLE0StateB  # noqa: E402
+from macro_deeponet.models import Macro16BoundaryDeepONetWithLE0Fixed128StateB, Macro16BoundaryDeepONetWithLE0StateB  # noqa: E402
 from macro_deeponet.train_macro16_boundary_sobolev import (  # noqa: E402
     build_physical_b_loss_scale,
     compact_paths_from_args,
@@ -80,7 +80,7 @@ def model_style_key(value: str) -> str:
     return str(value).strip().lower().replace("_", "-")
 
 
-def load_checkpoint_model(path: Path, device: torch.device) -> tuple[Macro16BoundaryDeepONetWithLE0StateB, dict[str, Any]]:
+def load_checkpoint_model(path: Path, device: torch.device) -> tuple[torch.nn.Module, dict[str, Any]]:
     checkpoint = torch_load_cross_platform(path, device)
     args = checkpoint.get("args", {})
     norms = checkpoint.get("norms", {})
@@ -92,12 +92,12 @@ def load_checkpoint_model(path: Path, device: torch.device) -> tuple[Macro16Boun
     branch_std = np.asarray(norms["branch_std"], dtype=np.float32)
     le_mean = np.asarray(norms["le_mean"], dtype=np.float32)
     le_std = np.asarray(norms["le_std"], dtype=np.float32)
-    skip_init = np.zeros((6, 48), dtype=np.float32)
+    skip_init = np.zeros((128, 6, 48), dtype=np.float32) if "fixed128" in model_style else np.zeros((6, 48), dtype=np.float32)
     le0_init = np.zeros((128, 6), dtype=np.float32)
-    model = Macro16BoundaryDeepONetWithLE0StateB(
+    common = dict(
         input_dim=int(branch_mean.reshape(-1).shape[0]),
         point_dim=int(np.asarray(norms["point_mean"]).reshape(-1).shape[0]),
-        ip_count=0,
+        ip_count=128 if "fixed128" in model_style else 0,
         q_start=0,
         q_dim=48,
         basis_dim=int(args.get("basis_dim", 96)),
@@ -122,9 +122,15 @@ def load_checkpoint_model(path: Path, device: torch.device) -> tuple[Macro16Boun
         state_b_rank=int(state_b.get("state_b_rank", args.get("state_b_rank", 8))),
         state_b_scale=float(state_b.get("state_b_scale", args.get("state_b_scale", 1.0))),
         detach_state_b=bool(state_b.get("detach_state_b", args.get("detach_state_b", True))),
-        state_b_kind=str(state_b.get("state_b_kind", args.get("state_b_kind", "point_q_rank"))),
         state_b_zero_init=not bool(args.get("state_b_random_init", False)),
-    ).to(device)
+    )
+    if "fixed128" in model_style:
+        model = Macro16BoundaryDeepONetWithLE0Fixed128StateB(**common).to(device)
+    else:
+        model = Macro16BoundaryDeepONetWithLE0StateB(
+            **common,
+            state_b_kind=str(state_b.get("state_b_kind", args.get("state_b_kind", "point_q_rank"))),
+        ).to(device)
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
     return model, checkpoint
@@ -200,7 +206,10 @@ def evaluate_checkpoint(model: Macro16BoundaryDeepONetWithLE0StateB, arrays: dic
     with torch.no_grad():
         pred_norm = model(xb, pb)
         state_b_norm = model._state_b_norm(xb, pb)
-        residual_norm = model.residual_offset_norm(xb, pb)
+        if hasattr(model, "residual_offset_norm"):
+            residual_norm = model.residual_offset_norm(xb, pb)
+        else:
+            residual_norm = torch.zeros_like(pred_norm)
     with torch.enable_grad():
         j_ad_norm = ad_jacobian(model, xb, pb, columns, create_graph=False, method="forward")
     state_b_np = state_b_norm.detach().cpu().numpy().astype(np.float64)

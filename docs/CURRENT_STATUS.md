@@ -30,7 +30,8 @@ TRUE176 / CSS8 128-IP is the teacher and audit baseline, not the final model
 interface.
 
 The current priority is limited LE/B training plus mandatory post-training
-mechanical audit. Full tangent closure remains pending.
+mechanical audit. Gate 16 shows that q dependent B is a current training
+blocker. Full tangent closure remains pending.
 
 ## Standard Element
 
@@ -83,6 +84,7 @@ fixed parent integration points.
 | Gate 04 geometry generality | PASS for main-route required families | Regular, light, medium, cylindrical, conical, thickness-varying, and mild double-curvature selected-frame force closure pass; repaired strong non-inverted robustness data also passes. |
 | Gate 05 IP reduction | keep 128 active | `reports/05_ip_reduction_audit.md`; 96/64/32 candidates fail selected-frame force closure, 18 remains failure control. |
 | Gate 06 training | LIMITED RELEASE | `docs/TRAINING_RELEASE_DECISION.md`; training may start only for LE/B learning, with mandatory selected-frame force closure after training. |
+| Gate 16 q dependent B diagnosis | diagnosis PASS, large training release FAIL | `reports/16_q_dependent_b_diagnosis.md`; B varies with `q48_def_hat`; point-only B prior is insufficient; formal large training remains blocked. |
 
 Training is allowed only within the limited LE/B release boundary.
 
@@ -112,6 +114,12 @@ Current verified or adopted conclusions:
   control for future Gate 05 planning.
 - Current 96/64/32 reduced integration-point candidates fail Gate 05; keep 128
   points active.
+- Gate 16 shows `B_macro_qdef` changes with `q48_def_hat`; a point-only
+  `B_base(point)` prior has about `0.08` to `0.09` irreducible error on the
+  case031 six-frame diagnosis.
+- A linear q correction reduces B error to about `0.043` on the same diagnosis,
+  so q dependent B is a real missing expression, not an ordering or data
+  corruption issue.
 
 ## Pending Issues That Are Not Data Errors
 
@@ -131,6 +139,10 @@ data is bad:
   approximation; strict nonlinear Kabsch Jacobian remains a future audit topic.
 - Full consistent tangent K is still an unresolved route decision or
   implementation task.
+- Current `Macro16BoundaryDeepONetWithLE0` expresses q dependent B only through
+  the residual derivative. Gate 16 residual small experiments improved AD-B but
+  did not reach force closure, so the limited training route still needs a
+  state-dependent B baseline prototype before any formal large training.
 
 These issues must not be hidden inside network training as if a network could
 repair a definition mismatch. They do not block the limited LE/B training
@@ -195,10 +207,11 @@ Required after training:
 Recommended next tasks, in order:
 
 1. Keep material-only K diagnostics separate from full tangent claims.
-2. Run limited LE/B training under the current Macro16 source128 contract.
-3. After training, run selected-frame force closure before claiming mechanical
-   usability.
-4. Decide later whether the full consistent tangent requirement is implemented
+2. Prototype a state-dependent B baseline in a small Gate 17 experiment.
+3. Keep all Gate 17 work outside the main model unless the report proves it.
+4. After any prototype training, rerun selected-frame force closure before
+   claiming mechanical usability.
+5. Decide later whether the full consistent tangent requirement is implemented
    or explicitly waived with evidence.
 
 ## Currently Forbidden

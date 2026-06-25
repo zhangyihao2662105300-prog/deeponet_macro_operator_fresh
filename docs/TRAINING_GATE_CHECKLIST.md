@@ -4,6 +4,9 @@ Role: Training Gate Checklist Agent
 
 Status: limited training release decision recorded
 
+Gate 16 update: q dependent B diagnosis is complete. The limited training
+release remains diagnostic only; formal large training is not released.
+
 This checklist defines what must be true before network training is allowed.
 It does not start training, change the model, or modify the data contract.
 
@@ -41,6 +44,9 @@ Current status:
   robustness data also passes.
 - Gate 05: reduced candidates fail; keep 128 points active.
 - Gate 06: LIMITED RELEASE for LE/B training only.
+- Gate 16: q dependent B diagnosis passed, but large training release failed.
+  `B_macro_qdef` changes with `q48_def_hat`, while the current point-only B
+  prior does not directly express that state dependence.
 
 Do not treat this as a full tangent or solver-readiness release.
 
@@ -64,6 +70,9 @@ be treated as proof that the data is corrupt:
   geometry and passes as a non-blocking robustness boundary check.
 - `B_macro_qdef` uses the current small-rotation linear projection
   approximation; strict nonlinear Kabsch Jacobian remains a future audit topic.
+- Gate 16 shows the current `B_base(point)` prior has residual q dependent B
+  error. The next safe step is a small state-dependent B baseline prototype, not
+  formal large training.
 
 These issues no longer block the limited LE/B training release, but they remain
 unresolved mechanics items and are not the same as q48 ordering corruption, LE
@@ -158,3 +167,5 @@ Not allowed by this checklist:
   passes after training.
 - Treat material-only K as the full tangent gate.
 - Change model architecture, q48 order, LE order, or integration rule.
+- Start formal large training before the Gate 17 state-dependent B baseline
+  prototype is diagnosed.

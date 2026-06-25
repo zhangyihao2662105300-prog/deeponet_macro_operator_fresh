@@ -40,7 +40,7 @@ from build_macro16_from_128_teacher import (  # noqa: E402
     scalar_text,
     validate_ip_keys,
 )
-from macro_deeponet.macro16_geometry import MACRO16_CONTRACT_VERSION  # noqa: E402
+from macro_deeponet.macro16_geometry import MACRO16_CONTRACT_VERSION, Macro16GeometryMap, macro16_source128_point_table  # noqa: E402
 from macro_deeponet.true176_data import standard_css8_row_map  # noqa: E402
 
 SOURCE128_CONTRACT_VERSION = "macro16-source128-teacher-physical-volume-001"
@@ -78,6 +78,8 @@ def row_select_or_broadcast(vals: np.ndarray, rows: np.ndarray, n_total: int, ta
 
 def load_volume_weights(z: np.lib.npyio.NpzFile, path: Path, n_total: int, rows: np.ndarray, mode: str) -> tuple[np.ndarray, str]:
     key_mode = str(mode).strip().lower().replace("_", "-")
+    if key_mode == "macro16-x16":
+        raise ValueError("macro16-x16 weights are generated after X16 node-order normalization")
     if key_mode == "ip-ivol":
         key = "ip_IVOL_abaqus"
     elif key_mode == "inferred-dle":
@@ -97,6 +99,18 @@ def load_volume_weights(z: np.lib.npyio.NpzFile, path: Path, n_total: int, rows:
 def source_macro_xi() -> np.ndarray:
     row = standard_css8_row_map()
     return row[:, 9:12].astype(np.float64)
+
+
+def macro16_x16_source128_weights(x16: np.ndarray) -> np.ndarray:
+    nodes = np.asarray(x16, dtype=np.float64).reshape(-1, 16, 3)
+    point_table = macro16_source128_point_table()
+    weights = np.empty((nodes.shape[0], point_table.xi.shape[0]), dtype=np.float64)
+    for i, frame_nodes in enumerate(nodes):
+        geom = Macro16GeometryMap(frame_nodes)
+        fields = geom.eval_points(point_table)
+        l_ref = float(geom.l_ref)
+        weights[i] = np.asarray(fields["integration_weight_hat"], dtype=np.float64) * (l_ref ** 3)
+    return weights
 
 
 def build_one(
@@ -128,7 +142,12 @@ def build_one(
             rows,
             strain_coordinate_mode=strain_coordinate_mode,
         )
-        weights, weight_key = load_volume_weights(z, path, n_total, rows, volume_weight_mode)
+        key_mode = str(volume_weight_mode).strip().lower().replace("_", "-")
+        if key_mode == "macro16-x16":
+            weights = np.empty((rows.size, 128), dtype=np.float64)
+            weight_key = "macro16_x16_source128_standard_rule"
+        else:
+            weights, weight_key = load_volume_weights(z, path, n_total, rows, volume_weight_mode)
         strain_field = scalar_text(z, "strain_field", scalar_text(z, "strain_label_key", "LE"))
         b_strain_field = scalar_text(z, "B_label_strain_field", strain_field)
     resolved_node_order = resolve_source_node_order(source_node_order, x16_source)
@@ -138,6 +157,8 @@ def build_one(
         b128=b128,
         source_node_order=resolved_node_order,
     )
+    if str(volume_weight_mode).strip().lower().replace("_", "-") == "macro16-x16":
+        weights = macro16_x16_source128_weights(x16)
     if not np.all(np.isfinite(le128)) or not np.all(np.isfinite(b128)):
         raise ValueError(f"{path}: non-finite source128 teacher labels")
     first_case = int(case_id[0]) if case_id.size else -1
@@ -171,6 +192,7 @@ def build_one(
         macro16_parent_interpolation_from_128=np.asarray("none_source_128_points_kept", dtype=object),
         integration_weight_source=np.asarray(weight_key, dtype=object),
         integration_weight_coordinate=np.asarray("physical-volume", dtype=object),
+        integration_weight_rule=np.asarray("macro16_x16_standard_source128" if weight_key == "macro16_x16_source128_standard_rule" else "source_teacher_volume", dtype=object),
         strain_output_coordinate=np.asarray(strain_meta["strain_output_coordinate"], dtype=object),
         strain_field=np.asarray(strain_field, dtype=object),
         B_label_strain_field=np.asarray(b_strain_field, dtype=object),
@@ -194,6 +216,7 @@ def build_one(
         **strain_meta,
         "integration_weight_source": weight_key,
         "integration_weight_coordinate": "physical-volume",
+        "integration_weight_rule": "macro16_x16_standard_source128" if weight_key == "macro16_x16_source128_standard_rule" else "source_teacher_volume",
         "label_source": "128-IP TRUE176/CSS8 teacher labels kept as Macro16 source128 point set",
         "model_visible_arrays": ["q48_raw", "X16", "macro16_point_xi/source128 point features"],
         "fine_grid_geometry_visible_to_model": False,
@@ -279,7 +302,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--allow-missing-ip-keys", action="store_true")
     parser.add_argument("--strain-coordinate-mode", default="global-to-macro-local", choices=("global-to-macro-local", "source-local"))
     parser.add_argument("--source-node-order", default="auto", choices=("auto", "macro16", "true176-keep"))
-    parser.add_argument("--volume-weight-mode", default="auto", choices=("auto", "ip-ivol", "inferred-dle"))
+    parser.add_argument("--volume-weight-mode", default="auto", choices=("auto", "ip-ivol", "inferred-dle", "macro16-x16"))
     return parser.parse_args()
 
 

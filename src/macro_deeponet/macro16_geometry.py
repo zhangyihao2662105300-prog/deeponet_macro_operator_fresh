@@ -68,6 +68,34 @@ def macro16_standard_point_table(plane_order: int = 3, thickness_order: int = 2)
     return Macro16PointTable(xi=np.asarray(xi, dtype=np.float64), weights=np.asarray(weights, dtype=np.float64))
 
 
+def macro16_source128_point_table() -> Macro16PointTable:
+    """Return 4x4x2 subcell Gauss points as a Macro16 parent-domain rule.
+
+    This is a standard Macro16 rule: the point coordinates are fixed in the
+    Macro16 parent domain, and physical weights are generated from X16 through
+    the Macro16 isoparametric map.  It does not use internal fine-grid nodes.
+    """
+
+    gp, gw = np.polynomial.legendre.leggauss(2)
+    xi: list[list[float]] = []
+    weights: list[float] = []
+    h = 2.0 / 4.0
+    for ey in range(4):
+        s_center = -1.0 + (float(ey) + 0.5) * h
+        for ex in range(4):
+            r_center = -1.0 + (float(ex) + 0.5) * h
+            for ip in range(8):
+                lr = ip % 2
+                ls = (ip // 2) % 2
+                lt = ip // 4
+                r = r_center + 0.5 * h * float(gp[lr])
+                s = s_center + 0.5 * h * float(gp[ls])
+                t = float(gp[lt])
+                xi.append([r, s, t])
+                weights.append(float(0.5 * h * 0.5 * h * gw[lr] * gw[ls] * gw[lt]))
+    return Macro16PointTable(xi=np.asarray(xi, dtype=np.float64), weights=np.asarray(weights, dtype=np.float64))
+
+
 def _conventional_quad8_shape(rs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     pts = np.asarray(rs, dtype=np.float64)
     if pts.shape[-1] != 2:

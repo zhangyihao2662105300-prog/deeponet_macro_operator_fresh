@@ -467,6 +467,23 @@ def energy_checks(q: np.ndarray, force_macro: np.ndarray, force_ref: np.ndarray,
     }
 
 
+def weight_comparison(weights: np.ndarray, source: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "compact_weight_sum_min": float(np.min(np.sum(weights, axis=1))),
+        "compact_weight_sum_max": float(np.max(np.sum(weights, axis=1))),
+    }
+    for key, label in (("source_ip_volume", "vs_source_ip_volume"), ("source_inferred_volume", "vs_source_inferred_volume")):
+        if key not in source:
+            out[label] = {"available": False, "reason": f"missing {key}"}
+            continue
+        ref = np.asarray(source[key], dtype=np.float64)
+        if ref.shape != weights.shape:
+            out[label] = {"available": False, "reason": f"shape mismatch compact {weights.shape} source {ref.shape}"}
+            continue
+        out[label] = {"available": True, **metric(weights, ref)}
+    return out
+
+
 def audit_one(path: Path, weight_mode: str) -> dict[str, Any]:
     macro = load_macro(path)
     source_path = Path(str(macro["source_compact"]))
@@ -554,6 +571,7 @@ def audit_one(path: Path, weight_mode: str) -> dict[str, Any]:
         "B_label_q_coordinate": macro["B_label_q_coordinate"],
         "macro16_point_set": macro["macro16_point_set"],
         "weight": weight_meta,
+        "weight_comparison": weight_comparison(weights, source),
         "force": compact_candidate["force"],
         "force_dof_max_abs_error": compact_candidate["force_dof_max_abs_error"],
         "stiffness": compact_candidate["stiffness"],
@@ -608,6 +626,8 @@ def aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
     out.update(stats("plus_Kdq_vs_dF_rel", ("plus_Kdq_vs_dF", "rel")))
     out.update(stats("frame_Kdq_vs_dF_rel", ("frame_to_frame_Kdq_vs_dF_source_RF", "rel")))
     out.update(stats("energy_qF_vs_integral_rel", ("energy", "macro_q_dot_F_vs_integral_LE_sigma", "rel")))
+    out.update(stats("weight_vs_source_ip_volume_rel", ("weight_comparison", "vs_source_ip_volume", "rel")))
+    out.update(stats("weight_vs_source_inferred_volume_rel", ("weight_comparison", "vs_source_inferred_volume", "rel")))
     out.update(stats("source_F_DLE_vs_RF_rel", ("source_force_checks", "F_DLE_IVOL_vs_RF_projected", "rel")))
     out.update(stats("source_F128_D_IVOL_vs_RF_rel", ("source_force_checks", "F128_D_IVOL_vs_RF_projected", "rel")))
     return out

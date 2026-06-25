@@ -22,6 +22,7 @@ from macro_deeponet.geometry import (
 from macro_deeponet.macro16_geometry import (
     MACRO16_CONTRACT_VERSION,
     Macro16GeometryMap,
+    macro16_source128_point_table,
     macro16_standard_point_table,
     shape_functions_macro16,
 )
@@ -445,6 +446,22 @@ def test_macro16_detj_rejects_flipped_surface_order() -> None:
         assert "positive nondegenerate detJ" in str(exc)
     else:
         raise AssertionError("Macro16GeometryMap accepted flipped top and bottom node order")
+
+
+def test_macro16_source128_point_table_is_standard_parent_rule() -> None:
+    table = macro16_source128_point_table()
+    assert table.xi.shape == (128, 3)
+    assert table.weights.shape == (128,)
+    assert np.isclose(float(np.sum(table.weights)), 8.0)
+    assert np.all(table.xi >= -1.0)
+    assert np.all(table.xi <= 1.0)
+    x16 = macro16_flat_x16(thickness=0.2)
+    fields = Macro16GeometryMap(x16).eval_points(table)
+    weights = np.asarray(fields["integration_weight_hat"], dtype=np.float64)
+    assert weights.shape == (128,)
+    assert np.all(weights > 0.0)
+    assert np.isclose(float(np.sum(weights)), 0.1, rtol=1.0e-7, atol=1.0e-9)
+    assert np.isclose(float(np.sum(weights)) * (2.0 ** 3), 0.8, rtol=1.0e-7, atol=1.0e-8)
 
 
 def test_macro16_constant_strain_linear_displacement_is_constant_at_ips() -> None:

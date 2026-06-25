@@ -456,3 +456,19 @@ py -m macro_deeponet.train_macro16_boundary_sobolev `
   --jacobian-columns 0,1 `
   --eval-columns 0,1
 ```
+
+Before a large run, use the two-geometry smoke script on real Macro16 compacts.
+It selects one near-regular geometry and one lightly distorted geometry, writes
+a tiny subset compact, then runs the Macro16 trainer:
+
+```powershell
+cd D:\IS-FEM\deeponet_macro_operator_fresh
+$env:PYTHONPATH = "D:\IS-FEM\deeponet_macro_operator_fresh\src"
+py scripts\run_macro16_two_geometry_smoke.py `
+  --compact-list D:\path\to\macro16_compact_list.txt `
+  --out-root runs\macro16_two_geometry_smoke `
+  --frames-per-geometry 16 `
+  --epochs 20 `
+  --jacobian-columns 0,1,2,3,4,5,6,7,8,9,10,11 `
+  --eval-columns 0,1,2,3,4,5,6,7,8,9,10,11
+```

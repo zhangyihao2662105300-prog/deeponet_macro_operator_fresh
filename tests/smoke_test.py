@@ -66,6 +66,7 @@ from validate_isoparametric_mapping import run_mapping_validation
 from validate_true176_css8_macro_mapping import run_css8_macro_validation
 from audit_query_point_data_coverage import run_coverage_audit
 from export_abaqus_true176_complete_compact import enforce_ip_audit, merge_existing_payload
+from run_macro16_two_geometry_smoke import run_two_geometry_smoke
 
 
 def macro16_flat_x16(thickness: float = 0.2) -> np.ndarray:
@@ -351,6 +352,88 @@ def test_macro16_rigid_modes_are_zero_strain_under_isoparametric_gradient() -> N
         grad_u = np.einsum("pij,pik->pjk", np.asarray(fields["invJ_hat"], dtype=np.float64), du_dxi)
         strain = 0.5 * (grad_u + np.swapaxes(grad_u, 1, 2))
         assert np.max(np.abs(strain)) < 1.0e-12
+
+
+def test_macro16_two_geometry_smoke_script_runs_on_synthetic_compact() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        compact = root / "macro16_two_geom_source.npz"
+        out_root = root / "out"
+        x_regular = macro16_flat_x16()
+        x_distorted = x_regular.copy()
+        x_distorted[2, 0] += 0.12
+        x_distorted[5, 1] -= 0.08
+        x_distorted[10, 0] += 0.10
+        x_all = np.stack([x_regular, x_regular, x_distorted, x_distorted], axis=0).astype(np.float32)
+        rng = np.random.default_rng(1122)
+        q48 = rng.normal(scale=0.04, size=(4, 48)).astype(np.float32)
+        b = np.zeros((4, 18, 6, 48), dtype=np.float32)
+        b[:, :, 0, 0] = 0.15
+        b[:, :, 1, 1] = -0.08
+        b[:, :, 3, 3] = 0.03
+        le = np.einsum("npaj,nj->npa", b, q48).astype(np.float32)
+        np.savez(
+            compact,
+            standard_operator_contract_version=np.asarray(MACRO16_CONTRACT_VERSION, dtype=object),
+            q48_raw=q48,
+            X16=x_all,
+            LE_macro=le,
+            B_macro=b,
+            case_id=np.asarray([1, 1, 2, 2], dtype=np.int64),
+        )
+        args = SimpleNamespace(
+            compact=[str(compact)],
+            compact_list="",
+            out_root=out_root,
+            frames_per_geometry=2,
+            geometry_round_decimals=8,
+            slight_distortion_min_delta=0.0,
+            scan_frame_stride=1,
+            scan_max_frames_per_compact=0,
+            plane_gauss_order=3,
+            thickness_gauss_order=2,
+            scale_mode="normalized",
+            b_label_coordinate="auto",
+            epochs=1,
+            batch_size=2,
+            eval_batch_size=2,
+            max_eval_frames=4,
+            basis_dim=8,
+            hidden_dim=16,
+            branch_depth=2,
+            trunk_depth=2,
+            activation="tanh",
+            residual_scale=0.0,
+            fe_baseline_scale=1.0,
+            freeze_fe_point_baseline=True,
+            freeze_skip=False,
+            global_b_prior=True,
+            anchored_residual_gate_q0=0.0,
+            le_loss_weight=1.0,
+            jacobian_loss_weight=0.1,
+            rigid_loss_weight=0.0,
+            rigid_mode_scale=0.1,
+            jacobian_columns="0,1",
+            jacobian_columns_per_batch=1,
+            eval_columns="0,1",
+            lr=1.0e-4,
+            lr_decay=1.0,
+            weight_decay=0.0,
+            grad_clip=10.0,
+            val_fraction=0.5,
+            eval_every=1,
+            seed=33,
+            cuda=False,
+            require_convergence=False,
+            max_best_le_rel=0.0,
+            max_best_b_rel=0.0,
+        )
+        summary = run_two_geometry_smoke(args)
+        assert summary["selected_geometry_count"] == 2
+        assert summary["selected_frame_count"] == 4
+        assert Path(summary["subset_compact"]).exists()
+        assert Path(summary["training_summary"]).exists()
+        assert summary["convergence"]["thresholds_enforced"] is False
 
 
 def test_true176_xkeep_branch_and_ad_shapes() -> None:
@@ -1882,6 +1965,10 @@ if __name__ == "__main__":
     test_macro16_shape_geometry_and_ad_shapes()
     test_macro16_loader_rejects_missing_x16_and_keeps_q48()
     test_macro16_training_smoke_runs_one_epoch()
+    test_macro16_detj_rejects_flipped_surface_order()
+    test_macro16_constant_strain_linear_displacement_is_constant_at_ips()
+    test_macro16_rigid_modes_are_zero_strain_under_isoparametric_gradient()
+    test_macro16_two_geometry_smoke_script_runs_on_synthetic_compact()
     test_true176_xkeep_branch_and_ad_shapes()
     test_noem_style_mionet_splits_q_and_geometry()
     test_fe_linear_residual_model_has_explicit_b_baseline()

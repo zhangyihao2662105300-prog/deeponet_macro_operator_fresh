@@ -149,7 +149,111 @@ PYTHONPATH=src;scripts py -3 -m pytest tests\smoke_test.py -q -k "elastic_d or f
 4. fixed128 state B 训练 smoke 可启用 force residual loss
 5. enrichment 脚本可从 source compact 复制 `elastic_D`
 
-## 7. 当前状态
+## 7. Linux 训练
+
+Linux 机器：
+
+```text
+lab-gpu-ts
+```
+
+远端目录：
+
+```text
+/home/ydh/IS-FEM/gate29_force_residual/repo
+```
+
+数据：
+
+```text
+runs/gate29_force_residual_loss/enriched_case031_first6_compact_list.txt
+```
+
+elastic_D 富集报告：
+
+```text
+runs/gate29_force_residual_loss/enrich_elastic_d_summary.json
+```
+
+富集结果：
+
+```text
+1 compact
+6 frames
+elastic_D shape 6 x 6 x 6
+source key elastic_D
+```
+
+三卡训练：
+
+```text
+f01 GPU 0 force weight 0.1 LE weight 1.0
+f05 GPU 1 force weight 0.5 LE weight 1.0
+f10 GPU 2 force weight 1.0 LE weight 0.5
+```
+
+共同设置：
+
+```text
+model le0-fixed128-state-b
+state_b_rank 12
+direct_state_b_loss_weight 5.0
+jacobian_loss_weight 0.0
+epochs 3000
+batch_size 6
+num_workers 4
+pin_memory true
+```
+
+## 8. 训练结果
+
+| run | best epoch | train LE rel | train AD_B rel | val LE rel | val AD_B rel |
+|---|---:|---:|---:|---:|---:|
+| f01 | 3000 | 0.0462323164 | 0.0490282800 | 0.1590740954 | 0.1092934815 |
+| f05 | 200 | 0.0800320987 | 0.0630040397 | 0.1746738984 | 0.1276345614 |
+| f10 | 100 | 0.0882521778 | 0.0659928900 | 0.1559539688 | 0.1359003293 |
+
+## 9. Selected Frame Force Audit
+
+命令类型：
+
+```text
+python3 scripts/audit_macro16_trained_force_closure.py
+```
+
+体积口径：
+
+```text
+selected-frame
+```
+
+source path map：
+
+```text
+D:\IS-FEM=/home/ydh/IS-FEM
+```
+
+结果：
+
+| run | model force rel | teacher force rel | LE rel | B rel | result |
+|---|---:|---:|---:|---:|---|
+| f01 | 0.0882157802 | 0.0127911083 | 0.1352254904 | 0.0746432692 | PASS |
+| f05 | 0.1412967153 | 0.0127911083 | 0.1523413314 | 0.0892691982 | FAIL |
+| f10 | 0.1939571690 | 0.0127911083 | 0.1389705778 | 0.0963234912 | FAIL |
+
+Gate 23 best：
+
+```text
+force rel 0.1073731865
+```
+
+Gate 29 best：
+
+```text
+force rel 0.0882157802
+```
+
+## 10. 当前状态
 
 代码实现：
 
@@ -157,34 +261,49 @@ PYTHONPATH=src;scripts py -3 -m pytest tests\smoke_test.py -q -k "elastic_d or f
 PASS
 ```
 
-Linux 正式训练：
+Linux 训练：
 
 ```text
-待运行
+PASS
 ```
 
 Gate 29 结果：
 
 ```text
-IMPLEMENTATION READY
+PASS prototype threshold
 ```
 
-不是训练通过。
-
-## 8. 下一步
-
-在 Linux 机器上：
-
-1. 同步本提交
-2. enrich case031 first6 compact 的 `elastic_D`
-3. 跑三组 force residual 小训练
-4. 对 best checkpoint 跑 selected-frame force audit
-5. 和 Gate 23 best `0.1073731865` 比较
-
-通过标准：
+通过原因：
 
 ```text
-force rel < 0.10
+f01 force rel 0.0882157802 < 0.10
+f01 better than Gate 23 best 0.1073731865
 ```
 
-并且最好优于 Gate 23 best。
+限制：
+
+```text
+只是在 case031 first6 小样本上通过
+不是大规模训练释放
+不是 full tangent closure
+```
+
+## 11. 下一步
+
+进入 Gate 30。
+
+建议任务：
+
+1. 诊断为什么 f01 通过但 f05 和 f10 变差
+2. 固定 f01 作为当前最佳超参数
+3. 加入 B prior warmstart 对照
+4. 在 case019 first6 和 case031 first6 都跑 force residual 小训练
+5. 如果两 case 都过 `0.10`，再扩到 16 case 小训练
+
+Gate 30 暂定通过标准：
+
+```text
+case019 first6 force rel < 0.10
+case031 first6 force rel < 0.10
+两者 teacher force rel 仍正常
+```

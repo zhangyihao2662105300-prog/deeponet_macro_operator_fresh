@@ -30,7 +30,7 @@ TRUE176_MACRO_TO_KEEP_FLAT = np.asarray(
     dtype=np.int64,
 )
 
-WEIGHT_MODES = ("lref3", "as-stored", "source-volume-sum", "source-inferred-volume-sum")
+WEIGHT_MODES = ("auto", "lref3", "as-stored", "source-volume-sum", "source-inferred-volume-sum")
 
 
 def json_default(obj: Any) -> Any:
@@ -238,6 +238,8 @@ def load_macro(path: Path) -> dict[str, Any]:
             "source_node_order": scalar_text(z, "source_node_order", "macro16"),
             "strain_output_coordinate": scalar_text(z, "strain_output_coordinate", ""),
             "B_label_q_coordinate": scalar_text(z, "B_label_q_coordinate", ""),
+            "integration_weight_coordinate": scalar_text(z, "integration_weight_coordinate", ""),
+            "macro16_point_set": scalar_text(z, "macro16_point_set", ""),
         }
 
 
@@ -296,6 +298,10 @@ def physical_weights(macro: dict[str, Any], source: dict[str, Any], weight_mode:
     mode = str(weight_mode).strip().lower().replace("_", "-")
     if mode not in WEIGHT_MODES:
         raise ValueError(f"weight_mode must be one of {WEIGHT_MODES}, got {weight_mode!r}")
+    requested_mode = mode
+    if mode == "auto":
+        coord = str(macro.get("integration_weight_coordinate", "")).strip().lower().replace("_", "-")
+        mode = "as-stored" if coord in {"physical-volume", "physical", "ivol", "abaqus-ivol"} else "lref3"
     l_ref = np.asarray([characteristic_length(x) for x in np.asarray(macro["x16"], dtype=np.float64)], dtype=np.float64)
     if mode == "lref3":
         weights *= (l_ref ** 3).reshape(-1, 1)
@@ -310,7 +316,9 @@ def physical_weights(macro: dict[str, Any], source: dict[str, Any], weight_mode:
         scale = np.sum(np.asarray(source["source_inferred_volume"], dtype=np.float64), axis=1) / np.sum(weights, axis=1)
         weights *= scale.reshape(-1, 1)
     return weights, {
+        "requested_weight_mode": requested_mode,
         "weight_mode": mode,
+        "integration_weight_coordinate": str(macro.get("integration_weight_coordinate", "")),
         "L_ref_min": float(np.min(l_ref)),
         "L_ref_max": float(np.max(l_ref)),
         "macro_weight_sum_min": float(np.min(np.sum(weights, axis=1))),
@@ -492,9 +500,11 @@ def audit_one(path: Path, weight_mode: str) -> dict[str, Any]:
             for pos, macro_dir in enumerate(dirs_macro.tolist()):
                 full_kfd[:, :, int(macro_dir)] = kfd_subset[:, :, pos]
             source_kfd_symmetry = stiffness_symmetry(full_kfd)
-    macro18 = candidate_report(
-        name="macro16_18pt",
-        point_count=int(np.asarray(macro["le"]).shape[1]),
+    compact_point_count = int(np.asarray(macro["le"]).shape[1])
+    compact_candidate_name = "macro16_18pt" if compact_point_count == 18 else f"macro16_{compact_point_count}pt_compact"
+    compact_candidate = candidate_report(
+        name=compact_candidate_name,
+        point_count=compact_point_count,
         force=force_macro,
         stiffness=stiffness_macro,
         energy_twice=energy_twice,
@@ -542,17 +552,19 @@ def audit_one(path: Path, weight_mode: str) -> dict[str, Any]:
         "source_node_order": source_order,
         "strain_output_coordinate": macro["strain_output_coordinate"],
         "B_label_q_coordinate": macro["B_label_q_coordinate"],
+        "macro16_point_set": macro["macro16_point_set"],
         "weight": weight_meta,
-        "force": macro18["force"],
-        "force_dof_max_abs_error": macro18["force_dof_max_abs_error"],
-        "stiffness": macro18["stiffness"],
-        "stiffness_symmetry_macro": macro18["stiffness_symmetry"],
+        "force": compact_candidate["force"],
+        "force_dof_max_abs_error": compact_candidate["force_dof_max_abs_error"],
+        "stiffness": compact_candidate["stiffness"],
+        "stiffness_symmetry_macro": compact_candidate["stiffness_symmetry"],
         "stiffness_symmetry_source_fd": source_kfd_symmetry,
-        "plus_Kdq_vs_dF": macro18["plus_Kdq_vs_dF"],
-        "frame_to_frame_Kdq_vs_dF_source_RF": macro18["frame_to_frame_Kdq_vs_dF_source_RF"],
-        "energy": macro18["energy"],
+        "plus_Kdq_vs_dF": compact_candidate["plus_Kdq_vs_dF"],
+        "frame_to_frame_Kdq_vs_dF_source_RF": compact_candidate["frame_to_frame_Kdq_vs_dF_source_RF"],
+        "energy": compact_candidate["energy"],
         "candidates": {
-            "macro16_18pt": macro18,
+            "compact_points": compact_candidate,
+            compact_candidate_name: compact_candidate,
             "source128_ip_volume": source128_ip_volume,
             "source128_inferred_volume": source128_inferred_volume,
         },
@@ -661,7 +673,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--compact-glob", action="append", default=[])
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--case-limit", type=int, default=0)
-    parser.add_argument("--weight-mode", choices=WEIGHT_MODES, default="lref3")
+    parser.add_argument("--weight-mode", choices=WEIGHT_MODES, default="auto")
     parser.add_argument("--max-force-rel", type=float, default=0.0)
     parser.add_argument("--max-stiffness-rel", type=float, default=0.0)
     parser.add_argument("--max-macro-stiffness-symmetry-rel", type=float, default=0.0)

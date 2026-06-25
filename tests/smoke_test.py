@@ -71,6 +71,7 @@ from run_macro16_two_geometry_smoke import run_two_geometry_smoke
 from build_macro16_from_128_teacher import build_all as build_macro16_from_128_teacher
 from build_macro16_from_128_teacher import macro16_from_128_interpolation_matrix
 from build_macro16_from_128_teacher import reorder_nodes_q_b_to_macro16
+from build_macro16_source128_teacher import build_all as build_macro16_source128_teacher
 from audit_macro16_teacher_labels import run_audit as run_macro16_teacher_audit
 from audit_macro16_force_stiffness import TRUE176_MACRO_TO_KEEP_FLAT
 from audit_macro16_force_stiffness import run_audit as run_macro16_force_stiffness_audit
@@ -905,6 +906,108 @@ def test_macro16_force_stiffness_audit_reports_source128_candidate() -> None:
         assert source128["force"]["rel"] < 1.0e-6
         assert source128["stiffness"]["rel"] < 1.0e-6
         assert source128["plus_Kdq_vs_dF"]["rel"] < 1.0e-6
+
+
+def test_macro16_source128_teacher_builder_writes_force_closing_compact() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        source = root / "complete_case007_v2b_local_strain.npz"
+        out_root = root / "source128"
+        audit_out = root / "source128_force_audit.json"
+        n = 2
+        p = 128
+        x16 = macro16_flat_x16()
+        q48 = np.zeros((n, 48), dtype=np.float32)
+        q48[1, 0] = 0.2
+        elastic_d = np.diag([4.0, 5.0, 6.0, 7.0, 8.0, 9.0]).astype(np.float64)
+        le128 = np.zeros((n, p, 6), dtype=np.float64)
+        le128[:, :, 0] = np.linspace(0.1, 0.3, p).reshape(1, p)
+        le128[:, :, 1] = np.asarray([0.2, 0.25], dtype=np.float64).reshape(n, 1)
+        b128_macro = np.zeros((n, p, 6, 48), dtype=np.float64)
+        b128_macro[:, :, 0, 0] = 1.5
+        b128_macro[:, :, 1, 1] = np.linspace(0.1, 0.2, p).reshape(1, p)
+        b128_source = np.zeros_like(b128_macro)
+        b128_source[..., TRUE176_MACRO_TO_KEEP_FLAT] = b128_macro
+        ivol = np.full((1, p), 0.01 / p, dtype=np.float64)
+        stress = np.einsum("ab,npb->npa", elastic_d, le128)
+        force_macro = np.einsum("npaj,npa,np->nj", b128_macro, stress, np.broadcast_to(ivol, (n, p)))
+        stiffness_macro = np.einsum("npaj,ab,npbk,np->njk", b128_macro, elastic_d, b128_macro, np.broadcast_to(ivol, (n, p)))
+        force_source = np.zeros_like(force_macro)
+        force_source[:, TRUE176_MACRO_TO_KEEP_FLAT] = force_macro
+        source_to_macro = np.empty(48, dtype=np.int64)
+        source_to_macro[TRUE176_MACRO_TO_KEEP_FLAT] = np.arange(48, dtype=np.int64)
+        delta = 1.0e-6
+        directions_source = TRUE176_MACRO_TO_KEEP_FLAT.copy()
+        plus_source = np.empty((n, 48, 48), dtype=np.float64)
+        for pos, source_dir in enumerate(directions_source.tolist()):
+            macro_dir = int(source_to_macro[source_dir])
+            plus_macro = force_macro + delta * stiffness_macro[:, :, macro_dir]
+            plus_source[:, pos, TRUE176_MACRO_TO_KEEP_FLAT] = plus_macro
+        true176_keep_to_macro = np.asarray([0, 1, 2, 7, 3, 6, 5, 4, 8, 9, 10, 15, 11, 14, 13, 12], dtype=np.int64)
+        x_keep = x16[true176_keep_to_macro]
+        q_keep = np.zeros_like(q48)
+        q_keep[:, TRUE176_MACRO_TO_KEEP_FLAT] = q48
+        np.savez(
+            source,
+            q48_raw=q_keep,
+            X_keep=x_keep,
+            LE128_base=le128.astype(np.float32),
+            B_LE128_forward=b128_source.astype(np.float32),
+            RF_projected=force_source,
+            RF_projected_plus=plus_source,
+            perturb_directions=directions_source,
+            delta=np.asarray(delta, dtype=np.float64),
+            elastic_D=elastic_d,
+            ip_IVOL_abaqus=ivol,
+            LE128_local=le128.astype(np.float32),
+            T_eps_from_abq=np.broadcast_to(np.eye(6, dtype=np.float64).reshape(1, 6, 6), (128, 6, 6)),
+            ip_keys=np.asarray([[elem, ip, 0] for elem in range(1, 17) for ip in range(1, 9)], dtype=np.int64),
+            case_id=np.asarray([7, 7], dtype=np.int64),
+            strain_field=np.asarray("LE", dtype=object),
+            B_label_strain_field=np.asarray("LE", dtype=object),
+        )
+        build_args = SimpleNamespace(
+            compact=[source],
+            compact_list=[],
+            out_root=out_root,
+            case_limit=0,
+            frame_stride=1,
+            max_frames_per_compact=0,
+            allow_missing_ip_keys=False,
+            strain_coordinate_mode="source-local",
+            source_node_order="true176-keep",
+            volume_weight_mode="ip-ivol",
+        )
+        build_summary = build_macro16_source128_teacher(build_args)
+        compact = Path(build_summary["cases"][0]["macro16_compact"])
+        with np.load(compact, allow_pickle=True) as z:
+            assert z["LE_macro"].shape == (n, 128, 6)
+            assert z["B_macro"].shape == (n, 128, 6, 48)
+            assert z["integration_weight_hat"].shape == (n, 128)
+            assert str(np.asarray(z["integration_weight_coordinate"]).reshape(-1)[0]) == "physical-volume"
+            assert "X_macro" not in z.files
+        audit_args = SimpleNamespace(
+            compact=[compact],
+            compact_list=[],
+            compact_glob=[],
+            out=audit_out,
+            case_limit=0,
+            weight_mode="auto",
+            max_force_rel=1.0e-6,
+            max_stiffness_rel=1.0e-6,
+            max_macro_stiffness_symmetry_rel=1.0e-10,
+            max_plus_kdq_rel=1.0e-6,
+            max_source_force_rel=0.0,
+            max_source_128_force_rel=0.0,
+            strict=True,
+        )
+        audit = run_macro16_force_stiffness_audit(audit_args)
+        assert audit["strict_pass"] is True
+        row = audit["compacts"][0]
+        assert row["point_count"] == 128
+        assert row["weight"]["weight_mode"] == "as-stored"
+        assert row["force"]["rel"] < 1.0e-6
+        assert row["stiffness"]["rel"] < 1.0e-6
 
 
 def test_macro16_from_128_teacher_source_local_mode_uses_local_labels() -> None:

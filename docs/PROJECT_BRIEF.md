@@ -172,20 +172,28 @@ The 18-point Macro16 route failed.
 - Mean recovery-force error: 0.355.
 - Mean stiffness error: 0.326.
 
-The standard 128-point Macro16 route has good mean force/stiffness errors but
-does not pass the current `0.02` max-error mechanics gate. The `case031`
-diagnosis has localized the failure; it is not a compact copy/reorder error and
-not a network-training issue.
+The standard 128-point Macro16 route now has explicit Gate 03 audit modes. With
+selected-frame Abaqus IVOL, recovery force closes on the current 10-case set.
+The remaining stiffness issue is not a data-copy or network-training issue; it
+is the difference between material-only `B^T D B dV` and the full Abaqus RF
+finite-difference tangent for large-response `case031`.
 
 Standard 128-point result:
 
-- Mean recovery-force error: 0.00973.
-- Max recovery-force error: 0.03578.
-- Mean stiffness error: 0.01013.
-- Max stiffness error: 0.04257.
+- Selected-frame recovery-force mean error: 0.0012727832304676163.
+- Selected-frame recovery-force max error: 0.00858572515082126.
+- Selected-frame material-only stiffness diagnostic mean error:
+  0.0036642982829359003.
+- Selected-frame material-only stiffness diagnostic max error:
+  0.031962110431098374.
+- Full-fd-reference tangent reference mean/max error: 0.0 / 0.0 by
+  construction; this validates the reference path, not a Macro16 full tangent
+  implementation.
 - Worst case: `case031`.
-- Gate result: FAIL current max-error threshold.
-- Failure status: localized, not resolved.
+- Gate result: split status; force closure PASS, material-only stiffness is a
+  diagnostic residual, and full tangent closure remains incomplete.
+- Failure status: localized tangent-definition mismatch, not resolved as a full
+  consistent tangent.
 
 Rigid preprocessing audit passed.
 
@@ -200,12 +208,15 @@ Audit result:
 
 Theory status: 待验证
 
-- Maximum error has not been fully reduced below 0.02.
+- Full tangent closure has not been implemented or waived.
 - The active large-response force-audit volume convention is selected-frame
   physical volume. The existing `integration_weight_phys` field remains the
   reference/standard Macro16 volume and must not be silently redefined.
 - Material-only stiffness `B^T D B dV` is not the complete Abaqus
   finite-difference tangent under large deformation.
+- Material-only stiffness remains above the old full-FD `0.02` max-error
+  threshold on `case031`; this is now treated as a named diagnostic, not as full
+  tangent closure failure by itself.
 - Missing consistent tangent terms, including `dV/dq`, `dB/dq`, and
   geometric/stress stiffness when applicable, block Gate 03.
 - Medium-distortion and strong-distortion cases have not been verified.
@@ -249,7 +260,7 @@ Status values in theory documents are limited to `已验证`, `待验证`, `待�
 |---|---|---|---|---|
 | 01 | Data contract audit | PASS | `reports/macro16_source128_data_audit.md` | 已验证 |
 | 02 | TRUE176/CSS8 teacher closure audit | FAIL on full teacher stiffness closure | `reports/02_teacher_closure_audit.md` | 待验证 |
-| 03 | Macro16 source128 force/stiffness audit | FAIL current max-error gate; failure localized | `reports/macro16_force_stiffness_audit.md`, `reports/macro16_case031_mechanics_diagnosis.md` | 待验证 |
+| 03 | Macro16 source128 force/stiffness audit | split: force closure PASS; material-only stiffness diagnostic residual; full tangent incomplete | `reports/03_macro16_force_stiffness_reaudit.md`, `reports/macro16_case031_mechanics_diagnosis.md` | 待验证 |
 | 04 | Distortion/general geometry audit | incomplete | no canonical report yet | 待验证 |
 | 05 | Integration-point reduction audit | incomplete | no canonical report yet | 待验证 |
 | 06 | Training gate | blocked | blocked by Gate 02/03/04/05 | 待验证 |
@@ -265,16 +276,24 @@ Current mechanics gate evidence:
   against Abaqus perturbed-reaction stiffness on the full set; selected-frame
   IVOL max stiffness relative error is `0.03196211043109838`, worst case
   `case031`.
-- Recovery-force mean relative error: `0.00973330739371948`.
-- Recovery-force max relative error: `0.03578126940126121`.
-- Stiffness mean relative error: `0.010125161902503614`.
-- Stiffness max relative error: `0.04256563396475579`.
-- Worst case: `case031`.
-- Stiffness symmetry max relative error: `1.4366806903130055e-16`.
+- Macro16 source128 force closure with selected-frame IVOL:
+  mean relative error `0.0012727832304676163`, max relative error
+  `0.00858572515082126`; force closure PASS on the current 10-case set.
+- Material-only stiffness diagnostic with selected-frame IVOL:
+  mean relative error `0.0036642982829359003`, max relative error
+  `0.031962110431098374`; worst case `case031`.
+- Full-fd-reference tangent reference:
+  mean/max relative error `0.0` / `0.0` by construction; this verifies the
+  Abaqus FD reference branch but is not a Macro16 full consistent tangent.
+- Worst case for force and material-only stiffness: `case031`.
+- Material-only stiffness symmetry max relative error:
+  `1.3549217800954415e-16`.
+- Abaqus FD active tangent asymmetry max relative error:
+  `0.024048688993506127`.
 - Diagnosis: `case031` is a large-response volume/tangent mismatch. `LE_macro`
-  and `B_macro_qraw` match source fields exactly. Excluding `case031`, the
-  remaining 9 cases pass the `0.02` max-error gate with force max
-  `0.009089404785732353` and stiffness max `0.007424585935534821`.
+  and `B_macro_qraw` match source fields exactly. Selected-frame volume closes
+  force; missing full consistent tangent terms still block full tangent
+  closure.
 
 ## 11. Current Work Priority
 
@@ -285,21 +304,19 @@ training.
 
 Next steps:
 
-1. Implement explicit Gate 03 physical-volume audit modes using selected-frame
-   physical volume as the canonical Abaqus RF closure mode.
-2. Define or audit the consistent tangent terms needed beyond material-only
+1. Define or audit the consistent tangent terms needed beyond material-only
    `B^T D B dV`.
-3. Resolve or explicitly waive Gate 02 full teacher stiffness closure with
+2. Resolve or explicitly waive Gate 02 full teacher stiffness closure with
    consistent-tangent evidence.
-4. Generate medium-distortion geometries.
-5. Generate strong but non-inverted distortion geometries.
-6. Rebuild source128 compacts.
-7. Rerun rigid preprocessing audit.
-8. Rerun recovery-force and stiffness audit.
-9. If 128 points stably closes, run the generality audit.
-10. Only after 128-point mechanics and generality gates pass, consider 96/64/32
+3. Generate medium-distortion geometries.
+4. Generate strong but non-inverted distortion geometries.
+5. Rebuild source128 compacts.
+6. Rerun rigid preprocessing audit.
+7. Rerun recovery-force and stiffness audit.
+8. If 128 points stably closes, run the generality audit.
+9. Only after 128-point mechanics and generality gates pass, consider 96/64/32
    point reduction.
-11. Train the network only after the gate workflow permits it.
+10. Train the network only after the gate workflow permits it.
 
 ## Three Core Sentences
 

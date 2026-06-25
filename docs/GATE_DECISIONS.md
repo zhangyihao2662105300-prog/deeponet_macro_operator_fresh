@@ -11,6 +11,7 @@ This document records the current Gate 02 and Gate 03 mechanics decisions from:
 - `reports/02_teacher_closure_audit.md`
 - `reports/03a_volume_convention_audit.md`
 - `reports/03b_consistent_tangent_audit.md`
+- `reports/03_macro16_force_stiffness_reaudit.md`
 
 No network training, model change, q48 ordering change, LE ordering change, or
 128-point integration-rule change is implied by these decisions.
@@ -23,7 +24,7 @@ No network training, model change, q48 ordering change, LE ordering change, or
 | D02 | Keep `integration_weight_phys` as the reference/standard Macro16 physical volume. | adopted |
 | D03 | Do not apply the full Abaqus FD tangent `0.02` threshold to material-only `B^T D B dV`. | adopted |
 | D04 | Treat current Gate 02/03 failures as definition mismatches, not bad data or network failures. | adopted |
-| D05 | Next audit scripts must expose explicit volume and tangent modes. | required |
+| D05 | Audit scripts expose explicit volume and tangent modes. | adopted |
 
 ## D01: Canonical Audit Volume
 
@@ -133,30 +134,32 @@ Gate interpretation after this decision:
 | Gate | Interpretation |
 |---|---|
 | Gate 02 | Teacher labels and B finite differences are valid; teacher force closes with selected-frame IVOL; full teacher stiffness remains unresolved because material-only K is not full Abaqus FD tangent. |
-| Gate 03 | Macro16 source128 data copy/order is valid; force failure is mostly volume convention; stiffness failure is tangent-definition mismatch. |
+| Gate 03 | Macro16 source128 data copy/order is valid; selected-frame force closure passes on the current 10-case set; remaining full-tangent closure is a tangent-definition mismatch. |
 
 These failures should not be routed to network training.
 
-## D05: Required Explicit Audit Modes
+## D05: Explicit Audit Modes
 
-The next version of the audit scripts must make the physical and tangent
-definitions explicit. No audit should infer these silently from field presence.
+The audit script now makes the physical and tangent definitions explicit. No
+current Gate 03 audit should infer these silently from field presence.
 
-Required force/volume mode:
-
-```text
---physical-volume-mode reference-standard
---physical-volume-mode selected-frame
---physical-volume-mode inferred-abaqus
-```
-
-Required stiffness/tangent target mode:
+Implemented force/volume mode:
 
 ```text
---stiffness-mode material-only
---stiffness-mode full-fd-reference
---stiffness-mode full-consistent-candidate
+--volume-mode reference
+--volume-mode selected-frame
+--volume-mode inferred
 ```
+
+Implemented stiffness/tangent target mode:
+
+```text
+--tangent-mode material-only
+--tangent-mode full-fd-reference
+```
+
+Future full-tangent work may add an explicitly named
+`full-consistent-candidate` mode or equivalent feature flags.
 
 Recommended reference declaration:
 
@@ -190,20 +193,23 @@ Gate 02 remains FAIL for full teacher stiffness closure until a full-tangent
 candidate closes against Abaqus FD or the project explicitly waives that
 requirement with evidence.
 
-Gate 03 remains FAIL until:
+Gate 03 is split after `reports/03_macro16_force_stiffness_reaudit.md`:
 
-1. force closure is rerun with selected-frame physical volume as the canonical
-   audit volume; and
-2. stiffness closure is evaluated with an explicitly named tangent target.
+1. force closure with selected-frame physical volume: PASS on the current
+   10-case set;
+2. material-only stiffness: retained as a diagnostic, not full tangent closure;
+3. full tangent closure: incomplete until a full consistent tangent candidate
+   closes against Abaqus FD or the project explicitly waives that requirement
+   with evidence.
 
 Training remains blocked by the gate workflow.
 
 ## Next Actions
 
-1. Add explicit audit modes listed in D05.
-2. Extend or regenerate compacts to carry selected-frame and inferred physical
+1. Extend or regenerate compacts to carry selected-frame and inferred physical
    volume fields with explicit names.
-3. Rerun Gate 02 and Gate 03 force closure with selected-frame volume.
-4. Decide whether the solver route requires full consistent tangent K or accepts
+2. Rerun Gate 02 force closure with selected-frame volume when teacher data is
+   regenerated or expanded.
+3. Decide whether the solver route requires full consistent tangent K or accepts
    material-only K as a named quasi-Newton approximation.
-5. Do not use network training to absorb the volume/tangent definition mismatch.
+4. Do not use network training to absorb the volume/tangent definition mismatch.

@@ -79,21 +79,30 @@ Required checks:
 
 Current result:
 
-- Gate result: FAIL current `0.02` max-error closure threshold.
-- Evidence: `reports/macro16_force_stiffness_audit.md` and
+- Gate result: split status after explicit re-audit.
+- Evidence: `reports/03_macro16_force_stiffness_reaudit.md` and
   `reports/macro16_case031_mechanics_diagnosis.md`.
-- Worst case: `case031`.
-- Force max relative error: `0.03578126940126121`.
-- Stiffness max relative error: `0.04256563396475579`.
-- Stiffness symmetry passes.
-- Failure status: localized, not resolved.
+- Force closure with selected-frame IVOL: PASS on the current 10-case set.
+- Force mean relative error: `0.0012727832304676163`.
+- Force max relative error: `0.00858572515082126`.
+- Material-only stiffness diagnostic mean relative error:
+  `0.0036642982829359003`.
+- Material-only stiffness diagnostic max relative error:
+  `0.031962110431098374`.
+- Full-fd-reference tangent branch: mean/max relative error `0.0` / `0.0` by
+  construction; this is a reference-path diagnostic, not a Macro16 full
+  consistent tangent candidate.
+- Worst case for force and material-only stiffness: `case031`.
+- Material-only stiffness symmetry passes.
+- Failure status: full tangent closure incomplete; localized tangent-definition
+  mismatch remains.
 - Localized diagnosis: `case031` is a large-response mechanics case; compact
   `LE_macro` and `B_macro_qraw` match the source fields exactly, and excluding
   `case031` the remaining 9 cases pass the `0.02` max-error gate.
-- Current blockers: choose the active large-response volume convention, and
-  account for missing consistent tangent terms beyond material-only
-  `B^T D B dV`, including `dV/dq`, `dB/dq`, and geometric/stress stiffness
-  when applicable.
+- Current blocker: account for missing consistent tangent terms beyond
+  material-only `B^T D B dV`, including `dV/dq`, `dB/dq`, and
+  geometric/stress stiffness when applicable, or explicitly waive the full
+  tangent requirement with evidence.
 
 ## Gate 04: Generality Audit
 
@@ -158,8 +167,8 @@ Training is blocked until:
 Current result:
 
 - Gate result: blocked.
-- Reason: Gate 02 fails full teacher stiffness closure, Gate 03 fails the
-  current max-error threshold, and Gate 04/05 are incomplete.
+- Reason: Gate 02 fails full teacher stiffness closure, Gate 03 full tangent
+  closure is incomplete, and Gate 04/05 are incomplete.
 
 ## Required Report Template
 
@@ -180,20 +189,20 @@ Each gate report must include:
 - Gate 01: `reports/01_dataset_audit.md` or current evidence
   `reports/macro16_source128_data_audit.md`.
 - Gate 02: `reports/02_teacher_closure_audit.md`.
-- Gate 03: `reports/03_macro16_force_stiffness_audit.md` or current evidence
-  `reports/macro16_force_stiffness_audit.md`.
+- Gate 03: `reports/03_macro16_force_stiffness_reaudit.md` or successor
+  Gate 03 mechanics report.
 - Gate 04: `reports/04_distortion_generality_audit.md`.
 - Gate 05: `reports/05_ip_reduction_audit.md`.
 - Gate 06: `reports/06_training_gate.md`.
 
 ## Current Next Action
 
-Decide the Gate 03 mechanics route before training or reduction:
+Resolve the remaining Gate 03 tangent route before training or reduction:
 
-- Record whether Gate 03 should close against reference/standard physical
-  volume, selected-frame Abaqus IVOL, or inferred volume.
-- Split stiffness closure into material-only stiffness and the full consistent
-  tangent expected by the Abaqus finite-difference response.
+- Use selected-frame Abaqus IVOL as the canonical force-closure volume for
+  Abaqus RF comparisons.
+- Keep material-only stiffness as a named diagnostic, not the complete Abaqus
+  tangent under large deformation.
 - Treat missing `dV/dq`, `dB/dq`, and geometric/stress stiffness terms as the
-  current Gate 03 blocker.
+  current Gate 03 full-tangent blocker unless explicitly waived with evidence.
 - Keep the 128-point rule unchanged until this mechanics mismatch is resolved.

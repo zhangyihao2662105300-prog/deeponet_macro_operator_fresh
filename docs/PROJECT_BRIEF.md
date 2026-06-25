@@ -120,7 +120,8 @@ Rigid fields:
   coordinates and the `X16_hat` isoparametric map. CONFIRMED.
 - `F_int`: recovery force assembled from strain, stress, strain-displacement
   matrix, and physical integration weights. CONFIRMED for the assembly path;
-  large-response volume convention is still a route decision.
+  selected-frame physical volume is the canonical audit volume for Abaqus RF
+  closure.
 - `K_material`: material-only stiffness assembled as `B^T D B dV`.
   CONFIRMED as an audit quantity, but not the complete Abaqus tangent under
   large deformation.
@@ -200,10 +201,9 @@ Audit result:
 Theory status: 待验证
 
 - Maximum error has not been fully reduced below 0.02.
-- The active large-response volume convention is 待决策. Selected-frame or
-  inferred volume reduces `case031` force error from about `0.036` to about
-  `0.0086`, but the route has not chosen which physical volume convention Gate
-  03 must close against.
+- The active large-response force-audit volume convention is selected-frame
+  physical volume. The existing `integration_weight_phys` field remains the
+  reference/standard Macro16 volume and must not be silently redefined.
 - Material-only stiffness `B^T D B dV` is not the complete Abaqus
   finite-difference tangent under large deformation.
 - Missing consistent tangent terms, including `dV/dq`, `dB/dq`, and
@@ -285,7 +285,8 @@ training.
 
 Next steps:
 
-1. Decide the Gate 03 large-response volume convention.
+1. Implement explicit Gate 03 physical-volume audit modes using selected-frame
+   physical volume as the canonical Abaqus RF closure mode.
 2. Define or audit the consistent tangent terms needed beyond material-only
    `B^T D B dV`.
 3. Resolve or explicitly waive Gate 02 full teacher stiffness closure with

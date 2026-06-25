@@ -81,6 +81,51 @@ def _cpu_state_dict(module: nn.Module) -> dict[str, torch.Tensor]:
     return {str(k): v.detach().cpu().clone() for k, v in module.state_dict().items()}
 
 
+def _hidden_features(module: MLP, point: torch.Tensor) -> torch.Tensor:
+    layers = list(module.net.children())
+    if len(layers) < 1 or not isinstance(layers[-1], nn.Linear):
+        raise ValueError("PointBPrior MLP must end with a Linear layer")
+    device = next(module.parameters()).device
+    x = point.to(device=device)
+    for layer in layers[:-1]:
+        x = layer(x)
+    return x
+
+
+def _refit_final_head_to_j_delta(
+    module: MLP,
+    point_norm: np.ndarray,
+    target_j_delta: np.ndarray,
+    *,
+    baseline_scale: float,
+    ridge: float = 1.0e-10,
+) -> dict[str, torch.Tensor]:
+    """Refit only the shared final head to the model's J_norm delta target."""
+
+    module.eval()
+    points = torch.as_tensor(point_norm.reshape(-1, point_norm.shape[-1]), dtype=torch.float32)
+    with torch.no_grad():
+        hidden = _hidden_features(module, points).cpu().numpy().astype(np.float64)
+    target = (
+        np.asarray(target_j_delta, dtype=np.float64).reshape(-1, 6 * 48)
+        / max(float(baseline_scale), 1.0e-12)
+    )
+    design = np.concatenate([hidden, np.ones((hidden.shape[0], 1), dtype=np.float64)], axis=1)
+    normal = design.T @ design
+    if float(ridge) > 0.0:
+        normal = normal + float(ridge) * np.eye(normal.shape[0], dtype=np.float64)
+    coeff = np.linalg.solve(normal, design.T @ target)
+
+    layers = list(module.net.children())
+    final = layers[-1]
+    if not isinstance(final, nn.Linear):
+        raise ValueError("PointBPrior MLP must end with a Linear layer")
+    with torch.no_grad():
+        final.weight.copy_(torch.as_tensor(coeff[:-1].T, dtype=final.weight.dtype, device=final.weight.device))
+        final.bias.copy_(torch.as_tensor(coeff[-1], dtype=final.bias.dtype, device=final.bias.device))
+    return _cpu_state_dict(module)
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     torch.manual_seed(int(args.seed))
     np.random.seed(int(args.seed))
@@ -118,18 +163,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     p_train = torch.as_tensor(point_norm[train_idx], dtype=torch.float32, device=device)
     b_train = torch.as_tensor(data.b[train_idx], dtype=torch.float32, device=device)
     scale = torch.as_tensor(b_scale, dtype=torch.float32, device=device)
-    global_j = torch.as_tensor(global_b_norm, dtype=torch.float32, device=device).view(1, 1, 6, 48)
-    q_std_t = torch.as_tensor(q_std.astype(np.float32), dtype=torch.float32, device=device).view(1, 1, 1, 48)
-    le_std_t = torch.as_tensor(le_std_scale.astype(np.float32), dtype=torch.float32, device=device)
     history = []
-    best: dict[str, Any] | None = None
-    best_state: dict[str, torch.Tensor] | None = None
+    best_physical: dict[str, Any] | None = None
+    best_physical_state: dict[str, torch.Tensor] | None = None
     best_score = float("inf")
     for epoch in range(1, int(args.epochs) + 1):
         model.train()
         opt.zero_grad(set_to_none=True)
-        pred_j = global_j + float(args.baseline_scale) * model(p_train)
-        pred_b = pred_j * le_std_t / torch.clamp(q_std_t, min=1.0e-12)
+        pred_b = model(p_train)
         loss = (((pred_b - b_train) / scale) ** 2).mean(dim=(0, 1)).mean()
         if not torch.isfinite(loss):
             raise RuntimeError("non-finite B prior loss")
@@ -138,9 +179,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         if epoch == 1 or epoch % int(args.eval_every) == 0 or epoch == int(args.epochs):
             model.eval()
             with torch.no_grad():
-                delta_all = model(torch.as_tensor(point_norm, dtype=torch.float32, device=device)).cpu().numpy()
-            pred_j_all = global_b_norm.reshape(1, 1, 6, 48) + float(args.baseline_scale) * delta_all
-            pred_b_all = pred_j_all * le_std_scale / q_std.reshape(1, 1, 1, 48)
+                pred_b_all = model(torch.as_tensor(point_norm, dtype=torch.float32, device=device)).cpu().numpy()
+            pred_j_all = pred_b_all * q_std.reshape(1, 1, 1, 48) / le_std_scale
             row = {
                 "epoch": int(epoch),
                 "loss": float(loss.detach().cpu()),
@@ -158,19 +198,42 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             history.append(row)
             if float(row["train_B_rel"]) < best_score:
                 best_score = float(row["train_B_rel"])
-                best = dict(row)
-                best_state = _cpu_state_dict(model.net)
+                best_physical = dict(row)
+                best_physical_state = _cpu_state_dict(model.net)
     checkpoint_path = str(getattr(args, "checkpoint_out", "")).strip()
+    checkpoint_eval: dict[str, Any] | None = None
     if checkpoint_path:
-        if best_state is None:
-            best_state = _cpu_state_dict(model.net)
+        if best_physical_state is not None:
+            model.net.load_state_dict(best_physical_state)
+        target_j_delta = j_target[train_idx] - global_b_norm.reshape(1, 1, 6, 48)
+        point_b_net_state = _refit_final_head_to_j_delta(
+            model.net,
+            point_norm[train_idx],
+            target_j_delta,
+            baseline_scale=float(args.baseline_scale),
+        )
+        model.net.load_state_dict(point_b_net_state)
+        model.eval()
+        with torch.no_grad():
+            delta_j_all = model(torch.as_tensor(point_norm, dtype=torch.float32, device=device)).cpu().numpy()
+        pred_j_all = global_b_norm.reshape(1, 1, 6, 48) + float(args.baseline_scale) * delta_j_all
+        pred_b_all = pred_j_all * le_std_scale / q_std.reshape(1, 1, 1, 48)
+        checkpoint_eval = {
+            "epoch": int(args.epochs),
+            "train_B_rel": rel_np(pred_b_all[train_idx], data.b[train_idx]),
+            "val_B_rel": rel_np(pred_b_all[val_idx], data.b[val_idx]),
+            "train_J_rel": rel_np(pred_j_all[train_idx], j_target[train_idx]),
+            "val_J_rel": rel_np(pred_j_all[val_idx], j_target[val_idx]),
+        }
         checkpoint = {
             "b_prior_checkpoint_version": "macro16-point-b-prior-v1",
             "b_prior_kind": "global_plus_point",
             "target_coordinate": "J_norm",
             "global_b_norm": torch.as_tensor(global_b_norm, dtype=torch.float32),
-            "point_b_net_state": best_state,
+            "point_b_net_state": point_b_net_state,
             "baseline_scale": float(args.baseline_scale),
+            "fit_coordinate": "B_macro_qdef",
+            "checkpoint_conversion": "final_linear_head_refit_to_J_norm_delta_least_squares",
             "model": {
                 "type": "Macro16 point_b_net compatible MLP",
                 "point_dim": int(point_norm.shape[-1]),
@@ -196,7 +259,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "val_frame_count": int(val_idx.size),
             },
             "compact_paths": paths,
-            "best": best,
+            "best": checkpoint_eval,
+            "physical_b_fit_best": best_physical,
         }
         out_path = Path(checkpoint_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -221,7 +285,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "baseline_scale": float(args.baseline_scale),
         },
         "checkpoint_out": checkpoint_path,
-        "best": best,
+        "best": checkpoint_eval if checkpoint_eval is not None else best_physical,
+        "physical_b_fit_best": best_physical,
+        "checkpoint_eval": checkpoint_eval,
         "latest": history[-1] if history else None,
         "history": history,
     }

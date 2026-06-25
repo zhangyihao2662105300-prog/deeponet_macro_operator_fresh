@@ -87,6 +87,13 @@ class Macro16Dataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor, tor
         )
 
 
+def jsonable_args(args: argparse.Namespace) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in vars(args).items():
+        out[str(key)] = str(value) if isinstance(value, Path) else value
+    return out
+
+
 def _scalar_text(z: np.lib.npyio.NpzFile, key: str, default: str = "") -> str:
     if key not in z.files:
         return default
@@ -962,7 +969,16 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     }
 
     train_set = Macro16Dataset(branch_norm, point_norm, le_norm, j_norm_target, data.weights, train_idx)
-    train_loader = DataLoader(train_set, batch_size=int(args.batch_size), shuffle=True, drop_last=False)
+    num_workers = max(0, int(getattr(args, "num_workers", 0)))
+    train_loader = DataLoader(
+        train_set,
+        batch_size=int(args.batch_size),
+        shuffle=True,
+        drop_last=False,
+        num_workers=num_workers,
+        pin_memory=bool(getattr(args, "pin_memory", False)) and device.type == "cuda",
+        persistent_workers=num_workers > 0,
+    )
     style = model_style_key(getattr(args, "model_style", "le0"))
     common_model_kwargs = dict(
         input_dim=int(branch_norm.shape[-1]),
@@ -1037,7 +1053,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         out_dir / "config.json",
         {
             "standard_operator_contract_version": MACRO16_CONTRACT_VERSION,
-            "args": vars(args),
+            "args": jsonable_args(args),
             "compact_paths": data.compact_paths,
             "train_frames": int(train_idx.size),
             "val_frames": int(val_idx.size),
@@ -1054,6 +1070,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             "point_feature_names": data.point_meta.get("point_feature_names", []),
             "b_prior_warmstart_meta": b_prior_warmstart_meta,
             "optimizer_meta": optimizer_meta,
+            "dataloader_meta": {
+                "num_workers": int(num_workers),
+                "pin_memory": bool(getattr(args, "pin_memory", False)) and device.type == "cuda",
+            },
             "model_meta": {
                 "model_style": model_meta_style,
                 "input_dim": int(branch_norm.shape[-1]),
@@ -1197,7 +1217,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                     {
                         "model_state": model.state_dict(),
                         "norms": norms,
-                        "args": vars(args),
+                        "args": jsonable_args(args),
                         "contract_version": MACRO16_CONTRACT_VERSION,
                         "point_meta": data.point_meta,
                         "validation_split": split_meta,
@@ -1211,7 +1231,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             {
                 "model_state": model.state_dict(),
                 "norms": norms,
-                "args": vars(args),
+                "args": jsonable_args(args),
                 "contract_version": MACRO16_CONTRACT_VERSION,
                 "point_meta": data.point_meta,
                 "validation_split": split_meta,
@@ -1226,7 +1246,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
 
     summary = {
         "standard_operator_contract_version": MACRO16_CONTRACT_VERSION,
-        "args": vars(args),
+        "args": jsonable_args(args),
         "history": history,
         "best_score": best_score,
         "best_report": best_report,
@@ -1248,6 +1268,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "fine_grid_geometry_visible": False,
         "b_prior_warmstart_meta": b_prior_warmstart_meta,
         "optimizer_meta": optimizer_meta,
+        "dataloader_meta": {
+            "num_workers": int(num_workers),
+            "pin_memory": bool(getattr(args, "pin_memory", False)) and device.type == "cuda",
+        },
     }
     write_json(out_dir / "training_summary.json", summary)
     return {"best_score": best_score, "out_dir": str(out_dir)}
@@ -1265,6 +1289,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--epochs", type=int, default=120)
     p.add_argument("--batch-size", type=int, default=4)
     p.add_argument("--eval-batch-size", type=int, default=2)
+    p.add_argument("--num-workers", type=int, default=0)
+    p.add_argument("--pin-memory", action="store_true")
     p.add_argument("--frame-stride", type=int, default=1)
     p.add_argument("--max-frames-per-compact", type=int, default=0)
     p.add_argument("--max-eval-frames", type=int, default=256)

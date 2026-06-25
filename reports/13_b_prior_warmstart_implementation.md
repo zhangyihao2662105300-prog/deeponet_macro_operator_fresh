@@ -48,6 +48,18 @@ split
 best
 ```
 
+第 14 步修正：
+
+```text
+fit_coordinate = B_macro_qdef
+target_coordinate = J_norm
+checkpoint_conversion = final_linear_head_refit_to_J_norm_delta_least_squares
+```
+
+原因：
+
+直接在 `J_norm` 坐标拟合会受到 `LE_std / q_std` 极端列尺度影响，导致 direct point prior 从 Gate 11 的 `train B rel ≈ 0.11` 退化到约 `0.61`。修正后先在物理 `B_macro_qdef` 坐标拟合，再把最后一层重拟合为可加载的 `J_norm` checkpoint。
+
 文件 2：
 
 ```text

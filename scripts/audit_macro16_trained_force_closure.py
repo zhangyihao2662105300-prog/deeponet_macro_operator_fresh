@@ -14,6 +14,7 @@ import argparse
 import json
 import math
 import os
+import pathlib
 from pathlib import Path
 import sys
 from typing import Any
@@ -43,6 +44,31 @@ from macro_deeponet.train_macro16_boundary_sobolev import (  # noqa: E402
     parse_int_list,
     read_path_list,
 )
+
+
+class _CrossPlatformPosixPath(pathlib.PurePosixPath):
+    pass
+
+
+class _CrossPlatformWindowsPath(pathlib.PureWindowsPath):
+    pass
+
+
+def torch_load_cross_platform(path: Path, device: torch.device) -> dict[str, Any]:
+    posix_original = pathlib.PosixPath
+    windows_original = pathlib.WindowsPath
+    try:
+        if os.name == "nt":
+            pathlib.PosixPath = _CrossPlatformPosixPath  # type: ignore[assignment]
+        else:
+            pathlib.WindowsPath = _CrossPlatformWindowsPath  # type: ignore[assignment]
+        checkpoint = torch.load(str(path), map_location=device, weights_only=False)
+    finally:
+        pathlib.PosixPath = posix_original  # type: ignore[assignment]
+        pathlib.WindowsPath = windows_original  # type: ignore[assignment]
+    if not isinstance(checkpoint, dict):
+        raise ValueError(f"{path}: checkpoint must be a dict")
+    return checkpoint
 
 
 def json_default(obj: Any) -> Any:
@@ -181,7 +207,7 @@ def evaluate_model(
     batch_size: int,
     device: torch.device,
 ) -> dict[str, Any]:
-    checkpoint = torch.load(str(checkpoint_path), map_location=device, weights_only=False)
+    checkpoint = torch_load_cross_platform(checkpoint_path, device)
     if str(checkpoint.get("contract_version", "")) != MACRO16_CONTRACT_VERSION:
         raise ValueError(f"{checkpoint_path}: unexpected contract version {checkpoint.get('contract_version')}")
     args = checkpoint.get("args", {})

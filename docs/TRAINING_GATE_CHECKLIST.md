@@ -18,8 +18,11 @@ Gate 19 update: the guarded `le0-state-b` implementation smoke is complete.
 Linux six-frame numeric reproduction is still required before larger training.
 
 Gate 20 update: the first Linux reproduction failed. The cause was localized to
-an under-expressive state B factorization, now corrected to `point_q_rank`.
-Larger training is still not released.
+an under-expressive state B factorization, then corrected to `point_q_rank`.
+
+Gate 21 update: the corrected `point_q_rank` Linux rerun also failed. Teacher
+force still closes, but model force remains about `0.59` to `0.62`. Larger
+training is still not released.
 
 This checklist defines what must be true before network training is allowed.
 It does not start training, change the model, or modify the data contract.
@@ -68,8 +71,10 @@ Current status:
   implementation and small reproduction in Gate 19.
 - Gate 19: implementation smoke passed; numeric reproduction on Linux remains
   pending and formal large training is still not released.
-- Gate 20: initial Linux reproduction failed; corrected `point_q_rank` rerun is
-  required before any larger training.
+- Gate 20: initial Linux reproduction failed because the first state B
+  factorization was too weak.
+- Gate 21: corrected `point_q_rank` rerun failed; any larger training remains
+  blocked.
 
 Do not treat this as a full tangent or solver-readiness release.
 
@@ -103,8 +108,11 @@ be treated as proof that the data is corrupt:
   variant and detach-state default.
 - Gate 19 adds the separate `le0-state-b` model variant. This is still a
   limited implementation smoke until Linux force closure reproduces the target.
-- Gate 20 confirms the failed rerun was caused by weaker B factorization, not
-  by source data corruption or changed q48 and LE ordering.
+- Gate 20 confirms the first failed rerun was caused by weaker B factorization,
+  not by source data corruption or changed q48 and LE ordering.
+- Gate 21 confirms the corrected `point_q_rank` form still does not reproduce
+  Gate 17. The next step is an equivalence diagnosis between the main trainer
+  and the Gate 17 prototype, not larger training.
 
 These issues no longer block the limited LE/B training release, but they remain
 unresolved mechanics items and are not the same as q48 ordering corruption, LE
@@ -215,3 +223,4 @@ Not allowed by this checklist:
   tested, and force-audited below the active gate target.
 - Treat the Gate 18 migration plan as proof that the main model already works.
 - Treat the Gate 19 smoke as proof that case031 force closure has passed.
+- Treat the Gate 21 rerun as permission for larger training.

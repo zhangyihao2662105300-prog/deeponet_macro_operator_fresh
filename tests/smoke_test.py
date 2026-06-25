@@ -56,6 +56,7 @@ from macro_deeponet.train_true176_generic_sobolev import (
     validate_point_feature_source_for_scale,
 )
 from macro_deeponet.train_macro16_boundary_sobolev import (
+    apply_branch_std_floors,
     build_physical_b_loss_scale,
     explicit_state_b_force_residual_loss,
     explicit_state_b_physical_balanced_loss,
@@ -625,6 +626,21 @@ def test_macro16_force_residual_loss_zero_for_teacher_force() -> None:
         force_scale_cols=force_scale,
     )
     assert float(loss1) > 0.0
+
+
+def test_macro16_branch_x16_std_floor_keeps_q_scale_unchanged() -> None:
+    branch_std = np.ones((1, 97), dtype=np.float32)
+    branch_std[:, :48] = 0.001
+    branch_std[:, 48:96] = 1.0e-8
+    branch_std[:, 96] = 0.02
+    adjusted, meta = apply_branch_std_floors(branch_std, x16_floor=0.05)
+    assert adjusted.shape == branch_std.shape
+    assert np.allclose(adjusted[:, :48], branch_std[:, :48])
+    assert np.allclose(adjusted[:, 96:], branch_std[:, 96:])
+    assert np.all(adjusted[:, 48:96] >= 0.05)
+    assert meta["x16_columns_changed"] == 48
+    assert meta["q_std_unchanged"] is True
+    assert meta["l_ref_std_unchanged"] is True
 
 
 def test_macro16_enrich_compact_copies_source_elastic_d() -> None:

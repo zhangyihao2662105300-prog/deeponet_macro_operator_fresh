@@ -606,6 +606,28 @@ def standardize(arr: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarra
     return ((np.asarray(arr, dtype=np.float32) - mean) / std).astype(np.float32)
 
 
+def apply_branch_std_floors(branch_std: np.ndarray, *, x16_floor: float = 0.0) -> tuple[np.ndarray, dict[str, Any]]:
+    original = np.asarray(branch_std, dtype=np.float32)
+    original_shape = original.shape
+    raw = original.reshape(-1).copy()
+    if raw.shape[0] != 97:
+        raise ValueError(f"Macro16 branch std must have 97 columns, got {raw.shape[0]}")
+    adjusted = raw.copy()
+    floor = float(x16_floor)
+    if floor < 0.0:
+        raise ValueError("--branch-x16-std-floor must be nonnegative")
+    if floor > 0.0:
+        adjusted[48:96] = np.maximum(adjusted[48:96], np.float32(floor))
+    return adjusted.astype(np.float32).reshape(original_shape), {
+        "branch_x16_std_floor": floor,
+        "x16_columns_changed": int(np.sum(adjusted[48:96] > raw[48:96])),
+        "x16_std_min_before": float(np.min(raw[48:96])),
+        "x16_std_min_after": float(np.min(adjusted[48:96])),
+        "q_std_unchanged": bool(np.allclose(adjusted[:48], raw[:48])),
+        "l_ref_std_unchanged": bool(np.allclose(adjusted[96:], raw[96:])),
+    }
+
+
 def _le_std_scale(le_std: np.ndarray, point_count: int) -> np.ndarray:
     vals = np.asarray(le_std, dtype=np.float32)
     if vals.ndim == 1:
@@ -1158,7 +1180,11 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     )
 
     branch_raw = np.concatenate([data.q48_hat, data.x16_hat.reshape(data.x16_hat.shape[0], -1), data.length_scale], axis=1)
-    branch_mean, branch_std = stats(branch_raw[train_idx], axis=0)
+    branch_mean, branch_std_raw = stats(branch_raw[train_idx], axis=0)
+    branch_std, branch_std_floor_meta = apply_branch_std_floors(
+        branch_std_raw,
+        x16_floor=float(getattr(args, "branch_x16_std_floor", 0.0)),
+    )
     point_mean, point_std = stats(data.point_features_hat[train_idx].reshape(-1, data.point_features_hat.shape[-1]), axis=0)
     le_mean, le_std = stats(data.le[train_idx], axis=0)
     branch_norm = standardize(branch_raw, branch_mean, branch_std)
@@ -1191,6 +1217,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     norms = {
         "branch_mean": branch_mean.astype(np.float32),
         "branch_std": branch_std.astype(np.float32),
+        "branch_std_raw": branch_std_raw.astype(np.float32),
         "point_mean": point_mean.astype(np.float32),
         "point_std": point_std.astype(np.float32),
         "le_mean": le_mean.astype(np.float32),
@@ -1589,6 +1616,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                         "best_report": best_report,
                         "model_style": model_meta_style,
                         "state_b": model.state_b_config() if hasattr(model, "state_b_config") else {"state_b_enabled": False},
+                        "branch_std_floor_meta": branch_std_floor_meta,
                     },
                     out_dir / "best.pt",
                 )
@@ -1605,6 +1633,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 "best_report": best_report,
                 "model_style": model_meta_style,
                 "state_b": model.state_b_config() if hasattr(model, "state_b_config") else {"state_b_enabled": False},
+                "branch_std_floor_meta": branch_std_floor_meta,
             },
             out_dir / "latest.pt",
         )
@@ -1648,6 +1677,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "fine_grid_geometry_visible": False,
         "b_prior_warmstart_meta": b_prior_warmstart_meta,
         "optimizer_meta": optimizer_meta,
+        "branch_std_floor_meta": branch_std_floor_meta,
         "dataloader_meta": {
             "num_workers": int(num_workers),
             "pin_memory": bool(getattr(args, "pin_memory", False)) and device.type == "cuda",
@@ -1666,6 +1696,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--thickness-gauss-order", type=int, default=2)
     p.add_argument("--scale-mode", default="normalized", choices=["normalized", "physical"])
     p.add_argument("--b-label-coordinate", default="auto", choices=["auto", "physical", "dimensionless"])
+    p.add_argument("--branch-x16-std-floor", type=float, default=0.0)
     p.add_argument("--epochs", type=int, default=120)
     p.add_argument("--batch-size", type=int, default=4)
     p.add_argument("--eval-batch-size", type=int, default=2)

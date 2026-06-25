@@ -68,6 +68,25 @@ from audit_query_point_data_coverage import run_coverage_audit
 from export_abaqus_true176_complete_compact import enforce_ip_audit, merge_existing_payload
 
 
+def macro16_flat_x16(thickness: float = 0.2) -> np.ndarray:
+    bottom = np.asarray(
+        [
+            [-1.0, -1.0, -0.5 * thickness],
+            [0.0, -1.0, -0.5 * thickness],
+            [1.0, -1.0, -0.5 * thickness],
+            [1.0, 0.0, -0.5 * thickness],
+            [1.0, 1.0, -0.5 * thickness],
+            [0.0, 1.0, -0.5 * thickness],
+            [-1.0, 1.0, -0.5 * thickness],
+            [-1.0, 0.0, -0.5 * thickness],
+        ],
+        dtype=np.float32,
+    )
+    top = bottom.copy()
+    top[:, 2] = 0.5 * thickness
+    return np.concatenate([bottom, top], axis=0)
+
+
 def test_geometry_identities() -> None:
     points = torch.rand(32, 3) * 2.0 - 1.0
     n = shape_functions_hex8(points)
@@ -136,22 +155,7 @@ def test_macro16_shape_geometry_and_ad_shapes() -> None:
     assert np.allclose(np.sum(n, axis=1), 1.0)
     assert np.allclose(np.sum(dndxi, axis=1), 0.0)
 
-    bottom = np.asarray(
-        [
-            [-1.0, -1.0, -0.1],
-            [0.0, -1.0, -0.1],
-            [1.0, -1.0, -0.1],
-            [1.0, 0.0, -0.1],
-            [1.0, 1.0, -0.1],
-            [0.0, 1.0, -0.1],
-            [-1.0, 1.0, -0.1],
-            [-1.0, 0.0, -0.1],
-        ],
-        dtype=np.float32,
-    )
-    top = bottom.copy()
-    top[:, 2] = 0.1
-    x16 = np.concatenate([bottom, top], axis=0)
+    x16 = macro16_flat_x16()
     geom = Macro16GeometryMap(x16)
     point, names, fields = geom.build_point_features(point_table)
     assert len(names) == point.shape[1]
@@ -199,11 +203,7 @@ def test_macro16_loader_rejects_missing_x16_and_keeps_q48() -> None:
             raise AssertionError("Macro16 loader accepted X_macro without X16")
 
         good = root / "case001_good.npz"
-        x16 = np.zeros((16, 3), dtype=np.float32)
-        x16[:, 0] = np.linspace(-1.0, 1.0, 16, dtype=np.float32)
-        x16[:, 1] = np.sin(np.linspace(0.0, 1.0, 16, dtype=np.float32))
-        x16[:8, 2] = -0.1
-        x16[8:, 2] = 0.1
+        x16 = macro16_flat_x16()
         np.savez(
             good,
             standard_operator_contract_version=np.asarray(MACRO16_CONTRACT_VERSION, dtype=object),
@@ -228,22 +228,7 @@ def test_macro16_training_smoke_runs_one_epoch() -> None:
         compact = root / "case001_macro16.npz"
         out_dir = root / "out"
         n = 4
-        bottom = np.asarray(
-            [
-                [-1.0, -1.0, -0.1],
-                [0.0, -1.0, -0.1],
-                [1.0, -1.0, -0.1],
-                [1.0, 0.0, -0.1],
-                [1.0, 1.0, -0.1],
-                [0.0, 1.0, -0.1],
-                [-1.0, 1.0, -0.1],
-                [-1.0, 0.0, -0.1],
-            ],
-            dtype=np.float32,
-        )
-        top = bottom.copy()
-        top[:, 2] = 0.1
-        x16 = np.concatenate([bottom, top], axis=0)
+        x16 = macro16_flat_x16()
         rng = np.random.default_rng(24601)
         q48 = rng.normal(scale=0.05, size=(n, 48)).astype(np.float32)
         b = np.zeros((n, 18, 6, 48), dtype=np.float32)
@@ -287,7 +272,7 @@ def test_macro16_training_smoke_runs_one_epoch() -> None:
             anchored_residual_gate_q0=0.0,
             le_loss_weight=1.0,
             jacobian_loss_weight=0.1,
-            rigid_loss_weight=0.0,
+            rigid_loss_weight=0.1,
             rigid_mode_scale=0.1,
             jacobian_columns="0,1",
             jacobian_columns_per_batch=1,
@@ -306,7 +291,66 @@ def test_macro16_training_smoke_runs_one_epoch() -> None:
         assert summary["standard_operator_contract_version"] == MACRO16_CONTRACT_VERSION
         assert summary["q_dim"] == 48
         assert summary["fine_grid_geometry_visible"] is False
+        assert summary["latest_report"]["rigid_loss_norm_mse"] >= 0.0
         assert Path(summary["latest_checkpoint"]).exists()
+
+
+def test_macro16_detj_rejects_flipped_surface_order() -> None:
+    point_table = macro16_standard_point_table(plane_order=3, thickness_order=2)
+    x16 = macro16_flat_x16()
+    fields = Macro16GeometryMap(x16).eval_points(point_table)
+    assert np.min(fields["detJ_hat"]) > 0.0
+
+    flipped = x16.copy()
+    flipped[:8] = x16[8:]
+    flipped[8:] = x16[:8]
+    try:
+        Macro16GeometryMap(flipped).eval_points(point_table)
+    except ValueError as exc:
+        assert "positive nondegenerate detJ" in str(exc)
+    else:
+        raise AssertionError("Macro16GeometryMap accepted flipped top and bottom node order")
+
+
+def test_macro16_constant_strain_linear_displacement_is_constant_at_ips() -> None:
+    point_table = macro16_standard_point_table(plane_order=3, thickness_order=2)
+    x16 = macro16_flat_x16()
+    geom = Macro16GeometryMap(x16)
+    fields = geom.eval_points(point_table)
+    u_nodes = np.zeros((16, 3), dtype=np.float64)
+    xhat = geom.x16_hat
+    u_nodes[:, 0] = 0.02 * xhat[:, 0] + 0.03 * xhat[:, 1]
+    u_nodes[:, 1] = -0.01 * xhat[:, 0] + 0.04 * xhat[:, 1]
+    u_nodes[:, 2] = 0.05 * xhat[:, 2]
+    _n, dndxi = shape_functions_macro16(point_table.xi)
+    du_dxi = np.einsum("pai,aj->pij", dndxi, u_nodes)
+    grad_u = np.einsum("pij,pik->pjk", np.asarray(fields["invJ_hat"], dtype=np.float64), du_dxi)
+    strain = np.stack(
+        [
+            grad_u[:, 0, 0],
+            grad_u[:, 1, 1],
+            grad_u[:, 2, 2],
+            grad_u[:, 0, 1] + grad_u[:, 1, 0],
+            grad_u[:, 0, 2] + grad_u[:, 2, 0],
+            grad_u[:, 1, 2] + grad_u[:, 2, 1],
+        ],
+        axis=1,
+    )
+    assert np.max(np.abs(strain - strain[0:1])) < 1.0e-10
+    assert np.allclose(strain[0], [0.02, 0.04, 0.05, 0.02, 0.0, 0.0], atol=1.0e-10)
+
+
+def test_macro16_rigid_modes_are_zero_strain_under_isoparametric_gradient() -> None:
+    point_table = macro16_standard_point_table(plane_order=3, thickness_order=2)
+    x16 = macro16_flat_x16()
+    fields = Macro16GeometryMap(x16).eval_points(point_table)
+    modes = rigid_q48_modes(x16.reshape(1, 16, 3))[0].reshape(6, 16, 3)
+    _n, dndxi = shape_functions_macro16(point_table.xi)
+    for mode in modes:
+        du_dxi = np.einsum("pai,aj->pij", dndxi, mode)
+        grad_u = np.einsum("pij,pik->pjk", np.asarray(fields["invJ_hat"], dtype=np.float64), du_dxi)
+        strain = 0.5 * (grad_u + np.swapaxes(grad_u, 1, 2))
+        assert np.max(np.abs(strain)) < 1.0e-12
 
 
 def test_true176_xkeep_branch_and_ad_shapes() -> None:

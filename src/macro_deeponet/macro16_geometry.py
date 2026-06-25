@@ -191,6 +191,7 @@ class Macro16GeometryMap:
         *,
         center: np.ndarray | None = None,
         l_ref: float | None = None,
+        detj_tol: float = 1.0e-12,
     ) -> None:
         self.x16 = np.asarray(x16, dtype=np.float64).reshape(16, 3)
         if center is None or l_ref is None:
@@ -206,6 +207,7 @@ class Macro16GeometryMap:
         self.span = computed_span.astype(np.float64)
         self.span_hat = self.span / self.l_ref
         self.x16_hat = (self.x16 - self.center.reshape(1, 3)) / self.l_ref
+        self.detj_tol = float(detj_tol)
 
     def eval_points(self, point_table: Macro16PointTable | np.ndarray) -> dict[str, np.ndarray]:
         if isinstance(point_table, Macro16PointTable):
@@ -218,6 +220,14 @@ class Macro16GeometryMap:
         x_hat = np.einsum("pa,ai->pi", n, self.x16_hat)
         j_hat = np.einsum("pai,aj->pij", dndxi, self.x16_hat)
         detj_hat = np.linalg.det(j_hat)
+        if not np.all(np.isfinite(detj_hat)):
+            raise ValueError("Macro16 detJ contains non-finite values")
+        if float(np.min(detj_hat)) <= self.detj_tol:
+            raise ValueError(
+                "Macro16 geometry requires positive nondegenerate detJ at every integration point; "
+                f"detJ_min={float(np.min(detj_hat)):.6e}, detJ_max={float(np.max(detj_hat)):.6e}, "
+                f"tol={self.detj_tol:.6e}"
+            )
         invj_hat = np.linalg.inv(j_hat)
         q_stack = np.asarray([frame_from_j(jmat) for jmat in j_hat], dtype=np.float64)
         metric = np.einsum("pij,pkj->pik", j_hat, j_hat)

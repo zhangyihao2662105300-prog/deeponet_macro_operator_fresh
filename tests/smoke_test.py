@@ -76,6 +76,7 @@ from build_macro16_source128_teacher import build_all as build_macro16_source128
 from audit_macro16_teacher_labels import run_audit as run_macro16_teacher_audit
 from audit_macro16_force_stiffness import TRUE176_MACRO_TO_KEEP_FLAT
 from audit_macro16_force_stiffness import run_audit as run_macro16_force_stiffness_audit
+from plan_macro16_source128_generality_audit import build_plan as build_macro16_source128_generality_plan
 
 
 def macro16_flat_x16(thickness: float = 0.2) -> np.ndarray:
@@ -1025,6 +1026,81 @@ def test_macro16_source128_teacher_builder_writes_force_closing_compact() -> Non
         assert row["weight"]["weight_mode"] == "as-stored"
         assert row["force"]["rel"] < 1.0e-6
         assert row["stiffness"]["rel"] < 1.0e-6
+
+
+def test_macro16_source128_generality_planner_writes_three_worker_manifest() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        compact_list = root / "complete_compact_list.txt"
+        compacts = []
+        base = macro16_flat_x16()
+        for case_id, shear in enumerate([0.0, 0.08, 0.18, 0.32], start=1):
+            x16 = base.astype(np.float64).copy()
+            x16[:, 0] += float(shear) * x16[:, 1]
+            x16[:, 1] += 0.25 * float(shear) * x16[:, 2]
+            path = root / f"complete_case{case_id:03d}_training_ready.npz"
+            np.savez(
+                path,
+                q48_raw=np.zeros((1, 48), dtype=np.float32),
+                X16=x16.astype(np.float32),
+                case_id=np.asarray([case_id], dtype=np.int64),
+                shape4=np.asarray([1.0, 0.01, 0.1 * case_id, 0.0], dtype=np.float32),
+            )
+            compacts.append(path)
+        compact_list.write_text("\n".join(str(path) for path in compacts) + "\n", encoding="utf-8")
+
+        out_root = root / "generality_plan"
+        args = SimpleNamespace(
+            compact=[],
+            compact_list=[compact_list],
+            out_root=out_root,
+            case_limit=0,
+            frame_stride=1,
+            max_rows_per_compact=1,
+            source_node_order="auto",
+            geometry_round_decimals=8,
+            q_scale=1.0e-3,
+            random_seed=123,
+            strain_coordinate_mode="global-to-macro-local",
+            force_threshold=2.0e-2,
+            stiffness_threshold=2.0e-2,
+            remote_windows_host="Administrator@100.110.69.33",
+            linux_host="lab-gpu-ts",
+        )
+        summary = build_macro16_source128_generality_plan(args)
+        assert summary["geometry_group_count"] == 4
+        assert summary["missing_geometry_roles"] == []
+        assert summary["q_program_count"] == 21
+        assert summary["standard_macro16_contract"]["uses_X_macro"] is False
+        assert summary["standard_macro16_contract"]["uses_internal_fine_grid_nodes_as_input"] is False
+        assert summary["standard_macro16_contract"]["network_training"] is False
+
+        geometry_cases = json.loads((out_root / "geometry_cases.json").read_text(encoding="utf-8"))
+        roles = geometry_cases["geometry_roles"]
+        assert [row["role"] for row in roles] == [
+            "regular",
+            "lightly_distorted",
+            "moderately_distorted",
+            "strongly_distorted_not_flipped",
+        ]
+        assert all(row["status"] == "available" for row in roles)
+        assert roles[0]["worker"] == "local_windows"
+        assert roles[2]["worker"] == "remote_windows_abaqus"
+
+        manifest_text = (out_root / "task_manifest.csv").read_text(encoding="utf-8")
+        assert "gen_regular_q_zero" in manifest_text
+        assert "post_strongly_distorted_not_flipped_source128_x16_weight_audit" in manifest_text
+        assert "False" in manifest_text
+
+        q_csv = (out_root / "q48_programs" / "regular_q48_programs.csv").read_text(encoding="utf-8")
+        assert "axial_tension" in q_csv
+        assert "rigid_rotation_z" in q_csv
+        assert "random_48_small_neg_003" in q_csv
+
+        linux_cmd = (out_root / "worker_linux_postprocess.txt").read_text(encoding="utf-8")
+        assert "--volume-weight-mode macro16-x16" in linux_cmd
+        assert "--strain-coordinate-mode global-to-macro-local" in linux_cmd
+        assert "audit_macro16_force_stiffness.py" in linux_cmd
 
 
 def test_macro16_from_128_teacher_source_local_mode_uses_local_labels() -> None:

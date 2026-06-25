@@ -7,6 +7,9 @@ Status: limited training release decision recorded
 Gate 16 update: q dependent B diagnosis is complete. The limited training
 release remains diagnostic only; formal large training is not released.
 
+Gate 17 update: state-dependent B baseline prototype passed the `0.10` force
+target, but production release is still not allowed.
+
 This checklist defines what must be true before network training is allowed.
 It does not start training, change the model, or modify the data contract.
 
@@ -47,6 +50,9 @@ Current status:
 - Gate 16: q dependent B diagnosis passed, but large training release failed.
   `B_macro_qdef` changes with `q48_def_hat`, while the current point-only B
   prior does not directly express that state dependence.
+- Gate 17: state-dependent B baseline prototype passed its small force target,
+  but the main Macro16 model has not yet been migrated and force is still above
+  the final `0.02` target.
 
 Do not treat this as a full tangent or solver-readiness release.
 
@@ -73,6 +79,9 @@ be treated as proof that the data is corrupt:
 - Gate 16 shows the current `B_base(point)` prior has residual q dependent B
   error. The next safe step is a small state-dependent B baseline prototype, not
   formal large training.
+- Gate 17 shows the state-dependent B baseline direction is useful. The next
+  step is a migration plan and guarded implementation, not formal large
+  training.
 
 These issues no longer block the limited LE/B training release, but they remain
 unresolved mechanics items and are not the same as q48 ordering corruption, LE
@@ -167,5 +176,5 @@ Not allowed by this checklist:
   passes after training.
 - Treat material-only K as the full tangent gate.
 - Change model architecture, q48 order, LE order, or integration rule.
-- Start formal large training before the Gate 17 state-dependent B baseline
-  prototype is diagnosed.
+- Start formal large training before the state-dependent B baseline is migrated,
+  tested, and force-audited below the active gate target.

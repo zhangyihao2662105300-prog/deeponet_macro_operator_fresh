@@ -30,8 +30,9 @@ TRUE176 / CSS8 128-IP is the teacher and audit baseline, not the final model
 interface.
 
 The current priority is limited LE/B training plus mandatory post-training
-mechanical audit. Gate 16 shows that q dependent B is a current training
-blocker. Full tangent closure remains pending.
+mechanical audit. Gate 17 shows that a state-dependent B baseline is the
+current promising direction, but it is still a prototype. Full tangent closure
+remains pending.
 
 ## Standard Element
 
@@ -85,6 +86,7 @@ fixed parent integration points.
 | Gate 05 IP reduction | keep 128 active | `reports/05_ip_reduction_audit.md`; 96/64/32 candidates fail selected-frame force closure, 18 remains failure control. |
 | Gate 06 training | LIMITED RELEASE | `docs/TRAINING_RELEASE_DECISION.md`; training may start only for LE/B learning, with mandatory selected-frame force closure after training. |
 | Gate 16 q dependent B diagnosis | diagnosis PASS, large training release FAIL | `reports/16_q_dependent_b_diagnosis.md`; B varies with `q48_def_hat`; point-only B prior is insufficient; formal large training remains blocked. |
+| Gate 17 state B prototype | prototype PASS, production release FAIL | `reports/17_state_b_baseline_prototype.md`; state-dependent B baseline reduces force rel to `0.0919`, below the prototype `0.10` target but above final `0.02`. |
 
 Training is allowed only within the limited LE/B release boundary.
 
@@ -120,6 +122,10 @@ Current verified or adopted conclusions:
 - A linear q correction reduces B error to about `0.043` on the same diagnosis,
   so q dependent B is a real missing expression, not an ordering or data
   corruption issue.
+- Gate 17 state-dependent B baseline prototype reduces case031 six-frame force
+  rel from about `0.2107` to `0.0919` and B rel from about `0.0834` to
+  `0.0474`.
+- Gate 17 proves the direction but does not release the production model.
 
 ## Pending Issues That Are Not Data Errors
 
@@ -140,9 +146,9 @@ data is bad:
 - Full consistent tangent K is still an unresolved route decision or
   implementation task.
 - Current `Macro16BoundaryDeepONetWithLE0` expresses q dependent B only through
-  the residual derivative. Gate 16 residual small experiments improved AD-B but
-  did not reach force closure, so the limited training route still needs a
-  state-dependent B baseline prototype before any formal large training.
+  the residual derivative. Gate 17 shows a state-dependent B baseline prototype
+  is better, but it has not yet been migrated into the production trainer and
+  still does not meet the final `0.02` force closure target.
 
 These issues must not be hidden inside network training as if a network could
 repair a definition mismatch. They do not block the limited LE/B training
@@ -207,9 +213,10 @@ Required after training:
 Recommended next tasks, in order:
 
 1. Keep material-only K diagnostics separate from full tangent claims.
-2. Prototype a state-dependent B baseline in a small Gate 17 experiment.
-3. Keep all Gate 17 work outside the main model unless the report proves it.
-4. After any prototype training, rerun selected-frame force closure before
+2. Write a Gate 18 migration plan for adding state-dependent B baseline to the
+   Macro16 main model.
+3. Keep migration staged behind tests and six-frame reproduction.
+4. After any migrated prototype training, rerun selected-frame force closure before
    claiming mechanical usability.
 5. Decide later whether the full consistent tangent requirement is implemented
    or explicitly waived with evidence.

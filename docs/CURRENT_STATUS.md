@@ -98,6 +98,9 @@ fixed parent integration points.
 | Gate 26 force weighted loss plan | PLAN PASS | `reports/26_force_weighted_loss_plan.md`; proposes first implementing a non-default `force-aware-b-loss-weight` using `abs(LE_true) * integration_weight_hat` as a strain-volume proxy, then running three Linux rank12 small experiments. No training release yet. |
 | Gate 27 force aware B loss smoke | FAIL | `reports/27_force_aware_b_loss_smoke.md`; default-off strain-volume force-aware B loss is implemented and tested, but Linux small training best force rel is `0.1149584190`, worse than Gate 23 best `0.1073731865`. Large training remains blocked. |
 | Gate 28 force residual loss plan | PLAN PASS | `reports/28_force_residual_loss_plan.md`; plans a true force residual loss using `F = sum(B * D * LE * dV)`, with `elastic_D` added to Macro16 training data via compact enrichment before training. No training release yet. |
+| Gate 29 force residual training | PROTOTYPE PASS | `reports/29_force_residual_loss_smoke.md`; case031 first6 best model force rel is `0.0882157802`, below the prototype `0.10` target but above the final `0.02` target. |
+| Gate 30 force residual generality | SMALL GENERALITY PASS | `reports/30_force_residual_warmstart_generality.md`; case019 and case031 first6 both pass the prototype `0.10` target with no B prior warmstart. |
+| Gate 31 force residual 16 case audit | FAIL | `reports/31_force_residual_16case_audit.md`; corrected qdef 16-case training fails selected-frame force audit, wind shell cases `70` to `73` fail badly, and `case060` is not a normal relative-force gate sample. Do not expand training before Gate 32 diagnosis. |
 
 Training is allowed only within the limited LE/B release boundary.
 
@@ -172,6 +175,13 @@ Current verified or adopted conclusions:
 - Gate 28 records the next route: add `elastic_D` to the training data and use
   teacher assembled force residual loss, still keeping selected-frame Abaqus RF
   as the post-training audit rather than the first training target.
+- Gate 29 implements the force residual training route and passes only the
+  case031 first6 prototype target. It does not release final training.
+- Gate 30 shows the no-prior force residual setting also passes case019 first6,
+  so the improvement is not a single-case accident.
+- Gate 31 shows that the same route fails on the corrected 16-case qdef set.
+  Wind shell validation cases `70` to `73` are the main generalization failure,
+  while `case060` should be handled as a near-zero-force special sample.
 
 ## Pending Issues That Are Not Data Errors
 
@@ -208,9 +218,8 @@ data is bad:
 - Gate 27 shows the first strain-volume proxy is insufficient. The next step
   should either implement a true force residual loss or diagnose why the proxy
   weighting does not match the actual force error contribution.
-- Gate 28 is a plan only. It requires Gate 29 implementation of compact
-  `elastic_D` enrichment, loader expansion, and a default-off force residual
-  loss before any new Linux training.
+- Gate 31 fails the corrected 16-case force residual audit. The next step is
+  Gate 32 wind-shell distribution and scale diagnosis, not more training.
 
 These issues must not be hidden inside network training as if a network could
 repair a definition mismatch. They do not block the limited LE/B training
@@ -275,13 +284,12 @@ Required after training:
 Recommended next tasks, in order:
 
 1. Keep material-only K diagnostics separate from full tangent claims.
-2. Implement Gate 23 fixed-128 direct-B state baseline as a separate model
-   variant.
-3. Keep migration staged behind tests and six-frame reproduction.
-4. After any migrated prototype training, rerun selected-frame force closure before
-   claiming mechanical usability.
-5. Decide later whether the full consistent tangent requirement is implemented
-   or explicitly waived with evidence.
+2. Run Gate 32 wind shell generalization diagnosis.
+3. Compare train cases and wind shell cases on `q48_def_hat`, `LE_macro`,
+   `B_macro_qdef`, teacher force norm, and branch-normalized input scale.
+4. Decide whether wind shell cases need separate normalization, split policy,
+   force-relative gate handling, or model/loss changes.
+5. Only after Gate 32 gives evidence, decide the next small training experiment.
 
 ## Currently Forbidden
 

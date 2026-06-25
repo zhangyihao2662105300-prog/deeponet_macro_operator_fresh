@@ -29,6 +29,11 @@ training release. Main `le0-state-b` is not equivalent to Gate 17 because the
 main Query path lacks fixed `static_b[128,6,48]` and residual AD terms mix into
 B. Larger training is still not released.
 
+Gate 31 update: corrected 16-case qdef force residual training failed
+selected-frame force closure. Wind shell cases `70` to `73` are a real
+generalization failure, and `case060` is a near-zero-force special sample.
+Do not expand training before Gate 32 diagnosis.
+
 This checklist defines what must be true before network training is allowed.
 It does not start training, change the model, or modify the data contract.
 
@@ -82,6 +87,8 @@ Current status:
   blocked.
 - Gate 22: equivalence diagnosis completed; next step is a fixed-128 direct-B
   state baseline variant, not larger training.
+- Gate 31: corrected 16-case force residual audit failed; next step is wind
+  shell scale and distribution diagnosis, not larger training.
 
 Do not treat this as a full tangent or solver-readiness release.
 
@@ -123,6 +130,9 @@ be treated as proof that the data is corrupt:
 - Gate 22 confirms that the main trainer and Gate 17 are not equivalent. The
   mismatch is in B baseline structure and objective coupling, not data,
   standardization, q48 order, LE order, or the 128 point rule.
+- Gate 31 confirms that the force residual route cannot be scaled directly from
+  two first6 cases to 16 cases. This is not evidence of q48 ordering, LE
+  ordering, or 128 point rule corruption.
 
 These issues no longer block the limited LE/B training release, but they remain
 unresolved mechanics items and are not the same as q48 ordering corruption, LE
@@ -234,3 +244,6 @@ Not allowed by this checklist:
 - Treat the Gate 18 migration plan as proof that the main model already works.
 - Treat the Gate 19 smoke as proof that case031 force closure has passed.
 - Treat the Gate 21 rerun as permission for larger training.
+- Treat Gate 30 two-case success as permission for larger 16-case or full-data
+  training.
+- Ignore Gate 31 failure and continue training before Gate 32 diagnosis.

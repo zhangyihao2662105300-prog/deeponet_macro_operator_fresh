@@ -417,3 +417,42 @@ used as model input: `q48_raw`.
 For ablations or future richer data, `X_macro[50,3]` can still be stored and
 used by `--branch-feature-mode xnodes-qraw`, but that exposes internal CSS8 grid
 nodes and should not be treated as the default macro-element interface.
+
+### 3. Macro16 boundary-control solid-shell route
+
+The new v4 route is the standard macro-element interface and does not expose
+fine-grid geometry to the model.
+
+```text
+contract = v4-macro16-boundary-operator-001
+input    = q48_hat[48] + X16_hat[16,3] + standard Macro16 IP features
+output   = LE_macro[P,6]
+B        = d LE_macro / d q48_hat
+```
+
+Rules:
+
+- Geometry input is only `X16` or `X_keep`, ordered with the 16 q48 control
+  nodes.
+- Displacement input is all 48 components.  Rigid modes are not removed.
+- Standard integration-point features are generated from the single 16-node
+  Macro16 isoparametric map.
+- `X_macro`, CSS8 connectivity, `cell_id`, and `ip_local_rst` are not
+  model-visible inputs in this route.
+- Training labels may come from a fine FE teacher, but saved model inputs should
+  contain only `X16`, `q48`, Macro16 point data, `LE_macro`, `B_macro`, and
+  integration weights.
+
+Windows smoke run:
+
+```powershell
+cd D:\IS-FEM\deeponet_macro_operator_fresh
+$env:PYTHONPATH = "D:\IS-FEM\deeponet_macro_operator_fresh\src"
+py -m macro_deeponet.train_macro16_boundary_sobolev `
+  --compact-list D:\path\to\macro16_compact_list.txt `
+  --out-dir runs\macro16_boundary_debug `
+  --epochs 1 `
+  --batch-size 2 `
+  --jacobian-columns 0,1 `
+  --eval-columns 0,1
+```

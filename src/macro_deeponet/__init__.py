@@ -3,6 +3,7 @@
 from .autograd import strain_jacobian_wrt_q
 from .models import (
     FELinearResidualDeepONet,
+    Macro16BoundaryDeepONet,
     MacroDeepONet,
     NOEMStyleMIONet,
     QueryFEAnchoredLinearResidualDeepONet,
@@ -12,6 +13,7 @@ from .models import (
 
 __all__ = [
     "FELinearResidualDeepONet",
+    "Macro16BoundaryDeepONet",
     "MacroDeepONet",
     "NOEMStyleMIONet",
     "QueryFEAnchoredLinearResidualDeepONet",

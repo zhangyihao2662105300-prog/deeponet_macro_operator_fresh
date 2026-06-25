@@ -599,6 +599,71 @@ class QueryFEAnchoredLinearResidualDeepONet(QueryFELinearResidualDeepONet):
         return anchor + linear + self.residual_offset_norm(x_norm, point_norm)
 
 
+class Macro16BoundaryDeepONet(QueryFEAnchoredLinearResidualDeepONet):
+    """Boundary-control Macro16 operator with full q48 input.
+
+    The intended branch contract is
+
+        [q48_hat, X16_hat.flatten(), optional global geometry scalars]
+
+    where ``q48_hat`` keeps all 16 x 3 displacement components.  No rigid modes
+    are projected out before the network.
+    """
+
+    macro16_contract = "v4-macro16-boundary-operator-001"
+
+    def __init__(
+        self,
+        *,
+        input_dim: int = 99,
+        point_dim: int,
+        q_start: int = 0,
+        q_dim: int = 48,
+        ip_count: int = 0,
+        strain_dim: int = 6,
+        basis_dim: int = 96,
+        hidden_dim: int = 384,
+        branch_depth: int = 5,
+        trunk_depth: int = 5,
+        activation: str = "tanh",
+        skip_init: torch.Tensor | None = None,
+        train_skip: bool = True,
+        residual_scale: float = 1.0,
+        baseline_scale: float = 1.0,
+        train_point_baseline: bool = True,
+        zero_init_residual: bool = True,
+        q_zero_norm: torch.Tensor | None = None,
+        le_zero_norm: torch.Tensor | None = None,
+        q_raw_mean: torch.Tensor | None = None,
+        q_raw_std: torch.Tensor | None = None,
+        gate_q0: float = 0.0,
+    ) -> None:
+        super().__init__(
+            input_dim=input_dim,
+            point_dim=point_dim,
+            q_start=q_start,
+            q_dim=q_dim,
+            ip_count=ip_count,
+            strain_dim=strain_dim,
+            basis_dim=basis_dim,
+            hidden_dim=hidden_dim,
+            branch_depth=branch_depth,
+            trunk_depth=trunk_depth,
+            activation=activation,
+            skip_init=skip_init,
+            train_skip=train_skip,
+            residual_scale=residual_scale,
+            baseline_scale=baseline_scale,
+            train_point_baseline=train_point_baseline,
+            zero_init_residual=zero_init_residual,
+            q_zero_norm=q_zero_norm,
+            le_zero_norm=le_zero_norm,
+            q_raw_mean=q_raw_mean,
+            q_raw_std=q_raw_std,
+            gate_q0=gate_q0,
+        )
+
+
 class NOEMStyleMIONet(nn.Module):
     """NOEM/MIONet-style TRUE176 operator model.
 

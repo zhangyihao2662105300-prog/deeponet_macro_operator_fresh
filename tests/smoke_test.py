@@ -19,8 +19,15 @@ from macro_deeponet.geometry import (
     shape_function_gradients_hex8,
     shape_functions_hex8,
 )
+from macro_deeponet.macro16_geometry import (
+    MACRO16_CONTRACT_VERSION,
+    Macro16GeometryMap,
+    macro16_standard_point_table,
+    shape_functions_macro16,
+)
 from macro_deeponet.models import (
     FELinearResidualDeepONet,
+    Macro16BoundaryDeepONet,
     MacroDeepONet,
     NOEMStyleMIONet,
     QueryFEAnchoredLinearResidualDeepONet,
@@ -43,6 +50,11 @@ from macro_deeponet.train_true176_deeponet_sobolev import ad_jacobian
 from macro_deeponet.train_true176_generic_sobolev import (
     train as train_true176_generic,
     validate_point_feature_source_for_scale,
+)
+from macro_deeponet.train_macro16_boundary_sobolev import (
+    load_macro16_compacts,
+    rigid_q48_modes,
+    train as train_macro16_boundary,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -114,6 +126,187 @@ def test_true176_point_features_and_ad_shapes() -> None:
     j = ad_jacobian(model, x_norm, p_norm, [0, 3, 7], create_graph=False, method="forward")
     assert j.shape == (2, 128, 6, 3)
     assert torch.isfinite(j).all()
+
+
+def test_macro16_shape_geometry_and_ad_shapes() -> None:
+    point_table = macro16_standard_point_table(plane_order=3, thickness_order=2)
+    n, dndxi = shape_functions_macro16(point_table.xi)
+    assert n.shape == (18, 16)
+    assert dndxi.shape == (18, 16, 3)
+    assert np.allclose(np.sum(n, axis=1), 1.0)
+    assert np.allclose(np.sum(dndxi, axis=1), 0.0)
+
+    bottom = np.asarray(
+        [
+            [-1.0, -1.0, -0.1],
+            [0.0, -1.0, -0.1],
+            [1.0, -1.0, -0.1],
+            [1.0, 0.0, -0.1],
+            [1.0, 1.0, -0.1],
+            [0.0, 1.0, -0.1],
+            [-1.0, 1.0, -0.1],
+            [-1.0, 0.0, -0.1],
+        ],
+        dtype=np.float32,
+    )
+    top = bottom.copy()
+    top[:, 2] = 0.1
+    x16 = np.concatenate([bottom, top], axis=0)
+    geom = Macro16GeometryMap(x16)
+    point, names, fields = geom.build_point_features(point_table)
+    assert len(names) == point.shape[1]
+    assert point.shape[0] == 18
+    assert np.all(np.isfinite(point))
+    assert np.all(fields["integration_weight_hat"] > 0.0)
+
+    model = Macro16BoundaryDeepONet(
+        input_dim=99,
+        point_dim=point.shape[-1],
+        ip_count=point.shape[0],
+        basis_dim=12,
+        hidden_dim=32,
+        branch_depth=2,
+        trunk_depth=2,
+        q_start=0,
+        q_dim=48,
+    )
+    x_norm = torch.randn(2, 99)
+    p_norm = torch.as_tensor(np.broadcast_to(point.reshape(1, *point.shape), (2, *point.shape)).copy(), dtype=torch.float32)
+    le = model(x_norm, p_norm)
+    assert le.shape == (2, 18, 6)
+    j = ad_jacobian(model, x_norm, p_norm, [0, 17, 47], create_graph=False, method="forward")
+    assert j.shape == (2, 18, 6, 3)
+    assert torch.isfinite(j).all()
+
+
+def test_macro16_loader_rejects_missing_x16_and_keeps_q48() -> None:
+    point_table = macro16_standard_point_table(plane_order=3, thickness_order=2)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        bad = root / "bad.npz"
+        np.savez(
+            bad,
+            q48_raw=np.zeros((2, 48), dtype=np.float32),
+            X_macro=np.zeros((50, 3), dtype=np.float32),
+            LE_macro=np.zeros((2, 18, 6), dtype=np.float32),
+            B_macro=np.zeros((2, 18, 6, 48), dtype=np.float32),
+        )
+        try:
+            load_macro16_compacts([str(bad)], point_table=point_table)
+        except KeyError as exc:
+            assert "X16" in str(exc) or "X_keep" in str(exc)
+        else:
+            raise AssertionError("Macro16 loader accepted X_macro without X16")
+
+        good = root / "case001_good.npz"
+        x16 = np.zeros((16, 3), dtype=np.float32)
+        x16[:, 0] = np.linspace(-1.0, 1.0, 16, dtype=np.float32)
+        x16[:, 1] = np.sin(np.linspace(0.0, 1.0, 16, dtype=np.float32))
+        x16[:8, 2] = -0.1
+        x16[8:, 2] = 0.1
+        np.savez(
+            good,
+            standard_operator_contract_version=np.asarray(MACRO16_CONTRACT_VERSION, dtype=object),
+            q48_raw=np.zeros((2, 48), dtype=np.float32),
+            X16=x16,
+            LE_macro=np.zeros((2, 18, 6), dtype=np.float32),
+            B_macro=np.zeros((2, 18, 6, 48), dtype=np.float32),
+            case_id=np.asarray(1, dtype=np.int64),
+        )
+        data = load_macro16_compacts([str(good)], point_table=point_table)
+        assert data.q48_hat.shape == (2, 48)
+        assert data.x16_hat.shape == (2, 16, 3)
+        assert data.point_features_hat.shape[:2] == (2, 18)
+        assert data.b.shape[-1] == 48
+        modes = rigid_q48_modes(data.x16_hat)
+        assert modes.shape == (2, 6, 48)
+
+
+def test_macro16_training_smoke_runs_one_epoch() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        compact = root / "case001_macro16.npz"
+        out_dir = root / "out"
+        n = 4
+        bottom = np.asarray(
+            [
+                [-1.0, -1.0, -0.1],
+                [0.0, -1.0, -0.1],
+                [1.0, -1.0, -0.1],
+                [1.0, 0.0, -0.1],
+                [1.0, 1.0, -0.1],
+                [0.0, 1.0, -0.1],
+                [-1.0, 1.0, -0.1],
+                [-1.0, 0.0, -0.1],
+            ],
+            dtype=np.float32,
+        )
+        top = bottom.copy()
+        top[:, 2] = 0.1
+        x16 = np.concatenate([bottom, top], axis=0)
+        rng = np.random.default_rng(24601)
+        q48 = rng.normal(scale=0.05, size=(n, 48)).astype(np.float32)
+        b = np.zeros((n, 18, 6, 48), dtype=np.float32)
+        b[:, :, 0, 0] = 0.2
+        b[:, :, 1, 1] = -0.1
+        le = np.einsum("npaj,nj->npa", b, q48).astype(np.float32)
+        np.savez(
+            compact,
+            standard_operator_contract_version=np.asarray(MACRO16_CONTRACT_VERSION, dtype=object),
+            q48_raw=q48,
+            X16=x16,
+            LE_macro=le,
+            B_macro=b,
+            case_id=np.asarray([1, 1, 2, 2], dtype=np.int64),
+        )
+        args = SimpleNamespace(
+            seed=21,
+            out_dir=out_dir,
+            compact=[str(compact)],
+            compact_list="",
+            plane_gauss_order=3,
+            thickness_gauss_order=2,
+            scale_mode="normalized",
+            b_label_coordinate="auto",
+            epochs=1,
+            batch_size=2,
+            eval_batch_size=2,
+            frame_stride=1,
+            max_frames_per_compact=0,
+            max_eval_frames=4,
+            basis_dim=8,
+            hidden_dim=16,
+            branch_depth=2,
+            trunk_depth=2,
+            activation="tanh",
+            residual_scale=0.0,
+            fe_baseline_scale=1.0,
+            freeze_fe_point_baseline=True,
+            freeze_skip=False,
+            global_b_prior=True,
+            anchored_residual_gate_q0=0.0,
+            le_loss_weight=1.0,
+            jacobian_loss_weight=0.1,
+            rigid_loss_weight=0.0,
+            rigid_mode_scale=0.1,
+            jacobian_columns="0,1",
+            jacobian_columns_per_batch=1,
+            eval_columns="0,1",
+            lr=1.0e-4,
+            lr_decay=1.0,
+            weight_decay=0.0,
+            grad_clip=10.0,
+            val_fraction=0.5,
+            val_cases="2",
+            eval_every=1,
+            cuda=False,
+        )
+        train_macro16_boundary(args)
+        summary = json.loads((out_dir / "training_summary.json").read_text(encoding="utf-8"))
+        assert summary["standard_operator_contract_version"] == MACRO16_CONTRACT_VERSION
+        assert summary["q_dim"] == 48
+        assert summary["fine_grid_geometry_visible"] is False
+        assert Path(summary["latest_checkpoint"]).exists()
 
 
 def test_true176_xkeep_branch_and_ad_shapes() -> None:
@@ -1642,6 +1835,9 @@ if __name__ == "__main__":
     test_synthetic_rigid_targets()
     test_forward_and_autograd_shapes()
     test_true176_point_features_and_ad_shapes()
+    test_macro16_shape_geometry_and_ad_shapes()
+    test_macro16_loader_rejects_missing_x16_and_keeps_q48()
+    test_macro16_training_smoke_runs_one_epoch()
     test_true176_xkeep_branch_and_ad_shapes()
     test_noem_style_mionet_splits_q_and_geometry()
     test_fe_linear_residual_model_has_explicit_b_baseline()

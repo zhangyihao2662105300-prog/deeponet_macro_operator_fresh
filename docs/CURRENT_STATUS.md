@@ -95,6 +95,7 @@ fixed parent integration points.
 | Gate 23 fixed128 direct B training | FAIL, close but not released | `reports/23_fixed128_direct_b_training.md`; Linux rank 4/8/12 fixed128 direct-B training completed. Best force rel is `0.1073723868`, above the `0.10` prototype threshold; teacher force rel remains `0.0127911083`. Large training remains blocked. |
 | Gate 24 Gate17 loss match | FAIL | `reports/24_gate17_loss_match.md`; increasing direct-B weight improves val B to about `0.0973`, but best force rel worsens to `0.1781248909`. This shows balanced B rel is not aligned with the force functional. Large training remains blocked. |
 | Gate 25 force error diagnosis | diagnosis PASS, training release FAIL | `reports/25_force_error_diagnosis.md`; Gate 24 lowers LE/B rel but worsens force. Error is concentrated in the largest-q frame, shifts from Gate 23 G13 dominance to Gate 24 E11 dominance, and shows force magnitude underprediction. Next step is force-weighted B loss planning. |
+| Gate 26 force weighted loss plan | PLAN PASS | `reports/26_force_weighted_loss_plan.md`; proposes first implementing a non-default `force-aware-b-loss-weight` using `abs(LE_true) * integration_weight_hat` as a strain-volume proxy, then running three Linux rank12 small experiments. No training release yet. |
 
 Training is allowed only within the limited LE/B release boundary.
 
@@ -160,6 +161,9 @@ Current verified or adopted conclusions:
   largest-q frame, E11 contribution, and selected q DOFs. Gate 24 also
   underpredicts force magnitude on the worst frame. A force-aware loss or
   checkpoint selector is needed before further training.
+- Gate 26 records the planned first force-aware loss: weight physical B error by
+  a clamped strain-volume proxy `abs(LE_true) * integration_weight_hat`, default
+  off, before considering a stricter stress or Abaqus RF force loss.
 
 ## Pending Issues That Are Not Data Errors
 
@@ -190,6 +194,9 @@ data is bad:
 - Gate 25 has localized the force/B mismatch. The next training change should
   be force-weighted, stress-weighted, or force-aware; another unweighted B loss
   sweep is not justified.
+- Gate 26 is only a plan. It does not prove the force-aware loss works; Gate 27
+  must implement the default-off loss and run Linux three-way small training
+  before any training release claim.
 
 These issues must not be hidden inside network training as if a network could
 repair a definition mismatch. They do not block the limited LE/B training

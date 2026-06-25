@@ -100,7 +100,7 @@ def _scalar_text(z: np.lib.npyio.NpzFile, key: str, default: str = "") -> str:
 
 
 def _infer_n(z: np.lib.npyio.NpzFile, path: Path) -> int:
-    for key in ("q48_raw", "q48_hat", "q_boundary", "LE_macro", "LE128_base", "B_macro", "B_LE128_forward"):
+    for key in ("q48_def_hat", "q48_def_raw", "q48_raw", "q48_hat", "q_boundary", "LE_macro", "LE128_base", "B_macro", "B_LE128_forward"):
         if key in z.files:
             arr = np.asarray(z[key])
             if arr.ndim >= 1:
@@ -174,6 +174,12 @@ def _as_q48_hat(
     *,
     scale_mode: str,
 ) -> tuple[np.ndarray, np.ndarray | None, str, str]:
+    q_def_hat, q_def_hat_key = _as_optional_q48(z, path, n_total, rows, ("q48_def_hat",))
+    q_def_raw, q_def_raw_key = _as_optional_q48(z, path, n_total, rows, ("q48_def_raw",))
+    if q_def_hat is not None:
+        return q_def_hat.astype(np.float32), q_def_raw, q_def_hat_key, q_def_raw_key
+    if q_def_raw is not None:
+        return (q_def_raw / np.maximum(l_ref, 1.0e-12)).astype(np.float32), q_def_raw, "q48_def_raw/L_ref", q_def_raw_key
     q_hat, q_hat_key = _as_optional_q48(z, path, n_total, rows, ("q48_hat",))
     q_raw, q_raw_key = _as_optional_q48(z, path, n_total, rows, ("q48_raw", "q_boundary"))
     if q_hat is not None:
@@ -228,7 +234,10 @@ def _as_b_qhat(
     scale_mode: str,
     b_label_coordinate: str,
 ) -> tuple[np.ndarray, np.ndarray | None, str, str]:
-    b_hat, b_hat_key = _as_optional_b(z, path, n_total, rows, point_count, ("B_macro_qhat",))
+    b_hat, b_hat_key = _as_optional_b(z, path, n_total, rows, point_count, ("B_macro_qdef", "B_macro_qhat"))
+    b_def_raw, b_def_raw_key = _as_optional_b(z, path, n_total, rows, point_count, ("B_macro_qdef_raw",))
+    if b_hat is not None and b_hat_key == "B_macro_qdef":
+        return b_hat.astype(np.float32), b_def_raw, b_hat_key, b_def_raw_key
     b_raw, b_raw_key = _as_optional_b(
         z,
         path,
@@ -457,8 +466,11 @@ def load_macro16_compacts(
                 {
                     "q48_hat_source": q_hat_source,
                     "q48_raw_source_for_audit": q_raw_source,
+                    "model_visible_q": "q48_def_hat" if str(q_hat_source).startswith("q48_def") else q_hat_source,
+                    "rigid_motion_removed_by_preprocessing": bool(str(q_hat_source).startswith("q48_def")),
                     "B_macro_qhat_source": b_hat_source,
                     "B_macro_qraw_source_for_audit": b_raw_source,
+                    "model_visible_B": "B_macro_qdef" if b_hat_source == "B_macro_qdef" else b_hat_source,
                     "integration_weight_hat_source": weight_hat_source,
                     "integration_weight_phys_source_for_audit": weight_phys_source,
                     "L_ref_source": l_ref_key or "computed_from_X16",
@@ -668,6 +680,9 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         scale_mode=str(args.scale_mode),
         b_label_coordinate=str(args.b_label_coordinate),
     )
+    model_visible_q = str(data.point_meta.get("model_visible_q", "q48_hat"))
+    rigid_preprocessed = bool(data.point_meta.get("rigid_motion_removed_by_preprocessing", False))
+    model_visible_b = str(data.point_meta.get("model_visible_B", "B_macro_qhat"))
     train_idx, val_idx, split_meta = split_indices(
         data.case_id,
         val_fraction=float(args.val_fraction),
@@ -763,7 +778,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             "train_frames": int(train_idx.size),
             "val_frames": int(val_idx.size),
             "validation_split": split_meta,
-            "branch_contract": "q48_hat[48] plus X16_hat[16,3] plus L_ref",
+            "branch_contract": f"{model_visible_q}[48] plus X16_hat[16,3] plus L_ref",
+            "model_visible_q": model_visible_q,
+            "rigid_motion_removed_by_preprocessing": rigid_preprocessed,
+            "q_input_dim": 48,
             "q_dim": 48,
             "rigid_modes_removed_from_input": False,
             "fine_grid_geometry_visible": False,
@@ -775,9 +793,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 "input_dim": int(branch_norm.shape[-1]),
                 "point_dim": int(point_norm.shape[-1]),
                 "ip_count": int(point_norm.shape[1]),
-                "ad_target": "dLE/dq48_hat",
+                "ad_target": f"dLE/d{model_visible_q}",
+                "B_target": model_visible_b,
                 "le0_enabled": bool(style == "le0"),
-                "le0_init_definition": "mean_train((LE_macro - B_macro @ q48_hat - LE_mean) / LE_std)",
+                "le0_init_definition": f"mean_train((LE_macro - {model_visible_b} @ {model_visible_q} - LE_mean) / LE_std)",
                 "le0_star_train_norm_rel_to_LE": norm_ratio_np(le0_star[train_idx], data.le[train_idx]),
                 "le0_star_val_norm_rel_to_LE": norm_ratio_np(le0_star[val_idx], data.le[val_idx]),
                 "le0_star_train_centered_rel_to_LE_centered": norm_ratio_np(
@@ -929,7 +948,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "latest_report": history[-1] if history else None,
         "best_checkpoint": str(out_dir / "best.pt"),
         "latest_checkpoint": str(out_dir / "latest.pt"),
-        "model_visible_inputs": ["q48_hat", "X16_hat", "macro16_point_features_hat"],
+        "model_visible_inputs": [model_visible_q, "X16_hat", "macro16_point_features_hat"],
+        "model_visible_q": model_visible_q,
+        "rigid_motion_removed_by_preprocessing": rigid_preprocessed,
+        "q_input_dim": 48,
         "model_style": model_meta_style,
         "q_dim": 48,
         "rigid_modes_removed_from_input": False,

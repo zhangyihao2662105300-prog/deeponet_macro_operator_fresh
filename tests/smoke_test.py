@@ -1078,6 +1078,13 @@ def test_macro16_source128_compact_separates_raw_hat_scale_contract() -> None:
             assert z["X_center"].shape == (n, 3)
             assert z["X16_hat"].shape == (n, 16, 3)
             assert np.allclose(np.asarray(z["q48_hat"], dtype=np.float64) * l_ref, z["q48_raw"])
+            assert z["q48_def_raw"].shape == (n, 48)
+            assert z["q48_rigid_raw"].shape == (n, 48)
+            assert z["q48_def_hat"].shape == (n, 48)
+            assert z["rigid_projection_P"].shape == (n, 48, 48)
+            assert np.allclose(np.asarray(z["q48_rigid_raw"], dtype=np.float64) + np.asarray(z["q48_def_raw"], dtype=np.float64), z["q48_raw"])
+            assert np.allclose(np.asarray(z["q48_def_hat"], dtype=np.float64) * l_ref, z["q48_def_raw"])
+            assert z["B_macro_qdef"].shape == (n, 128, 6, 48)
             assert np.allclose(np.asarray(z["B_macro_qhat"], dtype=np.float64), np.asarray(z["B_macro_qraw"], dtype=np.float64) * l_ref.reshape(n, 1, 1, 1))
             assert np.allclose(np.asarray(z["integration_weight_phys"], dtype=np.float64), np.asarray(z["integration_weight_hat"], dtype=np.float64) * l_ref**3)
             assert str(np.asarray(z["integration_weight_coordinate"]).reshape(-1)[0]) == "hat-dimensionless"
@@ -1087,9 +1094,11 @@ def test_macro16_source128_compact_separates_raw_hat_scale_contract() -> None:
         point_table = macro16_standard_point_table(plane_order=3, thickness_order=2)
         data = load_macro16_compacts([str(compact)], point_table=point_table)
         with np.load(compact, allow_pickle=True) as z:
-            assert np.allclose(data.q48_hat, z["q48_hat"])
-            assert np.allclose(data.b, z["B_macro_qhat"])
+            assert np.allclose(data.q48_hat, z["q48_def_hat"])
+            assert np.allclose(data.b, z["B_macro_qdef"])
             assert np.allclose(data.weights, z["integration_weight_hat"])
+            assert data.point_meta["model_visible_q"] == "q48_def_hat"
+            assert data.point_meta["rigid_motion_removed_by_preprocessing"] is True
 
 
 def test_macro16_source128_generality_planner_writes_three_worker_manifest() -> None:

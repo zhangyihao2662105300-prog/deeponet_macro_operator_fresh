@@ -47,9 +47,10 @@ from macro_deeponet.macro16_geometry import (  # noqa: E402
     normalize_macro16_x16_batch,
     scale_consistency_report,
 )
+from macro_deeponet.macro16_rigid import rigid_consistency_report, rigid_preprocess_batch  # noqa: E402
 from macro_deeponet.true176_data import standard_css8_row_map  # noqa: E402
 
-SOURCE128_CONTRACT_VERSION = "macro16-source128-teacher-scale-contract-002"
+SOURCE128_CONTRACT_VERSION = "macro16-source128-teacher-rigid-preprocess-003"
 
 
 def json_default(obj: Any) -> Any:
@@ -177,7 +178,11 @@ def build_one(
         raise ValueError(f"{path}: non-finite source128 teacher labels")
     x16_hat, x_center, l_ref, weights_hat = macro16_source128_geometry_scale(x16)
     q48_hat = q48 / np.maximum(l_ref, 1.0e-12)
+    q48_def_raw, q48_rigid_raw, rigid_r, rigid_t, rigid_projection_p = rigid_preprocess_batch(x16, q48)
+    q48_def_hat = q48_def_raw / np.maximum(l_ref, 1.0e-12)
     b128_qraw = b128
+    b128_qdef_raw = np.einsum("npak,nkj->npaj", b128_qraw, rigid_projection_p)
+    b128_qdef = b128_qdef_raw * l_ref.reshape(l_ref.shape[0], 1, 1, 1)
     b128_qhat = b128_qraw * l_ref.reshape(l_ref.shape[0], 1, 1, 1)
     weights_phys = weights_hat * (l_ref**3)
     requested_weight_phys = weights_phys.copy() if weight_key == "macro16_x16_source128_standard_rule" else weights
@@ -190,6 +195,15 @@ def build_one(
         integration_weight_phys=weights_phys,
         l_ref=l_ref,
     )
+    rigid_audit = rigid_consistency_report(
+        x16_raw=x16,
+        q48_raw=q48,
+        q48_rigid_raw=q48_rigid_raw,
+        q48_def_raw=q48_def_raw,
+        q48_def_hat=q48_def_hat,
+        l_ref=l_ref,
+        rigid_projection_p=rigid_projection_p,
+    )
     first_case = int(case_id[0]) if case_id.size else -1
     case_name = f"case{first_case:03d}" if first_case >= 0 else "case_unknown"
     out_root.mkdir(parents=True, exist_ok=True)
@@ -201,6 +215,12 @@ def build_one(
         macro16_teacher_contract_version=np.asarray(SOURCE128_CONTRACT_VERSION, dtype=object),
         q48_raw=q48.astype(np.float32),
         q48_hat=q48_hat.astype(np.float32),
+        q48_rigid_raw=q48_rigid_raw.astype(np.float32),
+        q48_def_raw=q48_def_raw.astype(np.float32),
+        q48_def_hat=q48_def_hat.astype(np.float32),
+        rigid_rotation_R=rigid_r.astype(np.float32),
+        rigid_translation_t=rigid_t.astype(np.float32),
+        rigid_projection_P=rigid_projection_p.astype(np.float32),
         X16_raw=x16.astype(np.float32),
         X_center=x_center.astype(np.float32),
         L_ref=l_ref.astype(np.float32),
@@ -208,6 +228,8 @@ def build_one(
         X16=x16.astype(np.float32),
         LE_macro=le128.astype(np.float32),
         B_macro_qraw=b128_qraw.astype(np.float32),
+        B_macro_qdef_raw=b128_qdef_raw.astype(np.float32),
+        B_macro_qdef=b128_qdef.astype(np.float32),
         B_macro_qhat=b128_qhat.astype(np.float32),
         B_macro=b128_qraw.astype(np.float32),
         integration_weight_hat=weights_hat.astype(np.float32),
@@ -242,11 +264,19 @@ def build_one(
         B_label_strain_field=np.asarray(b_strain_field, dtype=object),
         B_label_q_coordinate=np.asarray("q48_raw", dtype=object),
         B_macro_qraw_label_q_coordinate=np.asarray("q48_raw", dtype=object),
+        B_macro_qdef_raw_label_q_coordinate=np.asarray("q48_def_raw", dtype=object),
+        B_macro_qdef_label_q_coordinate=np.asarray("q48_def_hat", dtype=object),
         B_macro_qhat_label_q_coordinate=np.asarray("q48_hat", dtype=object),
+        rigid_preprocessing=np.asarray("kabsch_remove_translation_and_rotation_keep_48d", dtype=object),
+        rigid_projection_P_note=np.asarray(
+            "rigid_projection_P is a small-rotation linear projector for first-pass B chain-rule labels; "
+            "Kabsch preprocessing is nonlinear and can later use a numerical or analytic Jacobian.",
+            dtype=object,
+        ),
         compatibility_alias_B_macro=np.asarray("B_macro_qraw", dtype=object),
         compatibility_alias_X16=np.asarray("X16_raw", dtype=object),
         compatibility_note=np.asarray(
-            "New readers prefer X16_hat/q48_hat/B_macro_qhat/integration_weight_hat for training and "
+            "New readers prefer X16_hat/q48_def_hat/B_macro_qdef/integration_weight_hat for training and "
             "B_macro_qraw/integration_weight_phys for physical force audits; legacy X16 and B_macro are raw aliases.",
             dtype=object,
         ),
@@ -274,7 +304,8 @@ def build_one(
         "integration_weight_rule": "macro16_x16_standard_source128",
         "requested_integration_weight_rule": "macro16_x16_standard_source128" if weight_key == "macro16_x16_source128_standard_rule" else "source_teacher_volume",
         "label_source": "128-IP TRUE176/CSS8 teacher labels kept as Macro16 source128 point set",
-        "model_visible_arrays": ["q48_hat", "X16_hat", "macro16_point_xi/source128 point features"],
+        "model_visible_arrays": ["q48_def_hat", "X16_hat", "macro16_point_xi/source128 point features"],
+        "rigid_motion_removed_by_preprocessing": True,
         "force_audit_arrays": ["B_macro_qraw", "integration_weight_phys"],
         "fine_grid_geometry_visible_to_model": False,
         "writes_X_macro": False,
@@ -282,10 +313,14 @@ def build_one(
         "case_ids": sorted(np.unique(case_id).astype(np.int64).tolist()),
         "q48_shape": list(q48.shape),
         "q48_hat_shape": list(q48_hat.shape),
+        "q48_def_raw_shape": list(q48_def_raw.shape),
+        "q48_def_hat_shape": list(q48_def_hat.shape),
+        "rigid_projection_P_shape": list(rigid_projection_p.shape),
         "X16_raw_shape": list(x16.shape),
         "X16_hat_shape": list(x16_hat.shape),
         "LE_macro_shape": list(le128.shape),
         "B_macro_qraw_shape": list(b128_qraw.shape),
+        "B_macro_qdef_shape": list(b128_qdef.shape),
         "B_macro_qhat_shape": list(b128_qhat.shape),
         "integration_weight_hat_shape": list(weights_hat.shape),
         "integration_weight_phys_shape": list(weights_phys.shape),
@@ -296,6 +331,7 @@ def build_one(
         "L_ref_min": float(np.min(l_ref)),
         "L_ref_max": float(np.max(l_ref)),
         "scale_consistency": scale_audit,
+        "rigid_consistency": rigid_audit,
         **ip_key_meta,
     }
     summary_path = out_path.with_suffix(".summary.json")

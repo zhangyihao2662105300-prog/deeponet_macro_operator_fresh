@@ -81,6 +81,7 @@ from audit_macro16_force_stiffness import TRUE176_MACRO_TO_KEEP_FLAT
 from audit_macro16_force_stiffness import run_audit as run_macro16_force_stiffness_audit
 from plan_macro16_source128_generality_audit import build_plan as build_macro16_source128_generality_plan
 import prepare_macro16_source128_distortion_tasks as prepare_macro16_distortion_tasks
+from fit_macro16_point_b_prior import run as run_macro16_point_b_prior
 from run_v1_2_pilot_case041_fresh_abaqus import assert_linear_frames as assert_pilot_linear_frames
 
 
@@ -555,6 +556,130 @@ def test_macro16_training_le0_model_fits_nonzero_initial_strain_prior() -> None:
         assert summary["model_style"] == "macro16-boundary-deeponet-with-le0"
         assert summary["latest_report"]["train_LE_rel"] < 1.0e-5
         assert summary["latest_report"]["train_AD_B_rel"] < 1.0e-5
+
+
+def test_macro16_point_b_prior_checkpoint_loads_into_training_model() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        compact = root / "case001_source128_bprior.npz"
+        compact_list = root / "compact_list.txt"
+        prior_json = root / "point_b_prior.json"
+        prior_ckpt = root / "point_b_prior.pt"
+        out_dir = root / "train_out"
+        point_table = macro16_source128_point_table()
+        n = 4
+        x16 = macro16_flat_x16()
+        rng = np.random.default_rng(1337)
+        q = rng.normal(scale=0.05, size=(n, 48)).astype(np.float32)
+        b = np.zeros((n, point_table.xi.shape[0], 6, 48), dtype=np.float32)
+        for ip in range(point_table.xi.shape[0]):
+            b[:, ip, 0, 0] = 0.15 + 0.001 * float(ip)
+            b[:, ip, 1, 1] = -0.07 + 0.0005 * float(ip)
+        le = np.einsum("npaj,nj->npa", b, q).astype(np.float32)
+        np.savez(
+            compact,
+            X16_raw=np.broadcast_to(x16.reshape(1, 16, 3), (n, 16, 3)).astype(np.float32),
+            q48_def_hat=q,
+            LE_macro=le,
+            B_macro_qdef=b,
+            macro16_point_xi=point_table.xi.astype(np.float32),
+            integration_weight_hat=np.ones((n, point_table.xi.shape[0]), dtype=np.float32),
+            case_id=np.asarray([1, 1, 2, 2], dtype=np.int64),
+        )
+        compact_list.write_text(str(compact) + "\n", encoding="utf-8")
+
+        prior_args = SimpleNamespace(
+            compact=[str(compact)],
+            compact_list="",
+            out=str(prior_json),
+            checkpoint_out=str(prior_ckpt),
+            val_cases="2",
+            val_fraction=0.0,
+            hidden_dim=16,
+            depth=2,
+            epochs=2,
+            eval_every=1,
+            lr=1.0e-3,
+            weight_decay=0.0,
+            baseline_scale=1.0,
+            seed=20260625,
+            cuda=False,
+        )
+        prior_summary = run_macro16_point_b_prior(prior_args)
+        assert prior_ckpt.exists()
+        assert prior_summary["checkpoint_out"] == str(prior_ckpt)
+        checkpoint = torch.load(prior_ckpt, map_location="cpu")
+        assert checkpoint["b_prior_kind"] == "global_plus_point"
+        assert checkpoint["target_coordinate"] == "J_norm"
+        assert tuple(checkpoint["global_b_norm"].shape) == (6, 48)
+        assert checkpoint["split"]["train_case_ids"] == [1]
+        assert checkpoint["split"]["val_case_ids_excluded"] == [2]
+
+        train_args = SimpleNamespace(
+            compact=[],
+            compact_list=str(compact_list),
+            out_dir=out_dir,
+            plane_gauss_order=3,
+            thickness_gauss_order=2,
+            scale_mode="normalized",
+            b_label_coordinate="auto",
+            epochs=0,
+            batch_size=2,
+            eval_batch_size=1,
+            frame_stride=1,
+            max_frames_per_compact=0,
+            max_eval_frames=4,
+            basis_dim=8,
+            hidden_dim=16,
+            branch_depth=2,
+            trunk_depth=2,
+            activation="tanh",
+            model_style="le0",
+            residual_scale=0.0,
+            le0_scale=1.0,
+            freeze_le0_static=False,
+            freeze_le0_point=False,
+            fe_baseline_scale=1.0,
+            freeze_fe_point_baseline=False,
+            freeze_skip=False,
+            global_b_prior=True,
+            b_prior_warmstart_checkpoint=str(prior_ckpt),
+            freeze_b_prior_after_warmstart=True,
+            global_b_lr_scale=0.0,
+            point_b_lr_scale=0.0,
+            anchored_residual_gate_q0=0.0,
+            le_loss_weight=0.0,
+            jacobian_loss_weight=1.0,
+            jacobian_loss_scale="physical-balanced",
+            physical_b_loss_floor_rel=2.0e-2,
+            physical_b_loss_floor_abs=1.0e-8,
+            rigid_loss_weight=0.0,
+            rigid_mode_scale=0.1,
+            jacobian_columns="0,1",
+            jacobian_columns_per_batch=2,
+            eval_columns="0,1",
+            lr=1.0e-4,
+            lr_decay=1.0,
+            weight_decay=0.0,
+            grad_clip=10.0,
+            val_fraction=0.0,
+            val_cases="2",
+            eval_every=1,
+            seed=20260625,
+            cuda=False,
+        )
+        train_macro16_boundary(train_args)
+        summary = json.loads((out_dir / "training_summary.json").read_text(encoding="utf-8"))
+        meta = summary["b_prior_warmstart_meta"]
+        assert meta["enabled"] is True
+        assert meta["loaded_static"] == "global_b_norm"
+        assert meta["loaded_point_b_net"] is True
+        assert meta["checkpoint_train_case_ids"] == [1]
+        assert meta["checkpoint_val_case_ids_excluded"] == [2]
+        assert summary["optimizer_meta"]["freeze_b_prior"] is True
+        frozen = " ".join(summary["optimizer_meta"]["frozen_b_prior_parts"])
+        assert "global_b_norm" in frozen
+        assert "point_b_net" in frozen
 
 
 def test_macro16_detj_rejects_flipped_surface_order() -> None:

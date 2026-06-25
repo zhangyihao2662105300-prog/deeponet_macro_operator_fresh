@@ -718,6 +718,184 @@ def evaluate(
     }
 
 
+def _checkpoint_array(value: Any, *, key: str) -> np.ndarray:
+    if value is None:
+        raise KeyError(f"missing {key} in B prior checkpoint")
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().numpy()
+    return np.asarray(value)
+
+
+def _compare_checkpoint_norm(
+    checkpoint: dict[str, Any],
+    name: str,
+    expected: np.ndarray,
+    *,
+    rtol: float = 1.0e-4,
+    atol: float = 1.0e-6,
+) -> dict[str, Any]:
+    norms = checkpoint.get("norms", {})
+    if not isinstance(norms, dict) or name not in norms:
+        return {"name": name, "status": "missing_in_checkpoint"}
+    got = _checkpoint_array(norms[name], key=f"norms.{name}").astype(np.float32)
+    exp = np.asarray(expected, dtype=np.float32)
+    if got.shape != exp.shape:
+        raise ValueError(f"B prior checkpoint norms.{name} shape {got.shape} != expected {exp.shape}")
+    max_abs = float(np.max(np.abs(got - exp))) if got.size else 0.0
+    denom = max(float(np.linalg.norm(exp.reshape(-1))), 1.0e-12)
+    rel = float(np.linalg.norm((got - exp).reshape(-1)) / denom)
+    if not np.allclose(got, exp, rtol=rtol, atol=atol):
+        raise ValueError(
+            f"B prior checkpoint norms.{name} does not match current training normalization "
+            f"(rel={rel:.6g}, max_abs={max_abs:.6g})"
+        )
+    return {"name": name, "status": "match", "rel": rel, "max_abs": max_abs}
+
+
+def load_macro16_b_prior_warmstart(
+    model: nn.Module,
+    *,
+    checkpoint_path: str,
+    point_dim: int,
+    baseline_scale: float,
+    norms: dict[str, np.ndarray],
+    device: torch.device,
+) -> dict[str, Any]:
+    text = str(checkpoint_path).strip()
+    if not text:
+        return {"enabled": False, "checkpoint_path": ""}
+    path = Path(text).resolve()
+    if not path.exists():
+        raise FileNotFoundError(f"B prior warmstart checkpoint not found: {path}")
+    checkpoint = torch.load(path, map_location=device)
+    if not isinstance(checkpoint, dict):
+        raise ValueError("B prior warmstart checkpoint must be a dict")
+    kind = str(checkpoint.get("b_prior_kind", ""))
+    target = str(checkpoint.get("target_coordinate", ""))
+    if kind != "global_plus_point":
+        raise ValueError(f"unsupported B prior checkpoint kind {kind!r}")
+    if target != "J_norm":
+        raise ValueError(f"unsupported B prior target_coordinate {target!r}; expected 'J_norm'")
+    model_meta = checkpoint.get("model", {})
+    if isinstance(model_meta, dict):
+        if int(model_meta.get("point_dim", point_dim)) != int(point_dim):
+            raise ValueError(f"B prior checkpoint point_dim {model_meta.get('point_dim')} != current {point_dim}")
+        if int(model_meta.get("q_dim", 48)) != 48:
+            raise ValueError("B prior checkpoint q_dim must be 48")
+        if int(model_meta.get("strain_dim", 6)) != 6:
+            raise ValueError("B prior checkpoint strain_dim must be 6")
+    ckpt_baseline_scale = float(checkpoint.get("baseline_scale", baseline_scale))
+    if abs(ckpt_baseline_scale - float(baseline_scale)) > 1.0e-8:
+        raise ValueError(
+            f"B prior checkpoint baseline_scale {ckpt_baseline_scale} != current fe_baseline_scale {float(baseline_scale)}"
+        )
+    norm_checks = [
+        _compare_checkpoint_norm(checkpoint, "point_mean", norms["point_mean"]),
+        _compare_checkpoint_norm(checkpoint, "point_std", norms["point_std"]),
+        _compare_checkpoint_norm(checkpoint, "branch_mean", norms["branch_mean"]),
+        _compare_checkpoint_norm(checkpoint, "branch_std", norms["branch_std"]),
+        _compare_checkpoint_norm(checkpoint, "le_std", norms["le_std"]),
+        _compare_checkpoint_norm(checkpoint, "q_std", norms["branch_std"].reshape(-1)[:48]),
+    ]
+    global_value = _checkpoint_array(checkpoint.get("global_b_norm"), key="global_b_norm").astype(np.float32)
+    if global_value.shape == (6, 48):
+        global_tensor = torch.as_tensor(global_value, dtype=torch.float32, device=device)
+    elif global_value.ndim == 3 and global_value.shape[-2:] == (6, 48):
+        global_tensor = torch.as_tensor(np.mean(global_value, axis=0), dtype=torch.float32, device=device)
+    else:
+        raise ValueError(f"B prior global_b_norm must have shape [6,48] or [P,6,48], got {global_value.shape}")
+    if hasattr(model, "global_b_norm"):
+        with torch.no_grad():
+            model.global_b_norm.copy_(global_tensor)
+        loaded_static = "global_b_norm"
+    elif hasattr(model, "static_b_norm"):
+        static = global_tensor.view(1, 6, 48).expand_as(model.static_b_norm)
+        with torch.no_grad():
+            model.static_b_norm.copy_(static)
+        loaded_static = "static_b_norm"
+    else:
+        raise ValueError("model has neither global_b_norm nor static_b_norm")
+    state = checkpoint.get("point_b_net_state")
+    if not isinstance(state, dict):
+        raise KeyError("missing point_b_net_state in B prior checkpoint")
+    missing, unexpected = model.point_b_net.load_state_dict(state, strict=False)
+    if missing or unexpected:
+        raise ValueError(
+            f"B prior point_b_net_state mismatch: missing={list(missing)}, unexpected={list(unexpected)}"
+        )
+    split = checkpoint.get("split", {})
+    return {
+        "enabled": True,
+        "checkpoint_path": str(path),
+        "b_prior_kind": kind,
+        "target_coordinate": target,
+        "loaded_static": loaded_static,
+        "loaded_point_b_net": True,
+        "baseline_scale": ckpt_baseline_scale,
+        "norm_checks": norm_checks,
+        "checkpoint_best": checkpoint.get("best"),
+        "checkpoint_train_case_ids": split.get("train_case_ids") if isinstance(split, dict) else None,
+        "checkpoint_val_case_ids_excluded": split.get("val_case_ids_excluded") if isinstance(split, dict) else None,
+    }
+
+
+def build_macro16_optimizer(
+    model: nn.Module,
+    *,
+    lr: float,
+    weight_decay: float,
+    global_b_lr_scale: float,
+    point_b_lr_scale: float,
+    freeze_b_prior: bool,
+) -> tuple[torch.optim.Optimizer, dict[str, Any]]:
+    frozen: list[str] = []
+    groups: dict[str, list[nn.Parameter]] = {"main": [], "global_b": [], "point_b": []}
+    seen: set[int] = set()
+    for name, param in model.named_parameters():
+        if name in {"global_b_norm", "static_b_norm"}:
+            key = "global_b"
+        elif name.startswith("point_b_net."):
+            key = "point_b"
+        else:
+            key = "main"
+        if freeze_b_prior and key in {"global_b", "point_b"}:
+            param.requires_grad_(False)
+            frozen.append(name)
+        if not param.requires_grad:
+            continue
+        ident = id(param)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        groups[key].append(param)
+    param_groups: list[dict[str, Any]] = []
+    lr_map = {
+        "main": float(lr),
+        "global_b": float(lr) * float(global_b_lr_scale),
+        "point_b": float(lr) * float(point_b_lr_scale),
+    }
+    for key in ("main", "global_b", "point_b"):
+        params = groups[key]
+        if params and lr_map[key] > 0.0:
+            param_groups.append({"params": params, "lr": lr_map[key], "name": key})
+        elif params:
+            for param in params:
+                param.requires_grad_(False)
+            frozen.extend([key])
+    if not param_groups:
+        raise ValueError("optimizer has no trainable parameters")
+    optimizer = torch.optim.AdamW(param_groups, lr=float(lr), weight_decay=float(weight_decay))
+    meta = {
+        "global_b_lr_scale": float(global_b_lr_scale),
+        "point_b_lr_scale": float(point_b_lr_scale),
+        "freeze_b_prior": bool(freeze_b_prior),
+        "frozen_b_prior_parts": sorted(set(frozen)),
+        "param_counts": {key: int(sum(p.numel() for p in params if p.requires_grad)) for key, params in groups.items()},
+        "param_group_lrs": {str(group.get("name", i)): float(group["lr"]) for i, group in enumerate(optimizer.param_groups)},
+    }
+    return optimizer, meta
+
+
 def train(args: argparse.Namespace) -> dict[str, Any]:
     random.seed(int(args.seed))
     np.random.seed(int(args.seed))
@@ -826,7 +1004,22 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         rigid_loss_target = "LE(q_rigid) - LE(0) ~= 0"
     else:
         raise ValueError("model_style must be le0 or zero-anchor")
-    optimizer = torch.optim.AdamW(model.parameters(), lr=float(args.lr), weight_decay=float(args.weight_decay))
+    b_prior_warmstart_meta = load_macro16_b_prior_warmstart(
+        model,
+        checkpoint_path=str(getattr(args, "b_prior_warmstart_checkpoint", "")),
+        point_dim=int(point_norm.shape[-1]),
+        baseline_scale=float(args.fe_baseline_scale),
+        norms=norms,
+        device=device,
+    )
+    optimizer, optimizer_meta = build_macro16_optimizer(
+        model,
+        lr=float(args.lr),
+        weight_decay=float(args.weight_decay),
+        global_b_lr_scale=float(getattr(args, "global_b_lr_scale", 1.0)),
+        point_b_lr_scale=float(getattr(args, "point_b_lr_scale", 1.0)),
+        freeze_b_prior=bool(getattr(args, "freeze_b_prior_after_warmstart", False)),
+    )
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=float(args.lr_decay))
     columns_all = parse_int_list(str(args.jacobian_columns))
     eval_columns = parse_int_list(str(args.eval_columns))
@@ -859,6 +1052,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             "css8_internal_geometry_visible": False,
             "point_meta": data.point_meta,
             "point_feature_names": data.point_meta.get("point_feature_names", []),
+            "b_prior_warmstart_meta": b_prior_warmstart_meta,
+            "optimizer_meta": optimizer_meta,
             "model_meta": {
                 "model_style": model_meta_style,
                 "input_dim": int(branch_norm.shape[-1]),
@@ -1051,6 +1246,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "q_dim": 48,
         "rigid_modes_removed_from_input": False,
         "fine_grid_geometry_visible": False,
+        "b_prior_warmstart_meta": b_prior_warmstart_meta,
+        "optimizer_meta": optimizer_meta,
     }
     write_json(out_dir / "training_summary.json", summary)
     return {"best_score": best_score, "out_dir": str(out_dir)}
@@ -1085,6 +1282,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--freeze-fe-point-baseline", action="store_true")
     p.add_argument("--freeze-skip", action="store_true")
     p.add_argument("--global-b-prior", action="store_true")
+    p.add_argument("--b-prior-warmstart-checkpoint", default="")
+    p.add_argument("--freeze-b-prior-after-warmstart", action="store_true")
+    p.add_argument("--global-b-lr-scale", type=float, default=1.0)
+    p.add_argument("--point-b-lr-scale", type=float, default=1.0)
     p.add_argument("--anchored-residual-gate-q0", type=float, default=0.0)
     p.add_argument("--le-loss-weight", type=float, default=1.0)
     p.add_argument("--jacobian-loss-weight", type=float, default=1.0)

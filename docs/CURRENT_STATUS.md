@@ -91,6 +91,7 @@ fixed parent integration points.
 | Gate 19 state B main model smoke | implementation smoke PASS, numeric reproduction pending | `reports/19_state_b_main_model_smoke.md`; `le0-state-b` model variant, checkpoint path, and force-audit loading are implemented; Linux case031 first6 numeric reproduction still pending. |
 | Gate 20 state B reproduction diagnosis | failure localized | `reports/20_state_b_reproduction_failure_diagnosis.md`; Gate 19 numeric reproduction failed because the migrated state B factorization was weaker than the Gate 17 prototype. Default state B kind was corrected to `point_q_rank`. |
 | Gate 21 point q rank rerun | FAIL | `reports/21_state_b_point_q_rank_rerun.md`; Linux `point_q_rank` rerun still fails. Best model force rel is about `0.59` to `0.62`, while teacher force rel remains `0.01279`. Large training remains blocked. |
+| Gate 22 state B equivalence diagnosis | diagnosis PASS, training release FAIL | `reports/22_state_b_equivalence_diagnosis.md`; main `le0-state-b` is not equivalent to Gate 17. The main path lacks fixed `static_b[128,6,48]`, and residual AD terms mix into B. Next step is a fixed-128 direct-B state baseline, not larger training. |
 
 Training is allowed only within the limited LE/B release boundary.
 
@@ -141,6 +142,10 @@ Current verified or adopted conclusions:
 - Gate 21 shows the corrected `point_q_rank` rerun also failed to reproduce the
   Gate 17 prototype. Teacher force still closes, but trained model force rel
   remains about `0.59` to `0.62`, so large training is still blocked.
+- Gate 22 shows the reason: the main `le0-state-b` trainer is not equivalent to
+  Gate 17. Gate 17 uses a fixed `static_b[128,6,48]` direct-B baseline, while
+  the main Query model uses `global_b_norm[6,48]` plus point nets and residual
+  AD contributions.
 
 ## Pending Issues That Are Not Data Errors
 
@@ -161,9 +166,9 @@ data is bad:
 - Full consistent tangent K is still an unresolved route decision or
   implementation task.
 - The new `Macro16BoundaryDeepONetWithLE0StateB` implementation has only passed
-  local smoke tests and failed the corrected Linux `point_q_rank` rerun. It must be
-  go through a trainer-versus-prototype equivalence diagnosis before any larger
-  training, and it does not yet meet the final `0.02` force closure target.
+  local smoke tests and failed the corrected Linux `point_q_rank` rerun. Gate 22
+  localizes the mismatch to the trainer objective and B baseline structure, so
+  it does not yet meet the final `0.02` force closure target.
 
 These issues must not be hidden inside network training as if a network could
 repair a definition mismatch. They do not block the limited LE/B training
@@ -228,7 +233,8 @@ Required after training:
 Recommended next tasks, in order:
 
 1. Keep material-only K diagnostics separate from full tangent claims.
-2. Run Gate 22 trainer versus Gate 17 prototype equivalence diagnosis.
+2. Implement Gate 23 fixed-128 direct-B state baseline as a separate model
+   variant.
 3. Keep migration staged behind tests and six-frame reproduction.
 4. After any migrated prototype training, rerun selected-frame force closure before
    claiming mechanical usability.

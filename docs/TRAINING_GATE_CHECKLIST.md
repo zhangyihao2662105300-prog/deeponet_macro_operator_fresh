@@ -24,6 +24,11 @@ Gate 21 update: the corrected `point_q_rank` Linux rerun also failed. Teacher
 force still closes, but model force remains about `0.59` to `0.62`. Larger
 training is still not released.
 
+Gate 22 update: the equivalence diagnosis passed as diagnosis and failed as a
+training release. Main `le0-state-b` is not equivalent to Gate 17 because the
+main Query path lacks fixed `static_b[128,6,48]` and residual AD terms mix into
+B. Larger training is still not released.
+
 This checklist defines what must be true before network training is allowed.
 It does not start training, change the model, or modify the data contract.
 
@@ -75,6 +80,8 @@ Current status:
   factorization was too weak.
 - Gate 21: corrected `point_q_rank` rerun failed; any larger training remains
   blocked.
+- Gate 22: equivalence diagnosis completed; next step is a fixed-128 direct-B
+  state baseline variant, not larger training.
 
 Do not treat this as a full tangent or solver-readiness release.
 
@@ -113,6 +120,9 @@ be treated as proof that the data is corrupt:
 - Gate 21 confirms the corrected `point_q_rank` form still does not reproduce
   Gate 17. The next step is an equivalence diagnosis between the main trainer
   and the Gate 17 prototype, not larger training.
+- Gate 22 confirms that the main trainer and Gate 17 are not equivalent. The
+  mismatch is in B baseline structure and objective coupling, not data,
+  standardization, q48 order, LE order, or the 128 point rule.
 
 These issues no longer block the limited LE/B training release, but they remain
 unresolved mechanics items and are not the same as q48 ordering corruption, LE

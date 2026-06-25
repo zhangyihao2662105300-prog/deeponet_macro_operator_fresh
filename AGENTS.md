@@ -67,16 +67,18 @@ Current gate state:
   `B_LE128_forward` pass label/B finite-difference checks, and teacher force
   closes with selected-frame IVOL, but material-only stiffness does not close
   against Abaqus perturbed-reaction stiffness on `case031`.
-- Gate 03: FAIL current max-error threshold, evidence
-  `reports/macro16_force_stiffness_audit.md` and
-  `reports/macro16_case031_mechanics_diagnosis.md`. The failure is localized
-  to the large-response `case031` volume/tangent mismatch.
-- Gate 04: not complete.
-- Gate 05: not complete.
+- Gate 03: split status, evidence `reports/03_macro16_force_stiffness_reaudit.md`
+  and `reports/macro16_case031_mechanics_diagnosis.md`. Selected-frame force
+  closure passes, material-only stiffness remains a diagnostic residual, and
+  full tangent closure is incomplete.
+- Gate 04: PASS for main-route required geometry families, evidence
+  `reports/04_distortion_generality_audit.md`.
+- Gate 05: current 96/64/32 reduced candidates fail selected-frame force
+  closure; keep 128 points active, evidence `reports/05_ip_reduction_audit.md`.
 - Gate 06: blocked.
 
-Do not say "now train the network" while any required gate is incomplete or
-failed.
+Do not say "now train the network" while Gate 02/03 full tangent status remains
+unresolved or unwaived.
 
 ## Reporting
 

@@ -253,8 +253,10 @@ Theory status: 待验证
 3. UNCERTAIN: Whether the current small-rotation linear projection used for
    `B_macro_qdef` is sufficient for training.
 4. UNCERTAIN: Whether a strict Kabsch Jacobian is needed.
-5. UNCERTAIN: Whether the rule can later be reduced from 128 points to 64 or 32
-   points while preserving force and stiffness closure.
+5. CONFIRMED for the current Gate 05 candidate rules: 96, 64, and 32 point
+   reductions do not preserve selected-frame recovery-force closure under the
+   current fixed subset/aggregation candidates, so the active rule remains 128
+   points.
 
 ## 9. Do Not Change Without Explicit Approval
 
@@ -283,8 +285,8 @@ Status values in theory documents are limited to `已验证`, `待验证`, `待�
 | 02 | TRUE176/CSS8 teacher closure audit | FAIL on full teacher stiffness closure | `reports/02_teacher_closure_audit.md` | 待验证 |
 | 03 | Macro16 source128 force/stiffness audit | split: force closure PASS; material-only stiffness diagnostic residual; full tangent incomplete | `reports/03_macro16_force_stiffness_reaudit.md`, `reports/macro16_case031_mechanics_diagnosis.md` | 待验证 |
 | 04 | Distortion/general geometry audit | PASS for main-route required families; repaired strong non-inverted robustness check also passes | `reports/04_distortion_generality_audit.md` | 已验证 |
-| 05 | Integration-point reduction audit | incomplete | no canonical report yet | 待验证 |
-| 06 | Training gate | blocked | blocked by Gate 02/03/05 | 待验证 |
+| 05 | Integration-point reduction audit | no reduced candidate passes; keep 128 active | `reports/05_ip_reduction_audit.md` | 已验证 |
+| 06 | Training gate | blocked | blocked by Gate 02/03 full tangent status; Gate 05 keeps 128 active | 待验证 |
 
 Current mechanics gate evidence:
 
@@ -338,6 +340,14 @@ Current mechanics gate evidence:
   double-curvature shell `0.00008722059435666368` /
   `0.00008722059435666368`; repaired strong non-inverted mean/max
   `0.002260104975094106` / `0.006567508247031507`.
+- Gate 05 integration-point reduction audit:
+  128 point selected-frame effective force mean/max
+  `0.0004799514766587757` / `0.00858572515082126`, PASS. Candidate 96, 64,
+  and 32 point rules fail force max with `0.32625651778316855`,
+  `0.6331713463076637`, and `0.9948859290594079`. The 18 point failure
+  control also fails with max `0.6609305859267052`. Material-only K remains
+  diagnostic only. Current decision: keep 128 points as the active integration
+  rule.
 
 ## 11. Current Work Priority
 
@@ -354,8 +364,8 @@ Next steps:
    consistent-tangent evidence.
 3. Keep repaired strong non-inverted distortion as an optional robustness
    boundary test; do not use it as a network-training shortcut.
-4. Only after 128-point mechanics and generality gates pass, consider 96/64/32
-   point reduction.
+4. Keep 128 integration points active; current 96/64/32 candidate reductions
+   failed Gate 05 selected-frame force closure.
 5. Train the network only after the gate workflow permits it.
 
 ## Three Core Sentences

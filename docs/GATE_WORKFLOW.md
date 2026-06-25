@@ -164,8 +164,18 @@ Rule:
 
 Current result:
 
-- Gate result: not complete.
-- 18-point route is a known failed historical route.
+- Gate result: current reduced candidates fail; keep 128 points as the active
+  rule.
+- Evidence: `reports/05_ip_reduction_audit.md`.
+- 128-point selected-frame force closure passes with mean/max
+  `0.0004799514766587757` / `0.00858572515082126`.
+- Current 96, 64, and 32 point candidate rules fail the force max `0.02`
+  threshold with max errors `0.32625651778316855`,
+  `0.6331713463076637`, and `0.9948859290594079`.
+- 18-point route remains a failed control, with force max
+  `0.6609305859267052`.
+- Material-only K is recorded as a diagnostic only, not as the full tangent
+  gate.
 
 ## Gate 06: Training Gate
 
@@ -186,8 +196,9 @@ Current result:
 
 - Gate result: blocked.
 - Reason: Gate 02 fails full teacher stiffness closure, Gate 03 full tangent
-  closure is incomplete, and Gate 05 is incomplete. Gate 04 main-route required
-  families now pass, but that does not unblock training by itself.
+  closure is incomplete, and Gate 05 keeps the active rule at 128 points after
+  reduced candidates failed. Gate 04 main-route required families now pass, but
+  that does not unblock training by itself.
 
 ## Required Report Template
 
@@ -216,7 +227,7 @@ Each gate report must include:
 
 ## Current Next Action
 
-Resolve the remaining Gate 03 tangent route before training or reduction:
+Resolve the remaining Gate 03 tangent route before training:
 
 - Use selected-frame Abaqus IVOL as the canonical force-closure volume for
   Abaqus RF comparisons.
@@ -224,4 +235,5 @@ Resolve the remaining Gate 03 tangent route before training or reduction:
   tangent under large deformation.
 - Treat missing `dV/dq`, `dB/dq`, and geometric/stress stiffness terms as the
   current Gate 03 full-tangent blocker unless explicitly waived with evidence.
-- Keep the 128-point rule unchanged until this mechanics mismatch is resolved.
+- Keep the 128-point rule active because current 96/64/32 reduced candidates
+  failed Gate 05 selected-frame force closure.

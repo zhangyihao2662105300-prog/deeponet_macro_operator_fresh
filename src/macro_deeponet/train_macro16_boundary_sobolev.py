@@ -571,6 +571,67 @@ def _le_std_scale(le_std: np.ndarray, point_count: int) -> np.ndarray:
     return np.maximum(vals, 1.0e-12)[:, :, :, None]
 
 
+def canonical_jacobian_loss_scale(value: str) -> str:
+    key = str(value).strip().lower().replace("_", "-")
+    aliases = {
+        "j": "j-norm",
+        "jnorm": "j-norm",
+        "j-norm": "j-norm",
+        "norm": "j-norm",
+        "normalized": "j-norm",
+        "normalized-j": "j-norm",
+        "physical": "physical-balanced",
+        "physical-b": "physical-balanced",
+        "physical-balanced": "physical-balanced",
+        "balanced": "physical-balanced",
+        "b-balanced": "physical-balanced",
+    }
+    out = aliases.get(key, key)
+    if out not in {"j-norm", "physical-balanced"}:
+        raise ValueError("jacobian_loss_scale must be j-norm or physical-balanced")
+    return out
+
+
+def build_physical_b_loss_scale(
+    b_train: np.ndarray,
+    *,
+    floor_rel: float = 2.0e-2,
+    floor_abs: float = 1.0e-8,
+) -> np.ndarray:
+    vals = np.asarray(b_train, dtype=np.float64)
+    if vals.ndim != 4 or vals.shape[2:] != (6, 48):
+        raise ValueError(f"b_train must have shape [N,P,6,48], got {vals.shape}")
+    rms = np.sqrt(np.mean(vals * vals, axis=(0, 1), keepdims=True))
+    global_rms = float(np.sqrt(np.mean(vals * vals))) if vals.size else 0.0
+    floor = max(float(floor_abs), float(floor_rel) * global_rms, 1.0e-12)
+    return np.maximum(rms, floor).astype(np.float32)
+
+
+def j_norm_to_b_qhat_torch(
+    j_norm: torch.Tensor,
+    le_std_scale: torch.Tensor,
+    q_std_cols: torch.Tensor,
+) -> torch.Tensor:
+    q_scale = torch.clamp(q_std_cols.to(dtype=j_norm.dtype, device=j_norm.device), min=1.0e-12)
+    le_scale = le_std_scale.to(dtype=j_norm.dtype, device=j_norm.device)
+    return j_norm * le_scale / q_scale.reshape(1, 1, 1, -1)
+
+
+def physical_balanced_b_loss_from_j_norm(
+    j_pred_norm: torch.Tensor,
+    j_target_norm: torch.Tensor,
+    *,
+    le_std_scale: torch.Tensor,
+    q_std_cols: torch.Tensor,
+    b_scale: torch.Tensor,
+) -> torch.Tensor:
+    b_pred = j_norm_to_b_qhat_torch(j_pred_norm, le_std_scale, q_std_cols)
+    b_target = j_norm_to_b_qhat_torch(j_target_norm, le_std_scale, q_std_cols)
+    scale = torch.clamp(b_scale.to(dtype=j_pred_norm.dtype, device=j_pred_norm.device), min=1.0e-12)
+    err2 = ((b_pred - b_target) / scale) ** 2
+    return err2.mean(dim=(0, 1)).mean()
+
+
 def sample_columns(columns: list[int], count: int, rng: np.random.Generator) -> list[int]:
     if int(count) <= 0 or int(count) >= len(columns):
         return list(columns)
@@ -699,6 +760,12 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     le_norm = standardize(data.le, le_mean, le_std)
     q_std = branch_std.reshape(-1)[:48]
     j_norm_target = (data.b * q_std.reshape(1, 1, 1, 48) / _le_std_scale(le_std, data.le.shape[1])).astype(np.float32)
+    jacobian_loss_scale = canonical_jacobian_loss_scale(str(getattr(args, "jacobian_loss_scale", "physical-balanced")))
+    b_loss_scale = build_physical_b_loss_scale(
+        data.b[train_idx],
+        floor_rel=float(getattr(args, "physical_b_loss_floor_rel", 2.0e-2)),
+        floor_abs=float(getattr(args, "physical_b_loss_floor_abs", 1.0e-8)),
+    )
     skip_init = np.mean(j_norm_target[train_idx], axis=0).astype(np.float32)
     if bool(args.global_b_prior):
         skip_init = np.mean(skip_init, axis=0)
@@ -765,6 +832,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     eval_columns = parse_int_list(str(args.eval_columns))
     col_rng = np.random.default_rng(int(args.seed) + 307)
     rigid_rng = np.random.default_rng(int(args.seed) + 1307)
+    le_std_scale_np = _le_std_scale(le_std, data.le.shape[1]).astype(np.float32)
+    le_std_scale_t = torch.as_tensor(le_std_scale_np, dtype=torch.float32, device=device)
+    b_loss_scale_t = torch.as_tensor(b_loss_scale, dtype=torch.float32, device=device)
+    q_std_t = torch.as_tensor(q_std.astype(np.float32), dtype=torch.float32, device=device)
     history: list[dict[str, Any]] = []
     best_score = float("inf")
     best_report: dict[str, Any] | None = None
@@ -795,6 +866,12 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 "ip_count": int(point_norm.shape[1]),
                 "ad_target": f"dLE/d{model_visible_q}",
                 "B_target": model_visible_b,
+                "jacobian_loss_scale": jacobian_loss_scale,
+                "jacobian_target_relation": "J_norm = B_macro_qdef * q_std / LE_std",
+                "physical_b_loss_relation": "B_qdef = J_norm * LE_std / q_std",
+                "physical_b_loss_scale_shape": list(b_loss_scale.shape),
+                "physical_b_loss_scale_min": float(np.min(b_loss_scale)),
+                "physical_b_loss_scale_max": float(np.max(b_loss_scale)),
                 "le0_enabled": bool(style == "le0"),
                 "le0_init_definition": f"mean_train((LE_macro - {model_visible_b} @ {model_visible_q} - LE_mean) / LE_std)",
                 "le0_star_train_norm_rel_to_LE": norm_ratio_np(le0_star[train_idx], data.le[train_idx]),
@@ -828,7 +905,19 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             columns = sample_columns(columns_all, int(args.jacobian_columns_per_batch), col_rng)
             if columns:
                 j_pred = ad_jacobian(model, xb, pb, columns, create_graph=True, method="forward")
-                j_loss = nn.functional.mse_loss(j_pred, jb[:, :, :, columns])
+                if jacobian_loss_scale == "j-norm":
+                    j_loss = nn.functional.mse_loss(j_pred, jb[:, :, :, columns])
+                elif jacobian_loss_scale == "physical-balanced":
+                    col_idx = torch.as_tensor(columns, dtype=torch.long, device=device)
+                    j_loss = physical_balanced_b_loss_from_j_norm(
+                        j_pred,
+                        jb[:, :, :, columns],
+                        le_std_scale=le_std_scale_t,
+                        q_std_cols=q_std_t.index_select(0, col_idx),
+                        b_scale=b_loss_scale_t[:, :, :, columns],
+                    )
+                else:
+                    raise ValueError("unsupported jacobian_loss_scale")
             else:
                 j_loss = torch.zeros((), dtype=xb.dtype, device=device)
             rigid_loss = torch.zeros((), dtype=xb.dtype, device=device)
@@ -867,6 +956,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             "loss": sums["loss"] / denom,
             "le_loss_norm_mse": sums["le"] / denom,
             "j_loss_norm_mse": sums["j"] / denom,
+            "jacobian_loss_scale": jacobian_loss_scale,
             "rigid_loss_norm_mse": sums["rigid"] / denom,
             "lr": float(scheduler.get_last_lr()[0]),
             "seconds": time.time() - t0,
@@ -953,6 +1043,11 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "rigid_motion_removed_by_preprocessing": rigid_preprocessed,
         "q_input_dim": 48,
         "model_style": model_meta_style,
+        "jacobian_loss_scale": jacobian_loss_scale,
+        "jacobian_target_relation": "J_norm = B_macro_qdef * q_std / LE_std; B_macro_qdef = J_norm * LE_std / q_std",
+        "physical_b_loss_scale_shape": list(b_loss_scale.shape),
+        "physical_b_loss_scale_min": float(np.min(b_loss_scale)),
+        "physical_b_loss_scale_max": float(np.max(b_loss_scale)),
         "q_dim": 48,
         "rigid_modes_removed_from_input": False,
         "fine_grid_geometry_visible": False,
@@ -993,6 +1088,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--anchored-residual-gate-q0", type=float, default=0.0)
     p.add_argument("--le-loss-weight", type=float, default=1.0)
     p.add_argument("--jacobian-loss-weight", type=float, default=1.0)
+    p.add_argument("--jacobian-loss-scale", default="physical-balanced", choices=["physical-balanced", "j-norm"])
+    p.add_argument("--physical-b-loss-floor-rel", type=float, default=2.0e-2)
+    p.add_argument("--physical-b-loss-floor-abs", type=float, default=1.0e-8)
     p.add_argument("--rigid-loss-weight", type=float, default=0.1)
     p.add_argument("--rigid-mode-scale", type=float, default=0.1)
     p.add_argument("--jacobian-columns", default="all")

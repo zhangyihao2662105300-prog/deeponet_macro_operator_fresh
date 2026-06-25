@@ -54,7 +54,10 @@ from macro_deeponet.train_true176_generic_sobolev import (
     validate_point_feature_source_for_scale,
 )
 from macro_deeponet.train_macro16_boundary_sobolev import (
+    build_physical_b_loss_scale,
+    j_norm_to_b_qhat_torch,
     load_macro16_compacts,
+    physical_balanced_b_loss_from_j_norm,
     rigid_q48_modes,
     train as train_macro16_boundary,
 )
@@ -279,6 +282,41 @@ def test_macro16_loader_rejects_missing_x16_and_keeps_q48() -> None:
         assert modes.shape == (2, 6, 48)
 
 
+def test_macro16_j_norm_to_physical_b_formula_and_balanced_loss() -> None:
+    rng = np.random.default_rng(20260625)
+    b = rng.normal(scale=0.2, size=(3, 5, 6, 48)).astype(np.float32)
+    q_std = np.linspace(0.01, 0.2, 48, dtype=np.float32)
+    le_std = np.linspace(0.03, 0.5, 30, dtype=np.float32).reshape(1, 5, 6)
+    j_norm = b * q_std.reshape(1, 1, 1, 48) / le_std.reshape(1, 5, 6, 1)
+    got = j_norm_to_b_qhat_torch(
+        torch.as_tensor(j_norm),
+        torch.as_tensor(le_std.reshape(1, 5, 6, 1)),
+        torch.as_tensor(q_std),
+    ).numpy()
+    assert np.allclose(got, b, rtol=1.0e-6, atol=1.0e-7)
+
+    b_scale = build_physical_b_loss_scale(b, floor_rel=0.0, floor_abs=1.0e-8)
+    loss0 = physical_balanced_b_loss_from_j_norm(
+        torch.as_tensor(j_norm),
+        torch.as_tensor(j_norm),
+        le_std_scale=torch.as_tensor(le_std.reshape(1, 5, 6, 1)),
+        q_std_cols=torch.as_tensor(q_std),
+        b_scale=torch.as_tensor(b_scale),
+    )
+    assert float(loss0) == 0.0
+
+    shifted = torch.as_tensor(j_norm.copy())
+    shifted[:, :, :, 0] = shifted[:, :, :, 0] + 0.1
+    loss1 = physical_balanced_b_loss_from_j_norm(
+        shifted,
+        torch.as_tensor(j_norm),
+        le_std_scale=torch.as_tensor(le_std.reshape(1, 5, 6, 1)),
+        q_std_cols=torch.as_tensor(q_std),
+        b_scale=torch.as_tensor(b_scale),
+    )
+    assert float(loss1) > 0.0
+
+
 def test_macro16_training_smoke_runs_one_epoch() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -329,6 +367,9 @@ def test_macro16_training_smoke_runs_one_epoch() -> None:
             anchored_residual_gate_q0=0.0,
             le_loss_weight=1.0,
             jacobian_loss_weight=0.1,
+            jacobian_loss_scale="physical-balanced",
+            physical_b_loss_floor_rel=0.02,
+            physical_b_loss_floor_abs=1.0e-8,
             rigid_loss_weight=0.1,
             rigid_mode_scale=0.1,
             jacobian_columns="0,1",
@@ -348,7 +389,85 @@ def test_macro16_training_smoke_runs_one_epoch() -> None:
         assert summary["standard_operator_contract_version"] == MACRO16_CONTRACT_VERSION
         assert summary["q_dim"] == 48
         assert summary["fine_grid_geometry_visible"] is False
+        assert summary["jacobian_loss_scale"] == "physical-balanced"
         assert summary["latest_report"]["rigid_loss_norm_mse"] >= 0.0
+        assert Path(summary["latest_checkpoint"]).exists()
+
+
+def test_macro16_training_can_still_use_legacy_j_norm_loss() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        compact = root / "case001_macro16_jnorm.npz"
+        out_dir = root / "out"
+        n = 4
+        x16 = macro16_flat_x16()
+        rng = np.random.default_rng(13579)
+        q48 = rng.normal(scale=0.05, size=(n, 48)).astype(np.float32)
+        b = np.zeros((n, 18, 6, 48), dtype=np.float32)
+        b[:, :, 0, 0] = 0.2
+        le = np.einsum("npaj,nj->npa", b, q48).astype(np.float32)
+        np.savez(
+            compact,
+            standard_operator_contract_version=np.asarray(MACRO16_CONTRACT_VERSION, dtype=object),
+            q48_raw=q48,
+            X16=x16,
+            LE_macro=le,
+            B_macro=b,
+            case_id=np.asarray([1, 1, 2, 2], dtype=np.int64),
+        )
+        args = SimpleNamespace(
+            seed=23,
+            out_dir=out_dir,
+            compact=[str(compact)],
+            compact_list="",
+            plane_gauss_order=3,
+            thickness_gauss_order=2,
+            scale_mode="normalized",
+            b_label_coordinate="auto",
+            epochs=1,
+            batch_size=2,
+            eval_batch_size=2,
+            frame_stride=1,
+            max_frames_per_compact=0,
+            max_eval_frames=4,
+            basis_dim=8,
+            hidden_dim=16,
+            branch_depth=2,
+            trunk_depth=2,
+            activation="tanh",
+            model_style="le0",
+            residual_scale=0.0,
+            le0_scale=0.0,
+            freeze_le0_static=False,
+            freeze_le0_point=True,
+            fe_baseline_scale=1.0,
+            freeze_fe_point_baseline=True,
+            freeze_skip=False,
+            global_b_prior=True,
+            anchored_residual_gate_q0=0.0,
+            le_loss_weight=1.0,
+            jacobian_loss_weight=0.1,
+            jacobian_loss_scale="j-norm",
+            physical_b_loss_floor_rel=0.02,
+            physical_b_loss_floor_abs=1.0e-8,
+            rigid_loss_weight=0.0,
+            rigid_mode_scale=0.1,
+            jacobian_columns="0,1",
+            jacobian_columns_per_batch=1,
+            eval_columns="0,1",
+            lr=1.0e-4,
+            lr_decay=1.0,
+            weight_decay=0.0,
+            grad_clip=10.0,
+            val_fraction=0.5,
+            val_cases="2",
+            eval_every=1,
+            cuda=False,
+        )
+        train_macro16_boundary(args)
+        summary = json.loads((out_dir / "training_summary.json").read_text(encoding="utf-8"))
+        assert summary["jacobian_loss_scale"] == "j-norm"
+        assert summary["latest_report"]["jacobian_loss_scale"] == "j-norm"
         assert Path(summary["latest_checkpoint"]).exists()
 
 
@@ -409,6 +528,9 @@ def test_macro16_training_le0_model_fits_nonzero_initial_strain_prior() -> None:
             anchored_residual_gate_q0=0.0,
             le_loss_weight=1.0,
             jacobian_loss_weight=0.1,
+            jacobian_loss_scale="physical-balanced",
+            physical_b_loss_floor_rel=0.02,
+            physical_b_loss_floor_abs=1.0e-8,
             rigid_loss_weight=0.0,
             rigid_mode_scale=0.1,
             jacobian_columns="0,1",
@@ -427,6 +549,7 @@ def test_macro16_training_le0_model_fits_nonzero_initial_strain_prior() -> None:
         config = json.loads((out_dir / "config.json").read_text(encoding="utf-8"))
         summary = json.loads((out_dir / "training_summary.json").read_text(encoding="utf-8"))
         assert config["model_meta"]["le0_enabled"] is True
+        assert config["model_meta"]["jacobian_loss_scale"] == "physical-balanced"
         assert config["model_meta"]["le0_star_train_norm_rel_to_LE"] > 0.0
         assert config["model_meta"]["rigid_loss_target"] == "LE(q_rigid) - LE(0) ~= 0"
         assert summary["model_style"] == "macro16-boundary-deeponet-with-le0"
@@ -2970,7 +3093,9 @@ if __name__ == "__main__":
     test_true176_point_features_and_ad_shapes()
     test_macro16_shape_geometry_and_ad_shapes()
     test_macro16_loader_rejects_missing_x16_and_keeps_q48()
+    test_macro16_j_norm_to_physical_b_formula_and_balanced_loss()
     test_macro16_training_smoke_runs_one_epoch()
+    test_macro16_training_can_still_use_legacy_j_norm_loss()
     test_macro16_detj_rejects_flipped_surface_order()
     test_macro16_constant_strain_linear_displacement_is_constant_at_ips()
     test_macro16_rigid_modes_are_zero_strain_under_isoparametric_gradient()

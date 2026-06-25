@@ -56,11 +56,16 @@ Current verified range:
 - 10 compacts.
 - 100 frames.
 - Covers regular geometry and lightly distorted geometry.
+- Gate 04 has now audited regular, lightly distorted, and medium-distortion
+  source128 compacts with selected-frame force closure.
 
 Theory status: 待验证
 
-- Medium-distortion geometry is not complete.
-- Strong-distortion geometry is not complete.
+- Medium-distortion selected-frame force closure passes in
+  `reports/04_distortion_generality_audit.md`.
+- Strong-distortion geometry is still not complete: the intended strong
+  non-inverted `case061` compact contains the same `shape4` and `X16` as the
+  medium-distortion `case060` compact.
 - Generality has not fully passed.
 - The E-drive path mentioned in older context is not formally confirmed in this
   project brief. Treat it as a historical path to confirm, not as the unique
@@ -219,7 +224,9 @@ Theory status: 待验证
   tangent closure failure by itself.
 - Missing consistent tangent terms, including `dV/dq`, `dB/dq`, and
   geometric/stress stiffness when applicable, block Gate 03.
-- Medium-distortion and strong-distortion cases have not been verified.
+- Medium-distortion selected-frame force closure has been audited and passes.
+- Strong-distortion cases have not been verified because the current intended
+  strong compact duplicates the medium-distortion geometry.
 - `B_macro_qdef` is currently based on a small-rotation linear projection
   approximation, not a strict nonlinear Kabsch Jacobian.
 
@@ -261,7 +268,7 @@ Status values in theory documents are limited to `已验证`, `待验证`, `待�
 | 01 | Data contract audit | PASS | `reports/macro16_source128_data_audit.md` | 已验证 |
 | 02 | TRUE176/CSS8 teacher closure audit | FAIL on full teacher stiffness closure | `reports/02_teacher_closure_audit.md` | 待验证 |
 | 03 | Macro16 source128 force/stiffness audit | split: force closure PASS; material-only stiffness diagnostic residual; full tangent incomplete | `reports/03_macro16_force_stiffness_reaudit.md`, `reports/macro16_case031_mechanics_diagnosis.md` | 待验证 |
-| 04 | Distortion/general geometry audit | incomplete | no canonical report yet | 待验证 |
+| 04 | Distortion/general geometry audit | incomplete: regular, light, and medium selected-frame force closure pass; strong non-inverted data invalid | `reports/04_distortion_generality_audit.md` | 待验证 |
 | 05 | Integration-point reduction audit | incomplete | no canonical report yet | 待验证 |
 | 06 | Training gate | blocked | blocked by Gate 02/03/04/05 | 待验证 |
 
@@ -294,6 +301,15 @@ Current mechanics gate evidence:
   and `B_macro_qraw` match source fields exactly. Selected-frame volume closes
   force; missing full consistent tangent terms still block full tangent
   closure.
+- Gate 04 selected-frame force closure:
+  regular force mean/max `0.0035065058950908396` /
+  `0.00858572515082126`; light force mean/max
+  `0.0003154735170576633` / `0.0005754271836312788`; medium force mean/max
+  `0.0001372555780980519` / `0.0002487106248325675`.
+- Gate 04 material-only stiffness remains diagnostic only:
+  regular mean/max `0.011443767055272435` / `0.031962110431098374`;
+  light mean/max `0.000330240237648814` / `0.0004728016155049718`;
+  medium mean/max `0.0017063919009665687` / `0.007058560473715983`.
 
 ## 11. Current Work Priority
 

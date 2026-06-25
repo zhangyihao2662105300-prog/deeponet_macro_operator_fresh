@@ -10,6 +10,7 @@ force/stiffness closure candidate, not a reduced integration rule.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import json
 import os
 import sys
@@ -340,25 +341,61 @@ def build_one(
     return summary
 
 
+def _build_one_job(job: tuple[int, Path, Path, int, int, bool, str, str, str]) -> dict[str, Any]:
+    (
+        source_index,
+        path,
+        out_root,
+        frame_stride,
+        max_frames_per_compact,
+        allow_missing_ip_keys,
+        source_node_order,
+        strain_coordinate_mode,
+        volume_weight_mode,
+    ) = job
+    return build_one(
+        path,
+        out_root,
+        source_index=source_index,
+        frame_stride=frame_stride,
+        max_frames_per_compact=max_frames_per_compact,
+        allow_missing_ip_keys=allow_missing_ip_keys,
+        source_node_order=source_node_order,
+        strain_coordinate_mode=strain_coordinate_mode,
+        volume_weight_mode=volume_weight_mode,
+    )
+
+
 def build_all(args: argparse.Namespace) -> dict[str, Any]:
     paths = collect_paths(args.compact, args.compact_list, case_limit=args.case_limit)
     if not paths:
         raise ValueError("no compact inputs provided")
     out_root = Path(args.out_root).resolve()
-    rows = [
-        build_one(
+    jobs = [
+        (
+            i,
             path,
             out_root,
-            source_index=i,
-            frame_stride=int(args.frame_stride),
-            max_frames_per_compact=int(args.max_frames_per_compact),
-            allow_missing_ip_keys=bool(args.allow_missing_ip_keys),
-            source_node_order=str(args.source_node_order),
-            strain_coordinate_mode=str(args.strain_coordinate_mode),
-            volume_weight_mode=str(args.volume_weight_mode),
+            int(args.frame_stride),
+            int(args.max_frames_per_compact),
+            bool(args.allow_missing_ip_keys),
+            str(args.source_node_order),
+            str(args.strain_coordinate_mode),
+            str(args.volume_weight_mode),
         )
         for i, path in enumerate(paths)
     ]
+    workers = max(1, int(getattr(args, "workers", 1)))
+    if workers <= 1 or len(jobs) <= 1:
+        rows = [_build_one_job(job) for job in jobs]
+    else:
+        rows_by_index: dict[int, dict[str, Any]] = {}
+        with ProcessPoolExecutor(max_workers=min(workers, len(jobs))) as pool:
+            futures = {pool.submit(_build_one_job, job): job[0] for job in jobs}
+            for future in as_completed(futures):
+                source_index = futures[future]
+                rows_by_index[source_index] = future.result()
+        rows = [rows_by_index[i] for i in range(len(jobs))]
     list_path = out_root / "macro16_source128_teacher_compact_list.txt"
     list_path.write_text("\n".join(str(row["macro16_compact"]) for row in rows) + "\n", encoding="utf-8")
     summary = {
@@ -369,6 +406,7 @@ def build_all(args: argparse.Namespace) -> dict[str, Any]:
         "macro16_compact_count": int(len(rows)),
         "total_frame_count": int(sum(int(row["frame_count"]) for row in rows)),
         "point_count": 128,
+        "workers": int(workers),
         "compact_list": str(list_path),
         "label_source": "128-IP TRUE176/CSS8 teacher labels kept; no 18-point reduction",
         "fine_grid_geometry_visible_to_model": False,
@@ -405,6 +443,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--strain-coordinate-mode", default="global-to-macro-local", choices=("global-to-macro-local", "source-local"))
     parser.add_argument("--source-node-order", default="auto", choices=("auto", "macro16", "true176-keep"))
     parser.add_argument("--volume-weight-mode", default="auto", choices=("auto", "ip-ivol", "inferred-dle", "macro16-x16"))
+    parser.add_argument("--workers", type=int, default=1)
     return parser.parse_args()
 
 

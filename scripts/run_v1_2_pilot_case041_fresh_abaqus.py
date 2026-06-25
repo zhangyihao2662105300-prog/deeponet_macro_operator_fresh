@@ -16,8 +16,11 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
+import inspect
 import json
 import math
+import re
 import shutil
 import subprocess
 import sys
@@ -46,6 +49,16 @@ DEFAULT_OUT_ROOT = Path(r"D:\IS-FEM\outputs\query_point_v1_2_fresh_cases\case041
 DEFAULT_OLD_SRC_ROOT = Path(r"D:\IS-FEM\NNSE_css8_push_tmp")
 DEFAULT_EXPORT_LIB = Path(r"D:\IS-FEM\SRCv3.1 - 1\SRCv3.1\scripts\export_three_element_bfk_arrays.py")
 DEFAULT_ABAQUS = Path(r"D:\Program Files\SIMULIA\Commands\abaqus.bat")
+MAX_ABAQUS_JOB_PREFIX_LEN = 24
+
+
+def short_abaqus_job_prefix(case_id: str) -> str:
+    """Keep Abaqus job paths short while preserving deterministic case identity."""
+    safe = re.sub(r"[^A-Za-z0-9_]+", "_", str(case_id)).strip("_") or "case"
+    digest = hashlib.sha1(str(case_id).encode("utf-8")).hexdigest()[:8]
+    room = MAX_ABAQUS_JOB_PREFIX_LEN - len("f_") - 1 - len(digest)
+    stem = safe[: max(1, room)].strip("_") or "case"
+    return f"f_{stem}_{digest}"
 
 
 def json_default(obj: Any) -> Any:
@@ -146,8 +159,13 @@ def load_bridge(path: Path, shape4_override: np.ndarray | None) -> dict[str, Any
 def assert_linear_frames(q48: np.ndarray, tol: float) -> dict[str, Any]:
     q_final = np.asarray(q48[-1], dtype=np.float64).reshape(48)
     final_norm = float(np.linalg.norm(q_final))
-    if not math.isfinite(final_norm) or final_norm <= 0.0:
-        raise ValueError("final q48 frame has zero/invalid norm")
+    if not math.isfinite(final_norm):
+        raise ValueError("final q48 frame has invalid norm")
+    if final_norm <= float(tol):
+        max_abs = float(np.max(np.abs(q48))) if q48.size else 0.0
+        if max_abs > float(tol):
+            raise ValueError(f"zero final q48 requires all frames to be zero: max_abs={max_abs:.9g}, tol={tol:.9g}")
+        return {"q48_final_norm": final_norm, "alpha_factors": [0.0] * int(q48.shape[0]), "linear_q48_max_abs_diff": max_abs, "zero_q_path": True}
     factors = []
     max_abs = 0.0
     for i in range(q48.shape[0]):
@@ -158,7 +176,7 @@ def assert_linear_frames(q48: np.ndarray, tol: float) -> dict[str, Any]:
         factors.append(factor)
     if max_abs > float(tol):
         raise ValueError(f"q48 frames are not linear in the final frame: max_abs={max_abs:.9g}, tol={tol:.9g}")
-    return {"q48_final_norm": final_norm, "alpha_factors": factors, "linear_q48_max_abs_diff": max_abs}
+    return {"q48_final_norm": final_norm, "alpha_factors": factors, "linear_q48_max_abs_diff": max_abs, "zero_q_path": False}
 
 
 def load_old_modules(old_src_root: Path):
@@ -185,6 +203,32 @@ def run_jobs(jobs: list[dict[str, Any]], *, gen: Any, args: SimpleNamespace, log
         for fut in as_completed(futs):
             rows.append(fut.result())
     return rows
+
+
+def write_shape4_displacement_inp_compat(
+    smoke: Any,
+    out_path: Path,
+    shape4: np.ndarray,
+    q48_final: np.ndarray,
+    *,
+    increments: int,
+    perturb_direction: int | None,
+    delta: float,
+    nlgeom: str,
+) -> tuple[dict[str, Any], bool]:
+    writer = smoke.write_shape4_displacement_inp
+    supports_nlgeom = "nlgeom" in inspect.signature(writer).parameters
+    nlgeom_norm = str(nlgeom).strip().upper()
+    if not supports_nlgeom and nlgeom_norm != "YES":
+        raise ValueError("old TRUE176 writer does not expose nlgeom; only nlgeom=YES is compatible")
+    kwargs = {
+        "increments": int(increments),
+        "perturb_direction": perturb_direction,
+        "delta": float(delta),
+    }
+    if supports_nlgeom:
+        kwargs["nlgeom"] = nlgeom_norm
+    return writer(out_path, shape4, q48_final, **kwargs), supports_nlgeom
 
 
 def repack_b_compact(native_sample: Path, out_path: Path) -> dict[str, Any]:
@@ -258,6 +302,18 @@ def run_subprocess(cmd: list[str], cwd: Path, log_path: Path, timeout_s: int) ->
     return {"cmd": cmd, "cwd": str(cwd), "log": str(log_path), "returncode": int(proc.returncode)}
 
 
+def resolve_base_odb(base_dir: Path, preferred: Path) -> Path:
+    if preferred.exists():
+        return preferred
+    candidates = sorted(base_dir.glob("*.odb"), key=lambda path: path.stat().st_mtime, reverse=True)
+    if len(candidates) == 1:
+        return candidates[0]
+    fresh = [path for path in candidates if path.name.startswith("fresh_")]
+    if len(fresh) == 1:
+        return fresh[0]
+    return preferred
+
+
 def build_and_optionally_run(args: argparse.Namespace) -> dict[str, Any]:
     case_id = str(args.case_id)
     q48_csv = Path(args.q48_frames_csv).resolve()
@@ -293,9 +349,11 @@ def build_and_optionally_run(args: argparse.Namespace) -> dict[str, Any]:
     shutil.copy2(q48_csv, input_dir / f"{case_id}_q48_frames.csv")
     shutil.copy2(boundary96_csv, input_dir / f"{case_id}_boundary96_frames.csv")
 
-    base_job = f"fresh_{case_id}"
+    abaqus_job_prefix = short_abaqus_job_prefix(case_id)
+    base_job = abaqus_job_prefix
     base_inp = base_dir / f"{base_job}.inp"
-    info = smoke.write_shape4_displacement_inp(
+    info, smoke_writer_supports_nlgeom = write_shape4_displacement_inp_compat(
+        smoke,
         base_inp,
         shape4,
         q48_final,
@@ -357,7 +415,8 @@ def build_and_optionally_run(args: argparse.Namespace) -> dict[str, Any]:
         job_dir = perturb_root / job_name
         job_dir.mkdir(parents=True, exist_ok=True)
         inp = job_dir / f"{job_name}.inp"
-        smoke.write_shape4_displacement_inp(
+        write_shape4_displacement_inp_compat(
+            smoke,
             inp,
             shape4,
             q48_final,
@@ -378,6 +437,7 @@ def build_and_optionally_run(args: argparse.Namespace) -> dict[str, Any]:
 
     manifest: dict[str, Any] = {
         "case_id": case_id,
+        "abaqus_job_prefix": abaqus_job_prefix,
         "stage": "prepared",
         "q48_frames_csv": str(q48_csv),
         "boundary96_frames_csv": str(boundary96_csv),
@@ -387,6 +447,7 @@ def build_and_optionally_run(args: argparse.Namespace) -> dict[str, Any]:
         "increments": int(args.increments),
         "delta": float(args.delta),
         "nlgeom": str(args.nlgeom).strip().upper(),
+        "smoke_writer_supports_nlgeom": bool(smoke_writer_supports_nlgeom),
         "base_inp": str(base_inp),
         "base_odb": str(base_dir / f"{base_job}.odb"),
         "base_export_npz": str(run_root / "base_frames.npz"),
@@ -410,10 +471,11 @@ def build_and_optionally_run(args: argparse.Namespace) -> dict[str, Any]:
         write_json(plan_path, manifest)
         return manifest
 
+    base_odb = base_dir / f"{base_job}.odb"
     base_res = gen._run_export_job(
         job_name=base_job,
         inp=base_inp,
-        odb=base_dir / f"{base_job}.odb",
+        odb=base_odb,
         npz=run_root / "base_frames.npz",
         args=old_run_args,
         logs=logs,
@@ -424,6 +486,8 @@ def build_and_optionally_run(args: argparse.Namespace) -> dict[str, Any]:
         manifest["base_result"] = base_res
         write_json(plan_path, manifest)
         return manifest
+    base_odb = resolve_base_odb(base_dir, base_odb)
+    manifest["base_odb"] = str(base_odb)
 
     plus_results = run_jobs(jobs, gen=gen, args=old_run_args, logs=logs, workers=int(args.inner_workers))
     failed = [row for row in plus_results if not export_status_ok(row)]
@@ -455,7 +519,7 @@ def build_and_optionally_run(args: argparse.Namespace) -> dict[str, Any]:
         "python",
         str(exporter),
         "--odb",
-        str(base_dir / f"{base_job}.odb"),
+        str(base_odb),
         "--out",
         str(complete),
         "--frames",

@@ -77,6 +77,8 @@ from audit_macro16_teacher_labels import run_audit as run_macro16_teacher_audit
 from audit_macro16_force_stiffness import TRUE176_MACRO_TO_KEEP_FLAT
 from audit_macro16_force_stiffness import run_audit as run_macro16_force_stiffness_audit
 from plan_macro16_source128_generality_audit import build_plan as build_macro16_source128_generality_plan
+import prepare_macro16_source128_distortion_tasks as prepare_macro16_distortion_tasks
+from run_v1_2_pilot_case041_fresh_abaqus import assert_linear_frames as assert_pilot_linear_frames
 
 
 def macro16_flat_x16(thickness: float = 0.2) -> np.ndarray:
@@ -1174,6 +1176,100 @@ def test_macro16_source128_generality_planner_writes_three_worker_manifest() -> 
         assert "--volume-weight-mode macro16-x16" in linux_cmd
         assert "--strain-coordinate-mode global-to-macro-local" in linux_cmd
         assert "audit_macro16_force_stiffness.py" in linux_cmd
+
+
+def test_macro16_distorted_task_preparer_writes_independent_q_paths() -> None:
+    def fake_helpers() -> dict[str, object]:
+        flat = macro16_flat_x16().astype(np.float64)
+        order = prepare_macro16_distortion_tasks.TRUE176_MACRO_TO_KEEP_NODE
+        x_keep = np.zeros((16, 3), dtype=np.float64)
+        x_keep[order] = flat
+        boundary_nodes = list(range(1, 33))
+        keep_nodes = list(range(1, 17))
+        t_boundary = np.zeros((96, 48), dtype=np.float64)
+        t_boundary[:48, :] = np.eye(48, dtype=np.float64)
+
+        def build_shape4_node_dict(shape4: np.ndarray) -> dict[int, np.ndarray]:
+            nodes = {i + 1: x_keep[i].copy() for i in range(16)}
+            for i in range(16, 32):
+                nodes[i + 1] = x_keep[i % 16].copy()
+            return nodes
+
+        return {
+            "SHAPE4_KEYS": ["lambda", "tau", "chi", "mu"],
+            "audit_shape4": lambda shape4: {"passed": True},
+            "boundary_keep_nodes": lambda: (boundary_nodes, keep_nodes),
+            "build_shape4_node_dict": build_shape4_node_dict,
+            "derived_geometry_from_shape4": lambda shape4: {"shape4": np.asarray(shape4, dtype=float).tolist()},
+            "build_t_boundary": lambda: (t_boundary, []),
+        }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        original = prepare_macro16_distortion_tasks.load_old_shape4_helpers
+        prepare_macro16_distortion_tasks.load_old_shape4_helpers = lambda _old_src_root: fake_helpers()
+        try:
+            args = SimpleNamespace(
+                out_root=root / "distorted_tasks",
+                old_src_root=root / "old_src",
+                export_lib=root / "export.py",
+                abaqus=root / "abaqus.bat",
+                remote_task_root=r"D:\remote\macro16_distorted_tasks",
+                remote_old_src_root=r"D:\remote\old_src",
+                remote_export_lib=r"D:\remote\export.py",
+                remote_abaqus=r"D:\remote\abaqus.bat",
+                increments=10,
+                q_scale=1.0e-3,
+                random_seed=123,
+                delta=1.0e-6,
+                inner_workers=4,
+                nlgeom="YES",
+            )
+            summary = prepare_macro16_distortion_tasks.prepare_tasks(args)
+        finally:
+            prepare_macro16_distortion_tasks.load_old_shape4_helpers = original
+
+        assert summary["geometry_count"] == 2
+        assert summary["task_count"] == 42
+        assert summary["standard_macro16_contract"]["geometry_input"] == "X16 only"
+        assert summary["standard_macro16_contract"]["displacement_input"] == "q48 only"
+        assert summary["standard_macro16_contract"]["network_training"] is False
+
+        manifest = json.loads((root / "distorted_tasks" / "distorted_task_manifest.json").read_text(encoding="utf-8"))
+        tasks = manifest["tasks"]
+        assert tasks[0]["case_id"] == "case060_00_q_zero"
+        assert tasks[0]["uses_X_macro_as_model_input"] is False
+        assert tasks[0]["uses_internal_fine_grid_nodes_as_model_input"] is False
+        assert tasks[0]["network_training"] is False
+        assert "--run-abaqus --run-complete-export --run-strict-audit --skip-existing" in tasks[0]["command"]
+        assert "--inner-workers 4" in tasks[0]["command"]
+
+        q_zero = np.genfromtxt(
+            root / "distorted_tasks" / "moderately_distorted" / "case060_00_q_zero" / "q48_frames.csv",
+            delimiter=",",
+            names=True,
+            dtype=None,
+            encoding="utf-8",
+        )
+        q_cols = np.asarray([[float(row[f"q{i}"]) for i in range(1, 49)] for row in np.atleast_1d(q_zero)])
+        assert np.max(np.abs(q_cols)) == 0.0
+
+
+def test_v1_2_pilot_linear_frame_audit_allows_zero_q_path() -> None:
+    q = np.zeros((10, 48), dtype=np.float64)
+    audit = assert_pilot_linear_frames(q, 1.0e-12)
+    assert audit["zero_q_path"] is True
+    assert audit["alpha_factors"] == [0.0] * 10
+    assert audit["linear_q48_max_abs_diff"] == 0.0
+
+    bad = q.copy()
+    bad[0, 0] = 1.0e-3
+    try:
+        assert_pilot_linear_frames(bad, 1.0e-12)
+    except ValueError as exc:
+        assert "zero final q48 requires all frames to be zero" in str(exc)
+    else:
+        raise AssertionError("nonzero intermediate zero-final path should fail")
 
 
 def test_macro16_from_128_teacher_source_local_mode_uses_local_labels() -> None:

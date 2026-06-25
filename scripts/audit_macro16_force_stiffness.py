@@ -10,6 +10,7 @@ that agree with the fine-grid projected boundary responses.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import glob
 import json
 import math
@@ -734,15 +735,32 @@ def apply_thresholds(summary: dict[str, Any], args: argparse.Namespace) -> dict[
     return summary
 
 
+def _audit_one_job(job: tuple[int, Path, str]) -> dict[str, Any]:
+    _source_index, path, weight_mode = job
+    return audit_one(path, weight_mode)
+
+
 def run_audit(args: argparse.Namespace) -> dict[str, Any]:
     paths = collect_paths(args.compact, args.compact_list, args.compact_glob, case_limit=int(args.case_limit))
     if not paths:
         raise ValueError("provide --compact, --compact-list, or --compact-glob")
-    rows = [audit_one(path, str(args.weight_mode)) for path in paths]
+    jobs = [(i, path, str(args.weight_mode)) for i, path in enumerate(paths)]
+    workers = max(1, int(getattr(args, "workers", 1)))
+    if workers <= 1 or len(jobs) <= 1:
+        rows = [_audit_one_job(job) for job in jobs]
+    else:
+        rows_by_index: dict[int, dict[str, Any]] = {}
+        with ProcessPoolExecutor(max_workers=min(workers, len(jobs))) as pool:
+            futures = {pool.submit(_audit_one_job, job): job[0] for job in jobs}
+            for future in as_completed(futures):
+                source_index = futures[future]
+                rows_by_index[source_index] = future.result()
+        rows = [rows_by_index[i] for i in range(len(jobs))]
     summary = {
         "script": "audit_macro16_force_stiffness",
         "compact_paths": [str(path) for path in paths],
         "weight_mode": str(args.weight_mode),
+        "workers": int(workers),
         "aggregate": aggregate(rows),
         "compacts": rows,
     }
@@ -780,6 +798,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-plus-kdq-rel", type=float, default=0.0)
     parser.add_argument("--max-source-force-rel", type=float, default=0.0)
     parser.add_argument("--max-source-128-force-rel", type=float, default=0.0)
+    parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--strict", action="store_true")
     return parser.parse_args()
 

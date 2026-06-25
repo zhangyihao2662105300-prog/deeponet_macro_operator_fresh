@@ -2,42 +2,47 @@
 
 Role: Training Gate Checklist Agent
 
-Status: documentation only
+Status: limited training release decision recorded
 
 This checklist defines what must be true before network training is allowed.
 It does not start training, change the model, or modify the data contract.
 
 ## Gate Requirements Before Training
 
-Training is blocked until the gate workflow permits it.
+Training is now released only for the limited LE/B learning task recorded in:
+
+```text
+docs/TRAINING_RELEASE_DECISION.md
+```
+
+This is not a full solver-readiness release.
 
 Required before training:
 
 1. Gate 01 data contract audit passes.
-2. Gate 02 TRUE176/CSS8 teacher closure passes, or is explicitly waived with
-   evidence.
-3. Gate 03 Macro16 source128 mechanics audit passes under the current explicit
-   force/tangent conventions, or any remaining full-tangent requirement is
-   explicitly waived with evidence.
+2. Gate 02 TRUE176/CSS8 teacher LE/B finite-difference and selected-frame force
+   evidence is sufficient for limited LE/B training. Full teacher tangent
+   remains pending and is not a blocker for this limited release.
+3. Gate 03 Macro16 source128 selected-frame force closure passes. Full tangent
+   remains pending and is not a blocker for this limited release.
 4. Gate 04 mainline geometry generality audit passes.
-5. Gate 05 integration-point reduction audit passes, or the project explicitly
-   decides to keep the current 128-point rule.
+5. Gate 05 integration-point reduction audit records that 96/64/32 candidates
+   fail and the project keeps the current 128-point rule.
 6. Rigid preprocessing remains passed.
 
 Current status:
 
 - Gate 01: passed.
-- Gate 02: not cleared for training because full teacher stiffness closure is
+- Gate 02: cleared only for LE/B training; full teacher stiffness closure is
   still unresolved.
-- Gate 03: force closure passes with selected-frame physical volume, but full
-  tangent closure remains incomplete.
+- Gate 03: selected-frame force closure passes; full tangent closure remains
+  incomplete but does not block this limited training release.
 - Gate 04: mainline geometry generality passes; repaired strong non-inverted
   robustness data also passes.
-- Gate 05: incomplete; reduction has not started.
-- Gate 06: blocked.
+- Gate 05: reduced candidates fail; keep 128 points active.
+- Gate 06: LIMITED RELEASE for LE/B training only.
 
-Do not train while any required gate is failed, incomplete, or not explicitly
-waived.
+Do not treat this as a full tangent or solver-readiness release.
 
 ## Pending Issues That Are Not Direct Data Errors
 
@@ -60,9 +65,9 @@ be treated as proof that the data is corrupt:
 - `B_macro_qdef` uses the current small-rotation linear projection
   approximation; strict nonlinear Kabsch Jacobian remains a future audit topic.
 
-These issues may block training through the gate workflow, but they are not
-the same as q48 ordering corruption, LE component corruption, or bad source
-compact copying.
+These issues no longer block the limited LE/B training release, but they remain
+unresolved mechanics items and are not the same as q48 ordering corruption, LE
+component corruption, or bad source compact copying.
 
 ## Training Data Contract
 
@@ -137,3 +142,19 @@ At minimum, training after completion must rerun the force closure audit using
 the canonical selected-frame physical volume convention.
 
 Passing training loss is not sufficient to pass the route.
+
+## Release Boundary
+
+Allowed:
+
+- Train the current Macro16 model for `LE`.
+- Supervise `B` through autograd with respect to `q48_def_hat`.
+- Use 128 integration points.
+
+Not allowed by this checklist:
+
+- Claim full tangent closure.
+- Claim solver-ready macro element status before selected-frame force closure
+  passes after training.
+- Treat material-only K as the full tangent gate.
+- Change model architecture, q48 order, LE order, or integration rule.

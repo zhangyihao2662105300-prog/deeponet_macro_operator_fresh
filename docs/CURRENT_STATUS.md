@@ -29,8 +29,8 @@ Mainline contract:
 TRUE176 / CSS8 128-IP is the teacher and audit baseline, not the final model
 interface.
 
-The current priority is mechanical assembly and geometry generality, not
-network training.
+The current priority is limited LE/B training plus mandatory post-training
+mechanical audit. Full tangent closure remains pending.
 
 ## Standard Element
 
@@ -78,13 +78,13 @@ fixed parent integration points.
 | Gate | Current Status | Evidence / Note |
 |---|---|---|
 | Gate 01 data contract | PASS | `reports/macro16_source128_data_audit.md`; loader uses `q48_def_hat` and `B_macro_qdef`; input remains 48D. |
-| Gate 02 teacher closure | FAIL / not cleared | `LE128_base` and `B_LE128_forward` are credible, and teacher force closes with selected-frame IVOL, but full teacher stiffness closure remains unresolved. |
+| Gate 02 teacher closure | limited release basis | `LE128_base` and `B_LE128_forward` are credible, and teacher force closes with selected-frame IVOL; full teacher stiffness closure remains unresolved but does not block limited LE/B training. |
 | Gate 03 Macro16 mechanics | split status | Selected-frame force closure passes on the current 10-case set; material-only K is diagnostic; full tangent closure remains incomplete. |
 | Gate 04 geometry generality | PASS for main-route required families | Regular, light, medium, cylindrical, conical, thickness-varying, and mild double-curvature selected-frame force closure pass; repaired strong non-inverted robustness data also passes. |
-| Gate 05 IP reduction | not started | Planned order is `128 -> 96 -> 64 -> 32 -> 18`; 128 remains the active rule until a reduction audit passes. |
-| Gate 06 training | blocked | Blocked by unresolved Gate 02/03/05 conditions. |
+| Gate 05 IP reduction | keep 128 active | `reports/05_ip_reduction_audit.md`; 96/64/32 candidates fail selected-frame force closure, 18 remains failure control. |
+| Gate 06 training | LIMITED RELEASE | `docs/TRAINING_RELEASE_DECISION.md`; training may start only for LE/B learning, with mandatory selected-frame force closure after training. |
 
-Training is not allowed yet.
+Training is allowed only within the limited LE/B release boundary.
 
 ## Verified Conclusions
 
@@ -97,6 +97,7 @@ Current verified or adopted conclusions:
 - `B` is obtained from automatic differentiation of `LE`.
 - The current trusted compact family is regenerated Macro16 source128 compact
   data.
+- Gate 06 has a limited training release for LE/B learning only.
 - `LE128_base` and `B_LE128_forward` are credible teacher labels; B closes
   against finite-difference LE perturbations.
 - `LE_macro` and `B_macro_qraw` copy the source labels correctly for the
@@ -109,6 +110,8 @@ Current verified or adopted conclusions:
   finite-difference tangent closure.
 - The 18-point route is a known failed historical route and remains a failure
   control for future Gate 05 planning.
+- Current 96/64/32 reduced integration-point candidates fail Gate 05; keep 128
+  points active.
 
 ## Pending Issues That Are Not Data Errors
 
@@ -129,8 +132,9 @@ data is bad:
 - Full consistent tangent K is still an unresolved route decision or
   implementation task.
 
-These issues should not be routed into network training as if a network could
-repair a definition mismatch.
+These issues must not be hidden inside network training as if a network could
+repair a definition mismatch. They do not block the limited LE/B training
+release, but they still block any full tangent or solver-readiness claim.
 
 ## Current Gate 04 Wind-Turbine Shell Geometry Task
 
@@ -165,24 +169,44 @@ The key question is whether the same fixed Macro16 parent element, mapped only
 by `X16_raw`, preserves force closure across wind-turbine shell real
 geometries.
 
+## Gate 06 Limited Training Release
+
+The active release is:
+
+```text
+LE/B training only
+```
+
+Allowed:
+
+- train `LE`;
+- supervise `B = dLE / d(q48_def_hat)` through autograd;
+- keep `q48_def_hat`, `X16_hat`, and 128 integration points.
+
+Required after training:
+
+- rerun selected-frame recovery-force closure;
+- report material-only K as diagnostic only;
+- do not claim full tangent closure unless a real full-tangent candidate is
+  implemented and audited.
+
 ## Next Tasks
 
 Recommended next tasks, in order:
 
 1. Keep material-only K diagnostics separate from full tangent claims.
-2. Decide whether the full consistent tangent requirement is implemented or
-   explicitly waived with evidence.
-3. Start Gate 05 IP reduction planning/execution only if the project chooses to
-   test fewer than 128 integration points.
-4. Keep Gate 06 training blocked until Gate 01-05 conditions are satisfied or
-   formally waived where allowed.
+2. Run limited LE/B training under the current Macro16 source128 contract.
+3. After training, run selected-frame force closure before claiming mechanical
+   usability.
+4. Decide later whether the full consistent tangent requirement is implemented
+   or explicitly waived with evidence.
 
 ## Currently Forbidden
 
 Do not do the following now:
 
-- Do not train the network.
-- Do not start Gate 05 integration-point reduction.
+- Do not train outside the limited LE/B release boundary.
+- Do not start a new integration-point reduction route as part of training.
 - Do not change the model architecture.
 - Do not change `q48` ordering.
 - Do not change `LE` component ordering.
@@ -196,9 +220,11 @@ Do not do the following now:
 - Do not use material-only K as the full Abaqus FD tangent `0.02` gate.
 - Do not silently redefine `integration_weight_phys` as selected-frame volume.
 - Do not route volume/tangent definition mismatches into network training.
+- Do not claim full tangent closure from LE/B training.
 
 Current route remains:
 
 ```text
-Macro16 v4 boundary route, standard 128 integration points
+Macro16 v4 boundary route, standard 128 integration points, limited LE/B
+training release
 ```

@@ -101,6 +101,8 @@ fixed parent integration points.
 | Gate 29 force residual training | PROTOTYPE PASS | `reports/29_force_residual_loss_smoke.md`; case031 first6 best model force rel is `0.0882157802`, below the prototype `0.10` target but above the final `0.02` target. |
 | Gate 30 force residual generality | SMALL GENERALITY PASS | `reports/30_force_residual_warmstart_generality.md`; case019 and case031 first6 both pass the prototype `0.10` target with no B prior warmstart. |
 | Gate 31 force residual 16 case audit | FAIL | `reports/31_force_residual_16case_audit.md`; corrected qdef 16-case training fails selected-frame force audit, wind shell cases `70` to `73` fail badly, and `case060` is not a normal relative-force gate sample. Do not expand training before Gate 32 diagnosis. |
+| Gate 32 wind shell diagnosis | DIAGNOSIS PASS | `reports/32_wind_shell_generalization_diagnosis.md`; teacher force is good, data is not bad, wind shell branch input is strongly out of distribution, and `case060` is a near-zero-force special sample. |
+| Gate 33 branch outlier columns | DIAGNOSIS PASS | `reports/33_branch_outlier_columns_diagnosis.md`; the largest branch outlier comes from `X16_hat_z`, especially `case073` columns such as `X01_z`, because train-split per-column geometry std is about `1.0e-08`. |
 
 Training is allowed only within the limited LE/B release boundary.
 
@@ -182,6 +184,11 @@ Current verified or adopted conclusions:
 - Gate 31 shows that the same route fails on the corrected 16-case qdef set.
   Wind shell validation cases `70` to `73` are the main generalization failure,
   while `case060` should be handled as a near-zero-force special sample.
+- Gate 32 shows the wind shell teacher force closes, so the failure is not
+  source data corruption. The immediate issue is branch input distribution.
+- Gate 33 localizes the worst branch outlier to `X16_hat` geometry columns, not
+  `q48_def_hat`. Train-split per-column standardization makes nearly constant
+  geometry columns explode on wind shell shapes.
 
 ## Pending Issues That Are Not Data Errors
 
@@ -218,8 +225,9 @@ data is bad:
 - Gate 27 shows the first strain-volume proxy is insufficient. The next step
   should either implement a true force residual loss or diagnose why the proxy
   weighting does not match the actual force error contribution.
-- Gate 31 fails the corrected 16-case force residual audit. The next step is
-  Gate 32 wind-shell distribution and scale diagnosis, not more training.
+- Gate 31 fails the corrected 16-case force residual audit. Gate 32 and Gate 33
+  localize the problem to wind-shell branch distribution and geometry
+  normalization. The next step is a normalization replay, not more training.
 
 These issues must not be hidden inside network training as if a network could
 repair a definition mismatch. They do not block the limited LE/B training
@@ -284,12 +292,10 @@ Required after training:
 Recommended next tasks, in order:
 
 1. Keep material-only K diagnostics separate from full tangent claims.
-2. Run Gate 32 wind shell generalization diagnosis.
-3. Compare train cases and wind shell cases on `q48_def_hat`, `LE_macro`,
-   `B_macro_qdef`, teacher force norm, and branch-normalized input scale.
-4. Decide whether wind shell cases need separate normalization, split policy,
-   force-relative gate handling, or model/loss changes.
-5. Only after Gate 32 gives evidence, decide the next small training experiment.
+2. Run Gate 34 branch normalization replay.
+3. Test geometry std floors or grouped geometry normalization without training.
+4. Confirm wind shell branch max returns to a reasonable range.
+5. Only after Gate 34 gives evidence, decide the next small training experiment.
 
 ## Currently Forbidden
 

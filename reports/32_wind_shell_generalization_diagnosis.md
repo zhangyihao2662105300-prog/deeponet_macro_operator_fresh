@@ -80,22 +80,25 @@ Gate 31 已知问题：
 cd /home/ydh/IS-FEM/gate31_force_residual_16case_qdef/repo
 git pull
 
-python3 scripts/diagnose_macro16_wind_shell_generalization.py \
-  --compact-list runs/gate31_force_residual_16case_qdef/enriched_16case_compact_list.txt \
-  --checkpoint runs/gate31_force_residual_16case_qdef/train/f01_lr8e5/best.pt \
-  --audit-json-glob "runs/gate31_force_residual_16case_qdef/audits/f01_lr8e5_case*.json" \
+python3 scripts/run_gate32_wind_shell_generalization_diagnosis.py \
   --source-path-map "D:\\IS-FEM=/home/ydh/IS-FEM" \
-  --out runs/gate31_force_residual_16case_qdef/audits/gate32_wind_shell_generalization_diagnosis.json \
-  --report-out reports/32_wind_shell_generalization_diagnosis.md
+  --run-root runs/gate31_force_residual_16case_qdef \
+  --run-name f01_lr8e5
 ```
 
-如果 checkpoint 文件名不是 `best.pt`，先查找：
+脚本会自动查找 checkpoint。
+
+如果自动查找失败，先查找：
 
 ```bash
 find runs/gate31_force_residual_16case_qdef/train/f01_lr8e5 -maxdepth 2 -type f \( -name "*.pt" -o -name "*.pth" \)
 ```
 
-然后把 `--checkpoint` 改成实际 best checkpoint。
+然后补充：
+
+```bash
+--checkpoint 实际文件路径
+```
 
 ## 6. 当前禁止事项
 

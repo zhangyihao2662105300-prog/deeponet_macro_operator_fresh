@@ -106,6 +106,7 @@ fixed parent integration points.
 | Gate 34 branch normalization replay | REPLAY PASS | `reports/34_branch_normalization_replay.md`; normalization-only replay shows `X16_hat` std floor `0.05` reduces wind branch max from about `2.2546e6` to `48.56` and is the minimum passing candidate. |
 | Gate 35 branch X16 std floor training | TRAINING FAIL | `reports/35_branch_x16_std_floor_training.md`; guarded `--branch-x16-std-floor 0.05` is implemented and tested, but the Linux small training still fails selected-frame force audit on wind shell validation cases. |
 | Gate 36 wind shell in split training | TRAINING FAIL | `reports/36_wind_shell_in_split_training.md`; wind shell cases `70,71,72` were included in training and `73` was held out, but selected-frame model force still fails. Teacher force remains good. |
+| Gate 37 network IO contract diagnosis | DIAGNOSIS PASS | `reports/37_network_io_contract_diagnosis.md`; q/LE/B/128-point loading is consistent, but trunk `point_features` normalization explodes on wind-shell case073. |
 
 Training is allowed only within the limited LE/B release boundary.
 
@@ -204,6 +205,10 @@ Current verified or adopted conclusions:
   the Gate 35 OOD split, but remains above the `0.02` force gate, and held-out
   `case073` fails severely. The issue is not just a fully out-of-distribution
   wind-shell split.
+- Gate 37 shows the immediate network input problem: compact fields and loader
+  fields match exactly for `q48_def_hat`, `LE_macro`, `B_macro_qdef`, and
+  `X16_hat`, and AD B matches the explicit state-B path, but trunk
+  `point_features` standardization reaches about `134374` on `case073`.
 
 ## Pending Issues That Are Not Data Errors
 
@@ -247,6 +252,9 @@ data is bad:
 - Gate 36 confirms that wind-shell in-split training does not release the route.
   The next step is a geometry and error-contribution diagnosis around
   `case073`, not a larger training run.
+- Gate 37 localizes the next fix to point-feature normalization. The largest
+  observed outlier is `ip_invJ_hat_10`, where train std is about `8.08e-08`
+  and `case073` z-score reaches about `134374`.
 
 These issues must not be hidden inside network training as if a network could
 repair a definition mismatch. They do not block the limited LE/B training
@@ -311,12 +319,10 @@ Required after training:
 Recommended next tasks, in order:
 
 1. Keep material-only K diagnostics separate from full tangent claims.
-2. Run Gate 37 wind-shell geometry and force-error diagnosis.
-3. Compare `case073` against training wind-shell cases `70,71,72`.
-4. Inspect `X16_hat`, point features, `L_ref`, force magnitude, and branch
-   activation distributions.
-5. Decide whether the next correction is geometry split, geometry feature
-   expression, loss weighting, or model capacity.
+2. Run Gate 38 point-feature normalization replay.
+3. Add a replay-only `point_features` std floor candidate check.
+4. Verify `point_norm_abs_max` falls from about `134374` to a reasonable range.
+5. Only after replay passes, consider implementing a guarded training option.
 
 ## Currently Forbidden
 

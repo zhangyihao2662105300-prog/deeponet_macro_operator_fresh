@@ -51,6 +51,11 @@ Gate 36 update: wind-shell in-split training also failed force audit. Cases
 force closure still failed while teacher force remained good. Do not expand
 training before a Gate 37 geometry and force-error diagnosis.
 
+Gate 37 update: network IO contract diagnosis found no q/LE/B loader mismatch
+and no 128-point ordering mismatch, but found severe trunk `point_features`
+normalization explosion on `case073`. Do not train again before Gate 38
+point-feature normalization replay.
+
 This checklist defines what must be true before network training is allowed.
 It does not start training, change the model, or modify the data contract.
 
@@ -114,6 +119,9 @@ Current status:
   wind-shell in-split small diagnosis, not larger training.
 - Gate 36: wind-shell in-split training failed selected-frame force audit; next
   step is case073 geometry and error diagnosis, not larger training.
+- Gate 37: q/LE/B/128-point loading checks passed, but point-feature
+  normalization fails; next step is point-feature std-floor replay, not
+  training.
 
 Do not treat this as a full tangent or solver-readiness release.
 
@@ -168,6 +176,10 @@ be treated as proof that the data is corrupt:
 - Gate 36 confirms that the failure is not only a fully out-of-distribution
   wind-shell split. Even with cases `70,71,72` in training, held-out `case073`
   fails severely, and training cases remain above the force gate.
+- Gate 37 confirms that the current immediate problem is network input
+  standardization, not label loading. The trunk feature `ip_invJ_hat_10` reaches
+  about `134374` normalized magnitude on `case073` because train std is about
+  `8.08e-08`.
 
 These issues no longer block the limited LE/B training release, but they remain
 unresolved mechanics items and are not the same as q48 ordering corruption, LE
@@ -287,3 +299,5 @@ Not allowed by this checklist:
 - Repeat the same Gate 35 OOD split training and hope more epochs fix it.
 - Expand training after Gate 36 without first diagnosing `case073` geometry,
   force magnitude, and feature distribution.
+- Train after Gate 37 without first replaying a guarded point-feature
+  normalization floor.

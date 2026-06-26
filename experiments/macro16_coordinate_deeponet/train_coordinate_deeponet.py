@@ -6,6 +6,7 @@ This is not the production Macro16 trainer.  It is a first-stage route check:
     Trunk:  x_gp_hat[3]
     Output: LE[6]
     B:      AD dLE/dq48_def_hat, supervised by B_macro_qdef
+            source plus finite differences use prepared Macro16 q-column order
 """
 
 from __future__ import annotations
@@ -30,10 +31,18 @@ from torch.utils.data import DataLoader, Dataset
 
 if __package__ in {None, ""}:
     sys.path.append(str(Path(__file__).resolve().parent))
-    from coordinate_deeponet_model import Macro16CoordinateDeepONet, Macro16CoordinateLinearResidualDeepONet
+    from coordinate_deeponet_model import (
+        Macro16CoordinateDeepONet,
+        Macro16CoordinateLinearResidualDeepONet,
+        Macro16CoordinateStateLinearResidualDeepONet,
+    )
     from prepare_coordinate_dataset import load_coordinate_arrays, paths_from_args
 else:
-    from .coordinate_deeponet_model import Macro16CoordinateDeepONet, Macro16CoordinateLinearResidualDeepONet
+    from .coordinate_deeponet_model import (
+        Macro16CoordinateDeepONet,
+        Macro16CoordinateLinearResidualDeepONet,
+        Macro16CoordinateStateLinearResidualDeepONet,
+    )
     from .prepare_coordinate_dataset import load_coordinate_arrays, paths_from_args
 
 
@@ -273,6 +282,45 @@ def source_plus_fd_loss(
     return balanced_b_loss(pred_slope, target_slope, scale), pred_slope, target_slope
 
 
+def source_plus_fd_eval(
+    model: Macro16CoordinateDeepONet,
+    q: torch.Tensor,
+    g: torch.Tensor,
+    x: torch.Tensor,
+    le_true: torch.Tensor,
+    q_plus: torch.Tensor,
+    le_plus_true: torch.Tensor,
+    columns: list[int],
+    *,
+    branch_mean: torch.Tensor,
+    branch_std: torch.Tensor,
+    le_mean: torch.Tensor,
+    le_std: torch.Tensor,
+    plus_delta_raw: float,
+    plus_slope_scale: torch.Tensor,
+) -> dict[str, float]:
+    loss, pred_slope, target_slope = source_plus_fd_loss(
+        model,
+        q,
+        g,
+        x,
+        le_true,
+        q_plus,
+        le_plus_true,
+        columns,
+        branch_mean=branch_mean,
+        branch_std=branch_std,
+        le_mean=le_mean,
+        le_std=le_std,
+        plus_delta_raw=plus_delta_raw,
+        plus_slope_scale=plus_slope_scale,
+    )
+    return {
+        "plus_fd_rel": rel_error(pred_slope.detach().cpu().numpy(), target_slope.detach().cpu().numpy()),
+        "plus_fd_loss": float(loss.detach().cpu().item()),
+    }
+
+
 def evaluate(
     model: Macro16CoordinateDeepONet,
     arrays: dict[str, np.ndarray],
@@ -284,9 +332,11 @@ def evaluate(
     le_mean: torch.Tensor,
     le_std: torch.Tensor,
     b_scale: torch.Tensor,
+    plus_slope_scale: torch.Tensor,
     eval_columns: list[int],
     fd_step: float,
     fd_column_chunk: int,
+    plus_delta_raw: float,
     prefix: str,
 ) -> dict[str, float]:
     if indices.size == 0:
@@ -341,13 +391,36 @@ def evaluate(
     b_ref = b_true.detach().cpu().numpy()
     scale = b_scale[:, :, :, eval_columns]
     b_loss = balanced_b_loss(b_pred, b_true, scale).detach().cpu().item()
-    return {
+    out = {
         f"{prefix}_LE_rel": rel_error(le_np, le_ref),
         f"{prefix}_AD_B_rel": rel_error(b_np, b_ref),
         f"{prefix}_FD_B_rel": rel_error(b_fd_np, b_ref),
         f"{prefix}_LE_mse": float(np.mean((le_np - le_ref) ** 2)),
         f"{prefix}_balanced_B_mse": float(b_loss),
     }
+    if "q_plus" in arrays and "le_plus" in arrays:
+        with torch.no_grad():
+            q_plus = torch.as_tensor(arrays["q_plus"][indices], dtype=torch.float32, device=device)
+            le_plus = torch.as_tensor(arrays["le_plus"][indices], dtype=torch.float32, device=device)
+            plus = source_plus_fd_eval(
+                model,
+                q,
+                g,
+                x,
+                le_true,
+                q_plus,
+                le_plus,
+                eval_columns,
+                branch_mean=branch_mean,
+                branch_std=branch_std,
+                le_mean=le_mean,
+                le_std=le_std,
+                plus_delta_raw=plus_delta_raw,
+                plus_slope_scale=plus_slope_scale,
+            )
+        out[f"{prefix}_plus_fd_rel"] = plus["plus_fd_rel"]
+        out[f"{prefix}_plus_fd_loss"] = plus["plus_fd_loss"]
+    return out
 
 
 def train(args: argparse.Namespace) -> dict[str, Any]:
@@ -377,7 +450,14 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 arrays_obj["q_plus"] = np.asarray(z["q48_def_hat_plus"], dtype=np.float32)
                 arrays_obj["le_plus"] = np.asarray(z["LE_macro_plus"], dtype=np.float32)
                 arrays_obj["plus_delta_raw"] = np.asarray(z["plus_delta_raw"], dtype=np.float64)
-                arrays_obj["plus_raw_directions"] = np.asarray(z["plus_raw_directions"], dtype=np.int64)
+                arrays_obj["plus_macro_directions"] = np.asarray(
+                    z["plus_macro_directions"] if "plus_macro_directions" in z.files else z["plus_raw_directions"],
+                    dtype=np.int64,
+                )
+                arrays_obj["plus_source_directions"] = np.asarray(
+                    z["plus_source_directions"] if "plus_source_directions" in z.files else z["plus_raw_directions"],
+                    dtype=np.int64,
+                )
             compact_paths = [str(v) for v in np.asarray(z["compact_paths"], dtype=object).reshape(-1)]
             gp_source = str(np.asarray(z["gp_coordinate_source"], dtype=object).reshape(-1)[0])
             geometry_param_names = [str(v) for v in np.asarray(z["geometry_param_names"], dtype=object).reshape(-1)]
@@ -399,7 +479,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             arrays_obj["q_plus"] = loaded.q48_def_hat_plus.astype(np.float32)
             arrays_obj["le_plus"] = loaded.le_macro_plus.astype(np.float32)
             arrays_obj["plus_delta_raw"] = np.asarray([float(loaded.plus_delta_raw)], dtype=np.float64)
-            arrays_obj["plus_raw_directions"] = loaded.plus_raw_directions.astype(np.int64)
+            arrays_obj["plus_macro_directions"] = loaded.plus_macro_directions.astype(np.int64)
+            arrays_obj["plus_source_directions"] = loaded.plus_source_directions.astype(np.int64)
         compact_paths = loaded.compact_paths
         gp_source = loaded.gp_coordinate_source
         geometry_param_names = loaded.geometry_param_names
@@ -458,6 +539,19 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             activation=str(args.activation),
             zero_init_residual=not bool(args.no_zero_init_residual),
         ).to(device)
+    elif style == "state-linear-residual":
+        model = Macro16CoordinateStateLinearResidualDeepONet(
+            branch_dim=int(branch_raw.shape[1]),
+            trunk_dim=3,
+            q_dim=48,
+            strain_dim=6,
+            basis_dim=int(args.basis_dim),
+            hidden_dim=int(args.hidden_dim),
+            branch_depth=int(args.branch_depth),
+            trunk_depth=int(args.trunk_depth),
+            activation=str(args.activation),
+            zero_init_residual=not bool(args.no_zero_init_residual),
+        ).to(device)
     elif style == "plain":
         model = Macro16CoordinateDeepONet(
             branch_dim=int(branch_raw.shape[1]),
@@ -470,7 +564,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             activation=str(args.activation),
         ).to(device)
     else:
-        raise ValueError("--model-style must be plain or linear-residual")
+        raise ValueError("--model-style must be plain, linear-residual, or state-linear-residual")
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(args.lr), weight_decay=float(args.weight_decay))
     train_set = CoordinateDataset(arrays_obj, train_idx)
     loader = DataLoader(train_set, batch_size=int(args.batch_size), shuffle=True, drop_last=False)
@@ -563,6 +657,40 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                     plus_delta_raw=plus_delta_raw,
                     plus_slope_scale=plus_slope_scale_t,
                 )
+            elif b_loss_source in {"ad-plus-source-fd", "source-fd-plus-ad", "ad-plus-plus-fd"}:
+                if not plus_available:
+                    raise ValueError("--b-loss-source ad-plus-source-fd requires q48_def_hat_plus and LE_macro_plus")
+                b_pred_ad = b_jvp_columns(
+                    model,
+                    q_req,
+                    g,
+                    x,
+                    columns,
+                    branch_mean=branch_mean_t,
+                    branch_std=branch_std_t,
+                    le_mean=le_mean_t,
+                    le_std=le_std_t,
+                )
+                ad_loss = balanced_b_loss(b_pred_ad, b[:, :, :, columns], b_scale_t[:, :, :, columns])
+                q_plus = torch.as_tensor(arrays_obj["q_plus"][idx_np], dtype=torch.float32, device=device)
+                le_plus = torch.as_tensor(arrays_obj["le_plus"][idx_np], dtype=torch.float32, device=device)
+                plus_loss, _pred_slope, _target_slope = source_plus_fd_loss(
+                    model,
+                    q_req,
+                    g,
+                    x,
+                    le,
+                    q_plus,
+                    le_plus,
+                    columns,
+                    branch_mean=branch_mean_t,
+                    branch_std=branch_std_t,
+                    le_mean=le_mean_t,
+                    le_std=le_std_t,
+                    plus_delta_raw=plus_delta_raw,
+                    plus_slope_scale=plus_slope_scale_t,
+                )
+                b_loss = 0.5 * (ad_loss + plus_loss)
             elif b_loss_source in {"ad-plus-fd", "fd-plus-ad"}:
                 b_pred_ad = b_jvp_columns(
                     model,
@@ -626,9 +754,11 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                     le_mean=le_mean_t,
                     le_std=le_std_t,
                     b_scale=b_scale_t,
+                    plus_slope_scale=plus_slope_scale_t,
                     eval_columns=eval_columns,
                     fd_step=float(args.fd_step),
                     fd_column_chunk=int(args.fd_column_chunk),
+                    plus_delta_raw=plus_delta_raw,
                     prefix="train",
                 )
             )
@@ -643,9 +773,11 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                     le_mean=le_mean_t,
                     le_std=le_std_t,
                     b_scale=b_scale_t,
+                    plus_slope_scale=plus_slope_scale_t,
                     eval_columns=eval_columns,
                     fd_step=float(args.fd_step),
                     fd_column_chunk=int(args.fd_column_chunk),
+                    plus_delta_raw=plus_delta_raw,
                     prefix="val",
                 )
             )
@@ -694,10 +826,15 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "fd_step": float(args.fd_step),
         "source_plus_available": bool(plus_available),
         "source_plus_delta_raw": None if not plus_available else float(plus_delta_raw),
-        "source_plus_raw_directions": (
+        "source_plus_macro_directions": (
             None
             if not plus_available
-            else [int(v) for v in np.asarray(arrays_obj["plus_raw_directions"], dtype=np.int64).reshape(-1)]
+            else [int(v) for v in np.asarray(arrays_obj["plus_macro_directions"], dtype=np.int64).reshape(-1)]
+        ),
+        "source_plus_source_directions": (
+            None
+            if not plus_available
+            else [int(v) for v in np.asarray(arrays_obj["plus_source_directions"], dtype=np.int64).reshape(-1)]
         ),
         "model_style": style,
         "gp_coordinate_source": gp_source,
@@ -733,13 +870,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--branch-depth", type=int, default=4)
     parser.add_argument("--trunk-depth", type=int, default=4)
     parser.add_argument("--activation", default="tanh")
-    parser.add_argument("--model-style", default="plain", choices=["plain", "linear-residual"])
+    parser.add_argument("--model-style", default="plain", choices=["plain", "linear-residual", "state-linear-residual"])
     parser.add_argument("--no-zero-init-residual", action="store_true")
     parser.add_argument("--lr", type=float, default=1.0e-3)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--le-weight", type=float, default=1.0)
     parser.add_argument("--b-weight", type=float, default=0.05)
-    parser.add_argument("--b-loss-source", default="ad", choices=["ad", "fd", "plus-fd", "ad-plus-fd"])
+    parser.add_argument("--b-loss-source", default="ad", choices=["ad", "fd", "plus-fd", "ad-plus-fd", "ad-plus-source-fd"])
     parser.add_argument("--b-columns-per-step", type=int, default=12)
     parser.add_argument("--fd-step", type=float, default=1.0e-4)
     parser.add_argument("--fd-column-chunk", type=int, default=12)

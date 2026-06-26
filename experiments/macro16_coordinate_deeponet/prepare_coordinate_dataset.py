@@ -53,6 +53,13 @@ GEOMETRY_PARAM_NAMES = [
     "warping_rms_hat",
 ]
 
+TRUE176_SURFACE_MACRO_TO_KEEP = np.asarray([0, 1, 2, 4, 7, 6, 5, 3], dtype=np.int64)
+TRUE176_MACRO_TO_KEEP_NODE = np.concatenate([TRUE176_SURFACE_MACRO_TO_KEEP, TRUE176_SURFACE_MACRO_TO_KEEP + 8])
+TRUE176_MACRO_TO_KEEP_FLAT = np.asarray(
+    [int(node) * 3 + axis for node in TRUE176_MACRO_TO_KEEP_NODE for axis in range(3)],
+    dtype=np.int64,
+)
+
 
 @dataclass(frozen=True)
 class CoordinateArrays:
@@ -64,7 +71,8 @@ class CoordinateArrays:
     b_macro_qdef: np.ndarray
     q48_def_hat_plus: np.ndarray | None
     le_macro_plus: np.ndarray | None
-    plus_raw_directions: np.ndarray | None
+    plus_macro_directions: np.ndarray | None
+    plus_source_directions: np.ndarray | None
     plus_delta_raw: float | None
     case_id: np.ndarray
     source_index: np.ndarray
@@ -356,27 +364,27 @@ def _load_plus_samples_from_source(
     *,
     q48_def_hat: np.ndarray,
     l_ref: np.ndarray,
-) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None, float | None, str]:
+) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None, np.ndarray | None, float | None, str]:
     source_text = _scalar_text(z, "source_compact")
     if not source_text:
-        return None, None, None, None, "missing_source_compact"
+        return None, None, None, None, None, "missing_source_compact"
     source_path = Path(source_text)
     if not source_path.exists():
-        return None, None, None, None, f"source_missing:{source_path}"
+        return None, None, None, None, None, f"source_missing:{source_path}"
     if "rigid_projection_P" not in z.files:
-        return None, None, None, None, "missing_rigid_projection_P"
+        return None, None, None, None, None, "missing_rigid_projection_P"
     pmat = _frame_array(z, path, n_total, rows, "rigid_projection_P", (48, 48)).astype(np.float64)
     if "source_row" in z.files:
         source_rows_all = np.asarray(z["source_row"], dtype=np.int64)
         if source_rows_all.shape != (n_total,):
-            return None, None, None, None, f"bad_source_row_shape:{source_rows_all.shape}"
+            return None, None, None, None, None, f"bad_source_row_shape:{source_rows_all.shape}"
         source_rows = source_rows_all[rows]
     else:
         source_rows = rows
     with np.load(str(source_path), allow_pickle=True) as src:
         required = {"LE128_plus", "perturb_directions", "delta"}
         if not required.issubset(src.files):
-            return None, None, None, None, "source_has_no_LE128_plus"
+            return None, None, None, None, None, "source_has_no_LE128_plus"
         le_plus_all = np.asarray(src["LE128_plus"], dtype=np.float32)
         if le_plus_all.ndim != 4 or le_plus_all.shape[2:] != (128, 6):
             raise ValueError(f"{source_path}: LE128_plus must be [N,D,128,6], got {le_plus_all.shape}")
@@ -388,15 +396,28 @@ def _load_plus_samples_from_source(
         delta = float(np.asarray(src["delta"], dtype=np.float64).reshape(-1)[0])
         if not math.isfinite(delta) or delta == 0.0:
             raise ValueError(f"{source_path}: bad delta {delta:g}")
-        le_plus = le_plus_all[source_rows]
-    q_plus = np.repeat(q48_def_hat[:, None, :], directions.shape[0], axis=1).astype(np.float64)
+        source_order = _scalar_text(z, "source_node_order").strip().lower().replace("_", "-")
+        node_transform = _scalar_text(z, "node_order_transform").strip().lower()
+        if source_order == "true176-keep" or "true176_keep_to_macro16" in node_transform:
+            macro_to_source = TRUE176_MACRO_TO_KEEP_FLAT
+            le_plus = le_plus_all[source_rows][:, macro_to_source, :, :]
+            source_directions = directions[macro_to_source]
+            macro_directions = np.arange(48, dtype=np.int64)
+        else:
+            le_plus = le_plus_all[source_rows]
+            source_directions = directions.copy()
+            macro_directions = directions.copy()
+        if macro_directions.shape != (48,) or np.any(np.sort(macro_directions) != np.arange(48)):
+            return None, None, None, None, None, f"unsupported_plus_direction_set:{macro_directions.tolist()}"
+    q_plus = np.repeat(q48_def_hat[:, None, :], macro_directions.shape[0], axis=1).astype(np.float64)
     l_ref_arr = np.maximum(np.asarray(l_ref, dtype=np.float64).reshape(-1, 1), 1.0e-12)
-    for pos, raw_dir in enumerate(directions.tolist()):
-        q_plus[:, pos, :] += float(delta) * pmat[:, :, int(raw_dir)] / l_ref_arr
+    for pos, macro_dir in enumerate(macro_directions.tolist()):
+        q_plus[:, pos, :] += float(delta) * pmat[:, :, int(macro_dir)] / l_ref_arr
     return (
         q_plus.astype(np.float32),
         le_plus.astype(np.float32),
-        directions.astype(np.int64),
+        macro_directions.astype(np.int64),
+        source_directions.astype(np.int64),
         float(delta),
         f"LE128_plus_from:{source_path}",
     )
@@ -425,7 +446,8 @@ def load_coordinate_arrays(
     compact_paths: list[str] = []
     xi_ref: np.ndarray | None = None
     gp_sources: list[str] = []
-    plus_dirs_ref: np.ndarray | None = None
+    plus_macro_dirs_ref: np.ndarray | None = None
+    plus_source_dirs_ref: np.ndarray | None = None
     plus_delta_ref: float | None = None
     plus_sources: list[str] = []
 
@@ -469,7 +491,7 @@ def load_coordinate_arrays(
                 xgp_hat = map_x_gp_hat_from_x16_hat(x16_hat, xi)
                 gp_source = "macro16_isoparametric_from_X16"
             gp_sources.append(gp_source)
-            q_plus, le_plus, plus_dirs, plus_delta, plus_source = _load_plus_samples_from_source(
+            q_plus, le_plus, plus_macro_dirs, plus_source_dirs, plus_delta, plus_source = _load_plus_samples_from_source(
                 z,
                 path,
                 n_total,
@@ -478,13 +500,22 @@ def load_coordinate_arrays(
                 l_ref=l_ref,
             )
             plus_sources.append(plus_source)
-            if q_plus is not None and le_plus is not None and plus_dirs is not None and plus_delta is not None:
-                if plus_dirs_ref is None:
-                    plus_dirs_ref = plus_dirs
+            if (
+                q_plus is not None
+                and le_plus is not None
+                and plus_macro_dirs is not None
+                and plus_source_dirs is not None
+                and plus_delta is not None
+            ):
+                if plus_macro_dirs_ref is None:
+                    plus_macro_dirs_ref = plus_macro_dirs
+                    plus_source_dirs_ref = plus_source_dirs
                     plus_delta_ref = float(plus_delta)
                 else:
-                    if not np.array_equal(plus_dirs_ref, plus_dirs):
+                    if not np.array_equal(plus_macro_dirs_ref, plus_macro_dirs):
                         raise ValueError(f"{path}: plus perturb directions differ from previous compact")
+                    if not np.array_equal(plus_source_dirs_ref, plus_source_dirs):
+                        raise ValueError(f"{path}: plus source directions differ from previous compact")
                     if abs(float(plus_delta_ref) - float(plus_delta)) > 1.0e-15:
                         raise ValueError(f"{path}: plus delta differs from previous compact")
                 q_plus_chunks.append(q_plus.astype(np.float32))
@@ -528,7 +559,8 @@ def load_coordinate_arrays(
         b_macro_qdef=np.concatenate(b_chunks, axis=0),
         q48_def_hat_plus=np.concatenate(q_plus_chunks, axis=0) if q_plus_chunks else None,
         le_macro_plus=np.concatenate(le_plus_chunks, axis=0) if le_plus_chunks else None,
-        plus_raw_directions=plus_dirs_ref.astype(np.int64) if plus_dirs_ref is not None else None,
+        plus_macro_directions=plus_macro_dirs_ref.astype(np.int64) if plus_macro_dirs_ref is not None else None,
+        plus_source_directions=plus_source_dirs_ref.astype(np.int64) if plus_source_dirs_ref is not None else None,
         plus_delta_raw=float(plus_delta_ref) if plus_delta_ref is not None else None,
         case_id=np.concatenate(case_chunks, axis=0),
         source_index=np.concatenate(source_chunks, axis=0),
@@ -569,7 +601,9 @@ def save_prepared(path: Path, arrays: CoordinateArrays, *, meta: dict[str, Any] 
             {
                 "q48_def_hat_plus": arrays.q48_def_hat_plus,
                 "LE_macro_plus": arrays.le_macro_plus,
-                "plus_raw_directions": arrays.plus_raw_directions,
+                "plus_macro_directions": arrays.plus_macro_directions,
+                "plus_source_directions": arrays.plus_source_directions,
+                "plus_raw_directions": arrays.plus_macro_directions,
                 "plus_delta_raw": np.asarray([float(arrays.plus_delta_raw)], dtype=np.float64),
             }
         )
@@ -587,7 +621,7 @@ def write_summary(path: Path, arrays: CoordinateArrays, *, command: str) -> None
         "output_contract": "LE_macro[6]",
         "b_contract": "B from AD dLE/dq48_def_hat, target B_macro_qdef",
         "plus_contract": (
-            "q48_def_hat_plus and LE_macro_plus from source LE128_plus raw-direction forward differences"
+            "q48_def_hat_plus and LE_macro_plus use Macro16 q-column order; plus_source_directions records original source columns"
             if arrays.q48_def_hat_plus is not None
             else "not available"
         ),

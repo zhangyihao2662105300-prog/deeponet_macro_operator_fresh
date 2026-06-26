@@ -3,10 +3,20 @@
 """Generate and audit Gate 04 wind-turbine shell Macro16 source128 data.
 
 This script does not train a network, does not change the Macro16 model, and
-does not change the fixed 128-point source rule.  It creates four structured
-4x4 CSS8 teacher patches, runs one q48 path plus 48 forward perturbations for
-each patch, exports complete TRUE176/CSS8 compacts, converts them to Macro16
-source128 compacts, and runs the Gate 04 data-contract and force audits.
+does not change the fixed 128-point source rule.
+
+The production data route uses the same displacement-template method as the
+2000-epoch TRUE176 shape4 training data:
+
+    TRUE176 full48_vector.npy template
+      -> legacy local-frame/H normalization
+      -> target shell keep-node local frames
+      -> 100-frame Abaqus displacement history
+      -> base + 48 forward perturbation jobs
+      -> LE/B compact export
+
+The older synthetic mixed q path is retained only as an explicit compatibility
+smoke mode.  Do not use it for formal wind-shell training data.
 """
 
 from __future__ import annotations
@@ -43,10 +53,21 @@ from audit_macro16_force_stiffness import run_audit as run_force_audit  # noqa: 
 DEFAULT_OLD_SRC_ROOT = Path(r"D:\IS-FEM\NNSE_css8_push_tmp")
 DEFAULT_EXPORT_LIB = Path(r"D:\IS-FEM\SRCv3.1 - 1\SRCv3.1\scripts\export_three_element_bfk_arrays.py")
 DEFAULT_ABAQUS = Path(r"D:\Program Files\SIMULIA\Commands\abaqus.bat")
+DEFAULT_TRUE176_ROOT = Path(
+    r"D:\IS-FEM\NNSE-NeuralNetworkShellElement_git"
+    r"\run_logs\true176_10x10_range_force176_linear_mid"
+)
+DEFAULT_TRUE176_DOMAIN = "mid_free_deform"
+DEFAULT_TRUE176_VECTOR_KIND = "full48"
+DEFAULT_TEMPLATE_CASES = "1,2,3,4"
 
 NX = 4
 NY = 4
 GAUSS_FAMILIES = ("cylindrical_shell", "conical_shell", "thickness_varying_shell", "mild_double_curvature_shell")
+OLD_INDEX_FOR_SHAPE4_INDEX = np.asarray(
+    [0, 3, 5, 1, 6, 2, 4, 7, 8, 11, 13, 9, 14, 10, 12, 15],
+    dtype=np.int64,
+)
 NODE_SIGNS = np.asarray(
     [
         [-1.0, -1.0, -1.0],
@@ -87,6 +108,22 @@ def read_path_list(path: Path) -> list[Path]:
         for line in Path(path).read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.strip().startswith("#")
     ]
+
+
+def parse_int_list(text: str) -> list[int]:
+    out: list[int] = []
+    for item in str(text).replace(";", ",").split(","):
+        part = item.strip()
+        if not part:
+            continue
+        if ":" in part:
+            lo, hi = [int(v.strip()) for v in part.split(":", 1)]
+            out.extend(range(lo, hi))
+        else:
+            out.append(int(part))
+    if not out:
+        raise ValueError("empty integer list")
+    return out
 
 
 def node_id(i: int, j: int, k: int) -> int:
@@ -268,6 +305,224 @@ def geometry_metrics(family: str) -> dict[str, Any]:
         "L_ref": float(geom.l_ref),
         "X16": x16.astype(float).tolist(),
     }
+
+
+def load_csv_dict(path: Path) -> list[dict[str, str]]:
+    with Path(path).open("r", encoding="utf-8-sig", newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def true176_case_dir(root: Path, domain: str, case_id: int) -> Path:
+    return Path(root) / str(domain) / f"case{int(case_id):03d}"
+
+
+def load_true176_q48(root: Path, domain: str, case_id: int, vector_kind: str) -> np.ndarray:
+    path = true176_case_dir(root, domain, int(case_id)) / f"{vector_kind}_vector.npy"
+    if not path.exists():
+        raise FileNotFoundError(path)
+    return np.asarray(np.load(str(path)), dtype=np.float64).reshape(16, 3)
+
+
+def load_legacy_meta(root: Path, domain: str, case_id: int) -> dict[str, Any]:
+    path = true176_case_dir(root, domain, int(case_id)) / "model_meta.json"
+    if not path.exists():
+        raise FileNotFoundError(path)
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def legacy_h(meta: dict[str, Any]) -> float:
+    geom = dict(meta.get("geometry", {}))
+    h = float(geom.get("H2", 1.0))
+    if not math.isfinite(h) or h <= 0.0:
+        raise ValueError("bad legacy H2 in model_meta.json")
+    return h
+
+
+def load_legacy_master_rows(root: Path, domain: str, case_id: int) -> list[dict[str, str]]:
+    path = true176_case_dir(root, domain, int(case_id)) / "full48_u.csv"
+    if not path.exists():
+        raise FileNotFoundError(path)
+    rows = load_csv_dict(path)
+    rows.sort(key=lambda r: int(float(r["full48_node_index0"])))
+    if len(rows) != 16:
+        raise ValueError(f"expected 16 full48 rows in {path}, got {len(rows)}")
+    for i, row in enumerate(rows):
+        if int(float(row["full48_node_index0"])) != i:
+            raise ValueError(f"full48 rows are not indexed 0..15 in {path}")
+    return rows
+
+
+def legacy_coords_from_rows(rows: list[dict[str, str]]) -> np.ndarray:
+    return np.asarray([[float(r["x"]), float(r["y"]), float(r["z"])] for r in rows], dtype=np.float64)
+
+
+def legacy_width_axial_radial_frames(coords: np.ndarray) -> np.ndarray:
+    """Return old TRUE176 local axes as rows: width_css8, axial, radial_outward."""
+
+    xyz = np.asarray(coords, dtype=np.float64).reshape(16, 3)
+    theta = np.arctan2(xyz[:, 2], xyz[:, 0])
+    sin_t = np.sin(theta)
+    cos_t = np.cos(theta)
+    e_width = np.stack([sin_t, np.zeros_like(theta), -cos_t], axis=1)
+    e_axial = np.broadcast_to(np.asarray([0.0, 1.0, 0.0], dtype=np.float64), e_width.shape)
+    e_radial = np.stack([cos_t, np.zeros_like(theta), sin_t], axis=1)
+    return np.stack([e_width, e_axial, e_radial], axis=1)
+
+
+def frame_quality(frames: np.ndarray) -> dict[str, float]:
+    ff = np.asarray(frames, dtype=np.float64).reshape(-1, 3, 3)
+    gram = np.einsum("nai,nbi->nab", ff, ff, optimize=True)
+    ident = np.eye(3, dtype=np.float64).reshape(1, 3, 3)
+    det = np.linalg.det(ff)
+    return {
+        "orthogonality_error": float(np.max(np.abs(gram - ident))),
+        "det_min": float(np.min(det)),
+        "det_max": float(np.max(det)),
+        "det_abs_error": float(np.max(np.abs(det - 1.0))),
+    }
+
+
+def target_keep_frames(nodes: dict[int, np.ndarray]) -> np.ndarray:
+    """Return target keep-node frames as rows: width_css8, axial, normal_outward."""
+
+    _boundary_nodes, keep_nodes = boundary_keep_nodes()
+    frames: list[np.ndarray] = []
+    for nid in keep_nodes:
+        i, j, k = node_ijk(int(nid))
+        i0 = max(0, i - 1)
+        i1 = min(NX, i + 1)
+        j0 = max(0, j - 1)
+        j1 = min(NY, j + 1)
+        if i0 == i1:
+            raise ValueError(f"cannot build width tangent for node {nid}")
+        if j0 == j1:
+            raise ValueError(f"cannot build axial tangent for node {nid}")
+        width = normalize(nodes[node_id(i1, j, k)] - nodes[node_id(i0, j, k)])
+        axial_raw = normalize(nodes[node_id(i, j1, k)] - nodes[node_id(i, j0, k)])
+        normal_raw = np.cross(width, axial_raw)
+        if float(np.linalg.norm(normal_raw)) <= 1.0e-14:
+            other_k = 1 - int(k)
+            normal_raw = nodes[node_id(i, j, other_k)] - nodes[int(nid)]
+            if int(k) == 1:
+                normal_raw = -normal_raw
+        normal = normalize(normal_raw)
+        axial = normalize(np.cross(normal, width))
+        width = normalize(np.cross(axial, normal))
+        frames.append(np.stack([width, axial, normal], axis=0))
+    return np.asarray(frames, dtype=np.float64).reshape(16, 3, 3)
+
+
+def template_transfer_context(args: Any, template_case_id: int | None = None) -> dict[str, Any]:
+    true176_root = Path(args.true176_root).resolve()
+    domain = str(args.true176_domain)
+    meta_case = int(template_case_id if template_case_id is not None else args.true176_meta_case)
+    meta = load_legacy_meta(true176_root, domain, meta_case)
+    h_ref = legacy_h(meta)
+    rows = load_legacy_master_rows(true176_root, domain, meta_case)
+    coords = legacy_coords_from_rows(rows)
+    frames = legacy_width_axial_radial_frames(coords)
+    return {
+        "true176_root": true176_root,
+        "true176_domain": domain,
+        "true176_vector_kind": str(args.true176_vector_kind),
+        "legacy_meta_case": int(meta_case),
+        "legacy_h_ref": float(h_ref),
+        "legacy_frames": frames,
+        "legacy_frame_quality": frame_quality(frames),
+        "legacy_full48_u_csv": str(true176_case_dir(true176_root, domain, meta_case) / "full48_u.csv"),
+        "legacy_model_meta": str(true176_case_dir(true176_root, domain, meta_case) / "model_meta.json"),
+    }
+
+
+def transfer_true176_template_to_family(
+    *,
+    family: str,
+    template_case_id: int,
+    args: Any,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    ctx = template_transfer_context(args) if context is None else context
+    nodes = build_nodes(family)
+    q_old = load_true176_q48(
+        Path(ctx["true176_root"]),
+        str(ctx["true176_domain"]),
+        int(template_case_id),
+        str(ctx["true176_vector_kind"]),
+    )
+    old_idx = OLD_INDEX_FOR_SHAPE4_INDEX
+    q_old_shape_order = np.asarray(q_old, dtype=np.float64).reshape(16, 3)[old_idx]
+    old_frames_shape_order = np.asarray(ctx["legacy_frames"], dtype=np.float64).reshape(16, 3, 3)[old_idx]
+    q_local_hat = np.einsum("nai,ni->na", old_frames_shape_order, q_old_shape_order, optimize=True) / float(ctx["legacy_h_ref"])
+    target_frames = target_keep_frames(nodes)
+    geom_l_ref = float(Macro16GeometryMap(x16_macro_from_nodes(nodes)).l_ref)
+    q_target = float(args.template_amplitude_scale) * geom_l_ref * np.einsum("na,nai->ni", q_local_hat, target_frames, optimize=True)
+    q_target_local_hat = np.einsum("nai,ni->na", target_frames, q_target, optimize=True) / geom_l_ref
+    local_rel = float(np.linalg.norm(q_target_local_hat - float(args.template_amplitude_scale) * q_local_hat) / max(np.linalg.norm(q_local_hat), 1.0e-300))
+    return {
+        "q48_final": q_target.reshape(48).astype(np.float64),
+        "source": {
+            "q_generation_method": "true176-template-local-frame-transfer",
+            "true176_case_id": int(template_case_id),
+            "true176_vector_kind": str(ctx["true176_vector_kind"]),
+            "true176_vector_path": str(true176_case_dir(Path(ctx["true176_root"]), str(ctx["true176_domain"]), int(template_case_id)) / f"{ctx['true176_vector_kind']}_vector.npy"),
+            "true176_root": str(ctx["true176_root"]),
+            "true176_domain": str(ctx["true176_domain"]),
+            "legacy_meta_case": int(ctx["legacy_meta_case"]),
+            "legacy_h_ref": float(ctx["legacy_h_ref"]),
+            "target_L_ref": geom_l_ref,
+            "template_amplitude_scale": float(args.template_amplitude_scale),
+            "uses_path_scale": False,
+            "old_index_for_shape4_index": OLD_INDEX_FOR_SHAPE4_INDEX.tolist(),
+            "legacy_frame_quality": ctx["legacy_frame_quality"],
+            "target_frame_quality": frame_quality(target_frames),
+            "local_template_preservation_rel": local_rel,
+            "notes": (
+                "Uses the 2000-epoch TRUE176 displacement-template route: complete full48 q template, "
+                "legacy local-frame/H normalization, then rebuild in target shell keep-node frames. "
+                "TRUE176 LE/B labels are not reused; target LE/B must be re-exported from Abaqus."
+            ),
+        },
+    }
+
+
+def select_template_case(family: str, args: Any) -> int:
+    cases = parse_int_list(str(args.template_cases))
+    families = GAUSS_FAMILIES if str(args.families).strip().lower() == "all" else tuple(v.strip() for v in str(args.families).split(",") if v.strip())
+    try:
+        idx = list(families).index(str(family))
+    except ValueError:
+        idx = list(GAUSS_FAMILIES).index(str(family)) if str(family) in GAUSS_FAMILIES else 0
+    return int(cases[idx % len(cases)])
+
+
+def build_q48_source(
+    family: str,
+    args: Any,
+    context: dict[str, Any] | None = None,
+    template_case_id: int | None = None,
+) -> dict[str, Any]:
+    mode = str(args.q_source_mode).strip().lower()
+    nodes = build_nodes(family)
+    if mode == "true176-template":
+        template_case = select_template_case(family, args) if template_case_id is None else int(template_case_id)
+        return transfer_true176_template_to_family(
+            family=family,
+            template_case_id=template_case,
+            args=args,
+            context=context,
+        )
+    if mode == "synthetic-mixed":
+        q_final = mixed_q48_keep(nodes, q_scale=float(args.q_scale))
+        return {
+            "q48_final": q_final,
+            "source": {
+                "q_generation_method": "synthetic-mixed-compatibility-smoke",
+                "q_scale": float(args.q_scale),
+                "uses_path_scale": True,
+                "notes": "Compatibility smoke only. Do not use as formal wind-shell training data.",
+            },
+        }
+    raise ValueError(f"unknown q source mode {args.q_source_mode!r}")
 
 
 def mixed_q48_keep(nodes: dict[int, np.ndarray], *, q_scale: float) -> np.ndarray:
@@ -538,6 +793,24 @@ def build_b_compact(sample_root: Path, case_id: str, args: Any, perturb_jobs: li
         str(out_path),
         sample_id=np.asarray([case_id], dtype=object),
         geometry_family=np.asarray(str(contract["geometry_family"].reshape(-1)[0]), dtype=object),
+        q_generation_method=np.asarray(str(contract["q_generation_method"].reshape(-1)[0]), dtype=object)
+        if "q_generation_method" in contract.files
+        else np.asarray("", dtype=object),
+        q_source_true176_case_id=np.asarray(contract["q_source_true176_case_id"], dtype=np.int64)
+        if "q_source_true176_case_id" in contract.files
+        else np.asarray([-1], dtype=np.int64),
+        q_source_true176_vector_path=np.asarray(str(contract["q_source_true176_vector_path"].reshape(-1)[0]), dtype=object)
+        if "q_source_true176_vector_path" in contract.files
+        else np.asarray("", dtype=object),
+        q_source_legacy_h_ref=np.asarray(contract["q_source_legacy_h_ref"], dtype=np.float64)
+        if "q_source_legacy_h_ref" in contract.files
+        else np.asarray([np.nan], dtype=np.float64),
+        q_source_target_l_ref=np.asarray(contract["q_source_target_l_ref"], dtype=np.float64)
+        if "q_source_target_l_ref" in contract.files
+        else np.asarray([np.nan], dtype=np.float64),
+        q_source_template_amplitude_scale=np.asarray(contract["q_source_template_amplitude_scale"], dtype=np.float64)
+        if "q_source_template_amplitude_scale" in contract.files
+        else np.asarray([np.nan], dtype=np.float64),
         frame_indices=frame_indices,
         frame_values=frame_values,
         perturb_directions=np.asarray(directions, dtype=np.int64),
@@ -635,16 +908,38 @@ def export_complete(sample_root: Path, case_id: str, b_compact: Path, base_odb: 
     return res
 
 
-def run_family(family: str, case_id: str, args: Any, old: dict[str, Any]) -> dict[str, Any]:
+def run_family(
+    family: str,
+    case_id: str,
+    args: Any,
+    old: dict[str, Any],
+    q_context: dict[str, Any] | None = None,
+    template_case_id: int | None = None,
+) -> dict[str, Any]:
     sample_root = Path(args.out_root).resolve() / family / case_id
     sample_root.mkdir(parents=True, exist_ok=True)
-    nodes = build_nodes(family)
-    q_final = mixed_q48_keep(nodes, q_scale=float(args.q_scale))
+    q_source = build_q48_source(family, args, q_context, template_case_id=template_case_id)
+    q_final = np.asarray(q_source["q48_final"], dtype=np.float64).reshape(48)
     metrics = geometry_metrics(family)
     if not metrics["detJ_positive"]:
         raise ValueError(f"{family}: Macro16 detJ is not positive")
+    existing_base_npz = sample_root / "base_frames.npz"
+    existing_q_path = sample_root / "q48_final.npy"
+    if bool(args.skip_existing) and existing_base_npz.exists():
+        if not existing_q_path.exists():
+            raise RuntimeError(
+                f"{case_id}: --skip-existing found an existing base export but no q48_final.npy; "
+                "refusing to reuse unknown displacement data"
+            )
+        existing_q = np.asarray(np.load(str(existing_q_path)), dtype=np.float64).reshape(48)
+        if not np.allclose(existing_q, q_final, rtol=1.0e-12, atol=1.0e-12):
+            raise RuntimeError(
+                f"{case_id}: --skip-existing would reuse an existing Abaqus export with a different q48_final. "
+                "Use a fresh out-root or remove the stale sample directory."
+            )
     write_json(sample_root / "geometry_metrics.json", metrics)
     np.save(sample_root / "q48_final.npy", q_final)
+    write_json(sample_root / "q48_source.json", dict(q_source["source"]))
 
     run_args = SimpleNamespace(
         skip_existing=bool(args.skip_existing),
@@ -676,6 +971,12 @@ def run_family(family: str, case_id: str, args: Any, old: dict[str, Any]) -> dic
     np.savez_compressed(
         str(bc_dir / "boundary_contract_arrays.npz"),
         geometry_family=np.asarray(family, dtype=object),
+        q_generation_method=np.asarray(str(q_source["source"]["q_generation_method"]), dtype=object),
+        q_source_true176_case_id=np.asarray([int(q_source["source"].get("true176_case_id", -1))], dtype=np.int64),
+        q_source_true176_vector_path=np.asarray(str(q_source["source"].get("true176_vector_path", "")), dtype=object),
+        q_source_legacy_h_ref=np.asarray([float(q_source["source"].get("legacy_h_ref", np.nan))], dtype=np.float64),
+        q_source_target_l_ref=np.asarray([float(q_source["source"].get("target_L_ref", np.nan))], dtype=np.float64),
+        q_source_template_amplitude_scale=np.asarray([float(q_source["source"].get("template_amplitude_scale", np.nan))], dtype=np.float64),
         T_boundary_96x48=np.asarray(base_info["T_boundary_96x48"], dtype=np.float64),
         X_keep_ref=np.asarray(base_info["X_keep_ref"], dtype=np.float64),
         X_boundary_ref=np.asarray(base_info["X_boundary_ref"], dtype=np.float64),
@@ -686,7 +987,9 @@ def run_family(family: str, case_id: str, args: Any, old: dict[str, Any]) -> dic
         boundary_nodes=np.asarray(base_info["boundary_nodes"], dtype=np.int64),
         nlgeom=np.asarray([str(args.nlgeom).strip().upper()], dtype=object),
     )
-    write_json(bc_dir / "boundary_contract.json", {k: v for k, v in base_info.items() if k not in {"nodes", "T_boundary_96x48", "q48_frames", "q_boundary_frames", "X_keep_ref", "X_boundary_ref"}})
+    boundary_json = {k: v for k, v in base_info.items() if k not in {"nodes", "T_boundary_96x48", "q48_frames", "q_boundary_frames", "X_keep_ref", "X_boundary_ref"}}
+    boundary_json["q_source"] = q_source["source"]
+    write_json(bc_dir / "boundary_contract.json", boundary_json)
     logs = sample_root / "logs"
     base_npz = sample_root / "base_frames.npz"
     base_res = old["run_export_job"](
@@ -734,7 +1037,9 @@ def run_family(family: str, case_id: str, args: Any, old: dict[str, Any]) -> dic
         "case_id": case_id,
         "sample_root": str(sample_root),
         "geometry_metrics": metrics,
+        "q_source": q_source["source"],
         "q48_final_norm": float(np.linalg.norm(q_final)),
+        "q48_final_abs_max": float(np.max(np.abs(q_final))),
         "base_result": base_res,
         "perturb_job_count": len(perturb_results),
         "b_compact_summary": b_summary,
@@ -846,18 +1151,27 @@ def build_source128_and_audit(family_rows: list[dict[str, Any]], args: Any) -> d
 
 def collect_report_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    generation_by_family = {row["family"]: row for row in summary["generation"]}
+    generation_by_family: dict[str, list[dict[str, Any]]] = {}
+    for row in summary["generation"]:
+        generation_by_family.setdefault(str(row["family"]), []).append(row)
     for family, audit in sorted(summary["postprocess"]["audits"].items()):
-        gen = generation_by_family[family]
+        generated = generation_by_family[family]
+        gen = generated[0]
         force_agg = audit["force_summary"]["aggregate"]
         contract_agg = audit["data_contract_summary"]["aggregate"]
         rows.append(
             {
                 "family": family,
-                "geometry_count": 1,
+                "geometry_count": len(generated),
                 "frame_count": int(force_agg.get("force_rel_count") or 0),
                 "detJ_positive": bool(gen["geometry_metrics"]["detJ_positive"]),
                 "detJ_min": float(gen["geometry_metrics"]["detJ_min"]),
+                "q_generation_methods": sorted({str(item["q_source"]["q_generation_method"]) for item in generated}),
+                "template_case_ids": sorted(
+                    int(item["q_source"]["true176_case_id"])
+                    for item in generated
+                    if "true176_case_id" in item["q_source"]
+                ),
                 "data_contract_pass": bool(audit["data_contract_summary"]["strict_pass"]),
                 "force_mean": float(force_agg["force_rel_mean"]),
                 "force_max": float(force_agg["force_rel_max"]),
@@ -870,25 +1184,81 @@ def collect_report_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
-def run(args: argparse.Namespace) -> dict[str, Any]:
-    old = setup_old_imports(Path(args.old_src_root))
-    families = GAUSS_FAMILIES if str(args.families).strip().lower() == "all" else tuple(v.strip() for v in str(args.families).split(",") if v.strip())
+def generation_tasks(families: tuple[str, ...], args: argparse.Namespace) -> list[dict[str, Any]]:
     case_ids = {
         "cylindrical_shell": "case070_cylindrical_shell",
         "conical_shell": "case071_conical_shell",
         "thickness_varying_shell": "case072_thickness_varying_shell",
         "mild_double_curvature_shell": "case073_mild_double_curvature_shell",
     }
+    mode = str(args.q_source_mode).strip().lower()
+    if mode != "true176-template":
+        return [
+            {
+                "family": family,
+                "case_id": case_ids[family],
+                "template_case_id": None,
+            }
+            for family in families
+        ]
+
+    template_cases = parse_int_list(str(args.template_cases))
+    assignment = str(args.template_assignment).strip().lower()
+    tasks: list[dict[str, Any]] = []
+    if assignment == "one-per-family":
+        for idx, family in enumerate(families):
+            case = int(template_cases[idx % len(template_cases)])
+            tasks.append(
+                {
+                    "family": family,
+                    "case_id": f"{case_ids[family]}_t176{case:03d}",
+                    "template_case_id": case,
+                }
+            )
+    elif assignment == "cross-product":
+        for family in families:
+            for case in template_cases:
+                tasks.append(
+                    {
+                        "family": family,
+                        "case_id": f"{case_ids[family]}_t176{int(case):03d}",
+                        "template_case_id": int(case),
+                    }
+                )
+    else:
+        raise ValueError(f"unknown template assignment {args.template_assignment!r}")
+    return tasks
+
+
+def run(args: argparse.Namespace) -> dict[str, Any]:
+    old = setup_old_imports(Path(args.old_src_root))
+    families = GAUSS_FAMILIES if str(args.families).strip().lower() == "all" else tuple(v.strip() for v in str(args.families).split(",") if v.strip())
     out_root = Path(args.out_root).resolve()
     out_root.mkdir(parents=True, exist_ok=True)
+    q_context = template_transfer_context(args) if str(args.q_source_mode).strip().lower() == "true176-template" else None
+    tasks = generation_tasks(families, args)
     generation: list[dict[str, Any]] = []
-    for family in families:
-        generation.append(run_family(family, case_ids[family], args, old))
+    for task in tasks:
+        generation.append(
+            run_family(
+                str(task["family"]),
+                str(task["case_id"]),
+                args,
+                old,
+                q_context,
+                template_case_id=task.get("template_case_id"),
+            )
+        )
     post = build_source128_and_audit(generation, args)
     summary = {
         "script": "run_gate04_wind_shell_generality_audit",
         "out_root": str(out_root),
         "families": list(families),
+        "generation_task_count": len(tasks),
+        "q_source_mode": str(args.q_source_mode),
+        "template_assignment": str(args.template_assignment),
+        "template_cases": parse_int_list(str(args.template_cases)) if str(args.q_source_mode).strip().lower() == "true176-template" else [],
+        "true176_template_context": {k: v for k, v in (q_context or {}).items() if k != "legacy_frames"},
         "network_training": False,
         "model_changed": False,
         "integration_rule": "fixed standard Macro16 source128 128-point rule",
@@ -903,7 +1273,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     return summary
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out-root", type=Path, default=Path("runs") / "gate04_wind_shell_generality")
     parser.add_argument("--families", default="all")
@@ -911,7 +1281,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--export-lib", type=Path, default=DEFAULT_EXPORT_LIB)
     parser.add_argument("--abaqus", type=Path, default=DEFAULT_ABAQUS)
     parser.add_argument("--candidate", default="css8_le6_engineering")
-    parser.add_argument("--increments", type=int, default=10)
+    parser.add_argument("--increments", type=int, default=100)
+    parser.add_argument("--q-source-mode", default="true176-template", choices=("true176-template", "synthetic-mixed"))
+    parser.add_argument("--true176-root", type=Path, default=DEFAULT_TRUE176_ROOT)
+    parser.add_argument("--true176-domain", default=DEFAULT_TRUE176_DOMAIN)
+    parser.add_argument("--true176-vector-kind", default=DEFAULT_TRUE176_VECTOR_KIND)
+    parser.add_argument("--true176-meta-case", type=int, default=1)
+    parser.add_argument("--template-cases", default=DEFAULT_TEMPLATE_CASES)
+    parser.add_argument("--template-assignment", default="one-per-family", choices=("one-per-family", "cross-product"))
+    parser.add_argument("--template-amplitude-scale", type=float, default=1.0)
     parser.add_argument("--q-scale", type=float, default=1.0e-3)
     parser.add_argument("--delta", type=float, default=1.0e-6)
     parser.add_argument("--nlgeom", default="YES", choices=("YES", "NO", "yes", "no"))
@@ -928,7 +1306,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--force-threshold", type=float, default=2.0e-2)
     parser.add_argument("--skip-existing", action="store_true")
     parser.add_argument("--allow-partial-frames", action="store_true", default=True)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def main() -> int:

@@ -93,6 +93,7 @@ import prepare_macro16_source128_distortion_tasks as prepare_macro16_distortion_
 from fit_macro16_point_b_prior import run as run_macro16_point_b_prior
 from enrich_macro16_compact_elastic_d import run as run_macro16_elastic_d_enrich
 from run_v1_2_pilot_case041_fresh_abaqus import assert_linear_frames as assert_pilot_linear_frames
+import run_gate04_wind_shell_generality_audit as gate04_wind_shell
 
 
 def macro16_flat_x16(thickness: float = 0.2) -> np.ndarray:
@@ -2209,6 +2210,86 @@ def test_macro16_distorted_task_preparer_writes_independent_q_paths() -> None:
         )
         q_cols = np.asarray([[float(row[f"q{i}"]) for i in range(1, 49)] for row in np.atleast_1d(q_zero)])
         assert np.max(np.abs(q_cols)) == 0.0
+
+
+def test_gate04_wind_shell_default_q_source_uses_true176_template() -> None:
+    args = gate04_wind_shell.parse_args([])
+    assert args.q_source_mode == "true176-template"
+    assert args.increments == 100
+    assert args.true176_vector_kind == "full48"
+    assert args.template_assignment == "one-per-family"
+
+    tasks = gate04_wind_shell.generation_tasks(("cylindrical_shell", "conical_shell"), args)
+    assert tasks[0]["case_id"].endswith("_t176001")
+    assert tasks[1]["case_id"].endswith("_t176002")
+    assert tasks[0]["template_case_id"] == 1
+    assert tasks[1]["template_case_id"] == 2
+
+
+def test_gate04_wind_shell_true176_template_transfer_preserves_local_template() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        case_dir = root / "mid_free_deform" / "case001"
+        case_dir.mkdir(parents=True)
+        (case_dir / "model_meta.json").write_text(
+            json.dumps({"geometry": {"H2": 2.0}}),
+            encoding="utf-8",
+        )
+
+        coords = np.zeros((16, 3), dtype=np.float64)
+        theta = np.linspace(0.15, 0.95, 16)
+        coords[:, 0] = np.cos(theta)
+        coords[:, 1] = np.linspace(0.0, 1.0, 16)
+        coords[:, 2] = np.sin(theta)
+        with (case_dir / "full48_u.csv").open("w", encoding="utf-8", newline="") as f:
+            f.write("domain,full48_node_index0,node_label,x,y,z,u1,u2,u3\n")
+            for i, xyz in enumerate(coords):
+                f.write(
+                    "mid_free_deform,%d,%d,%.17g,%.17g,%.17g,0,0,0\n"
+                    % (i, i + 1, float(xyz[0]), float(xyz[1]), float(xyz[2]))
+                )
+
+        q_old = np.arange(48, dtype=np.float64).reshape(16, 3) * 1.0e-5
+        np.save(case_dir / "full48_vector.npy", q_old)
+
+        args = SimpleNamespace(
+            true176_root=root,
+            true176_domain="mid_free_deform",
+            true176_vector_kind="full48",
+            true176_meta_case=1,
+            template_amplitude_scale=1.0,
+            q_source_mode="true176-template",
+            template_cases="1",
+            families="cylindrical_shell",
+            q_scale=1.0e-3,
+        )
+        context = gate04_wind_shell.template_transfer_context(args)
+        moved = gate04_wind_shell.transfer_true176_template_to_family(
+            family="cylindrical_shell",
+            template_case_id=1,
+            args=args,
+            context=context,
+        )
+
+        q_final = np.asarray(moved["q48_final"], dtype=np.float64).reshape(16, 3)
+        target_nodes = gate04_wind_shell.build_nodes("cylindrical_shell")
+        target_frames = gate04_wind_shell.target_keep_frames(target_nodes)
+        target_l_ref = gate04_wind_shell.Macro16GeometryMap(gate04_wind_shell.x16_macro_from_nodes(target_nodes)).l_ref
+        q_target_local_hat = np.einsum("nai,ni->na", target_frames, q_final, optimize=True) / float(target_l_ref)
+
+        old_idx = gate04_wind_shell.OLD_INDEX_FOR_SHAPE4_INDEX
+        expected_local_hat = np.einsum(
+            "nai,ni->na",
+            context["legacy_frames"][old_idx],
+            q_old[old_idx],
+            optimize=True,
+        ) / float(context["legacy_h_ref"])
+
+        assert moved["source"]["q_generation_method"] == "true176-template-local-frame-transfer"
+        assert moved["source"]["true176_case_id"] == 1
+        np.testing.assert_allclose(q_target_local_hat, expected_local_hat, rtol=1.0e-12, atol=1.0e-12)
+        assert np.asarray(moved["q48_final"]).shape == (48,)
+        assert moved["source"]["uses_path_scale"] is False
 
 
 def test_v1_2_pilot_linear_frame_audit_allows_zero_q_path() -> None:

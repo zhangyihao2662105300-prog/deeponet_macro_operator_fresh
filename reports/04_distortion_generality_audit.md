@@ -170,6 +170,17 @@ Repair checks:
 
 ## 7. Wind-Turbine Shell Geometry Audit
 
+2026-06-27 correction:
+
+The wind-shell numbers in this section were produced by the earlier synthetic
+mixed-`q48` compatibility path with 10 increments. They remain useful as a
+small force-closure smoke for the four geometry maps, but they are not the
+formal production data-generation route for future wind-shell training data.
+The formal route must use the TRUE176 `full48_vector.npy` displacement-template
+transfer method documented in
+`reports/04b_wind_shell_true176_template_generation_contract.md`, with fresh
+Abaqus LE/B export and 100 increments.
+
 The wind-turbine shell audit generated four teacher CSS8 patches, converted
 them to Macro16 source128 compacts, and ran the strict data-contract audit plus
 selected-frame volume force audit. The script did not train a network, did not

@@ -62,7 +62,7 @@ class Macro16Arrays:
     point_meta: dict[str, Any]
 
 
-class Macro16Dataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]):
+class Macro16Dataset(Dataset):
     def __init__(
         self,
         branch: np.ndarray,

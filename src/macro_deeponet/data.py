@@ -24,7 +24,7 @@ class SyntheticConfig:
     rigid_probability: float = 0.25
 
 
-class SyntheticMacroDataset(Dataset[dict[str, torch.Tensor]]):
+class SyntheticMacroDataset(Dataset):
     """Pre-generated synthetic macro-element samples.
 
     Each row is one macro-element state and one query coordinate.
@@ -128,4 +128,3 @@ def engineering_strain_from_grad_u(grad_u: torch.Tensor) -> torch.Tensor:
             grad_u[1, 2] + grad_u[2, 1],
         ]
     )
-

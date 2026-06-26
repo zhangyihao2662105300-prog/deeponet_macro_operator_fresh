@@ -913,7 +913,7 @@ def build_point_features_unique(shape4: np.ndarray, *, include_id_features: bool
     }
 
 
-class SobolevArrayDataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]):
+class SobolevArrayDataset(Dataset):
     def __init__(self, x_norm: np.ndarray, point_norm: np.ndarray, le_norm: np.ndarray, j_norm: np.ndarray, indices: np.ndarray) -> None:
         self.x_norm = np.asarray(x_norm, dtype=np.float32)
         self.point_norm = np.asarray(point_norm, dtype=np.float32)

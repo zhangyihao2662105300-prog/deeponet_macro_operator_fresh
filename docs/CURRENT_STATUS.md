@@ -105,6 +105,7 @@ fixed parent integration points.
 | Gate 33 branch outlier columns | DIAGNOSIS PASS | `reports/33_branch_outlier_columns_diagnosis.md`; the largest branch outlier comes from `X16_hat_z`, especially `case073` columns such as `X01_z`, because train-split per-column geometry std is about `1.0e-08`. |
 | Gate 34 branch normalization replay | REPLAY PASS | `reports/34_branch_normalization_replay.md`; normalization-only replay shows `X16_hat` std floor `0.05` reduces wind branch max from about `2.2546e6` to `48.56` and is the minimum passing candidate. |
 | Gate 35 branch X16 std floor training | TRAINING FAIL | `reports/35_branch_x16_std_floor_training.md`; guarded `--branch-x16-std-floor 0.05` is implemented and tested, but the Linux small training still fails selected-frame force audit on wind shell validation cases. |
+| Gate 36 wind shell in split training | TRAINING FAIL | `reports/36_wind_shell_in_split_training.md`; wind shell cases `70,71,72` were included in training and `73` was held out, but selected-frame model force still fails. Teacher force remains good. |
 
 Training is allowed only within the limited LE/B release boundary.
 
@@ -198,6 +199,11 @@ Current verified or adopted conclusions:
   Teacher force still closes, but trained model force remains far above the
   gate. This points to a geometry-family split problem or missing wind-shell
   representation, not only input scaling.
+- Gate 36 shows that putting wind shell cases `70,71,72` into training is still
+  insufficient. Latest checkpoint improves train wind-shell cases relative to
+  the Gate 35 OOD split, but remains above the `0.02` force gate, and held-out
+  `case073` fails severely. The issue is not just a fully out-of-distribution
+  wind-shell split.
 
 ## Pending Issues That Are Not Data Errors
 
@@ -238,6 +244,9 @@ data is bad:
   localize the problem to wind-shell branch distribution and geometry
   normalization. Gate 34 identifies `X16_hat` std floor `0.05` as the minimum
   passing replay candidate.
+- Gate 36 confirms that wind-shell in-split training does not release the route.
+  The next step is a geometry and error-contribution diagnosis around
+  `case073`, not a larger training run.
 
 These issues must not be hidden inside network training as if a network could
 repair a definition mismatch. They do not block the limited LE/B training
@@ -302,12 +311,12 @@ Required after training:
 Recommended next tasks, in order:
 
 1. Keep material-only K diagnostics separate from full tangent claims.
-2. Run Gate 36 wind-shell in-split small training.
-3. Put some wind shell cases in train and hold one wind shell case out for
-   validation.
-4. Keep `--branch-x16-std-floor 0.05` active.
-5. Decide from selected-frame force audit whether wind shell failure is pure
-   OOD split or a model-capacity/loss issue.
+2. Run Gate 37 wind-shell geometry and force-error diagnosis.
+3. Compare `case073` against training wind-shell cases `70,71,72`.
+4. Inspect `X16_hat`, point features, `L_ref`, force magnitude, and branch
+   activation distributions.
+5. Decide whether the next correction is geometry split, geometry feature
+   expression, loss weighting, or model capacity.
 
 ## Currently Forbidden
 

@@ -46,6 +46,11 @@ Gate 35 update: guarded `--branch-x16-std-floor 0.05` implementation passed
 tests, but the Linux small training failed force audit. Do not continue the
 same OOD split training; next step is wind-shell in-split diagnosis.
 
+Gate 36 update: wind-shell in-split training also failed force audit. Cases
+`70,71,72` were included in training and case `73` was held out, but model
+force closure still failed while teacher force remained good. Do not expand
+training before a Gate 37 geometry and force-error diagnosis.
+
 This checklist defines what must be true before network training is allowed.
 It does not start training, change the model, or modify the data contract.
 
@@ -107,6 +112,8 @@ Current status:
   small Linux training, not larger training.
 - Gate 35: guarded std-floor training failed force audit; next step is
   wind-shell in-split small diagnosis, not larger training.
+- Gate 36: wind-shell in-split training failed selected-frame force audit; next
+  step is case073 geometry and error diagnosis, not larger training.
 
 Do not treat this as a full tangent or solver-readiness release.
 
@@ -158,6 +165,9 @@ be treated as proof that the data is corrupt:
 - Gate 35 confirms the normalization fix alone is insufficient. The failure is
   now more likely an out-of-distribution geometry-family split or model/loss
   issue.
+- Gate 36 confirms that the failure is not only a fully out-of-distribution
+  wind-shell split. Even with cases `70,71,72` in training, held-out `case073`
+  fails severely, and training cases remain above the force gate.
 
 These issues no longer block the limited LE/B training release, but they remain
 unresolved mechanics items and are not the same as q48 ordering corruption, LE
@@ -275,3 +285,5 @@ Not allowed by this checklist:
 - Continue training before Gate 34 resolves or tests branch normalization.
 - Treat Gate 34 replay as a trained model pass.
 - Repeat the same Gate 35 OOD split training and hope more epochs fix it.
+- Expand training after Gate 36 without first diagnosing `case073` geometry,
+  force magnitude, and feature distribution.

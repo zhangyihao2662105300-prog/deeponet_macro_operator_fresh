@@ -574,7 +574,10 @@ def target_keep_frames(nodes: dict[int, np.ndarray]) -> np.ndarray:
 def template_transfer_context(args: Any, template_case_id: int | None = None) -> dict[str, Any]:
     true176_root = Path(args.true176_root).resolve()
     domain = str(args.true176_domain)
-    meta_case = int(template_case_id if template_case_id is not None else args.true176_meta_case)
+    if bool(getattr(args, "true176_use_template_case_meta", False)):
+        meta_case = int(template_case_id if template_case_id is not None else args.true176_meta_case)
+    else:
+        meta_case = int(args.true176_meta_case)
     meta = load_legacy_meta(true176_root, domain, meta_case)
     h_ref = legacy_h(meta)
     rows = load_legacy_master_rows(true176_root, domain, meta_case)
@@ -1518,6 +1521,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--true176-domain", default=DEFAULT_TRUE176_DOMAIN)
     parser.add_argument("--true176-vector-kind", default=DEFAULT_TRUE176_VECTOR_KIND)
     parser.add_argument("--true176-meta-case", type=int, default=1)
+    parser.add_argument("--true176-use-template-case-meta", action="store_true")
     parser.add_argument("--template-cases", default=DEFAULT_TEMPLATE_CASES)
     parser.add_argument("--template-assignment", default="one-per-family", choices=("one-per-family", "cross-product"))
     parser.add_argument("--template-amplitude-scale", type=float, default=1.0)

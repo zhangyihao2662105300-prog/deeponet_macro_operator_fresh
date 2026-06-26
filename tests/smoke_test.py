@@ -2292,6 +2292,47 @@ def test_gate04_wind_shell_true176_template_transfer_preserves_local_template() 
         assert moved["source"]["uses_path_scale"] is False
 
 
+def test_gate04_wind_shell_geometry_spec_filters_and_parameterizes() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        spec = root / "geometry_spec.csv"
+        spec.write_text(
+            "\n".join(
+                [
+                    "case_id,geometry_id,family,machine_group,template_case_id,template_amplitude_scale,theta,lam,tau,geometry_params_json",
+                    'cyl_a,cyl_g0,cylindrical_shell,winA,3,0.75,0.36,0.91,0.018,"{""theta"": 0.36, ""lam"": 0.91, ""tau"": 0.018}"',
+                    'cyl_b,cyl_g1,cylindrical_shell,winB,4,1.25,0.62,1.04,0.024,"{""theta"": 0.62, ""lam"": 1.04, ""tau"": 0.024}"',
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        args = gate04_wind_shell.parse_args(
+            [
+                "--geometry-spec",
+                str(spec),
+                "--machine-group",
+                "winA",
+            ]
+        )
+        tasks = gate04_wind_shell.generation_tasks(("cylindrical_shell",), args)
+        assert len(tasks) == 1
+        assert tasks[0]["case_id"] == "cyl_a"
+        assert tasks[0]["template_case_id"] == 3
+        assert tasks[0]["template_amplitude_scale"] == 0.75
+        assert tasks[0]["geometry_params"] == {"theta": 0.36, "lam": 0.91, "tau": 0.018}
+
+        x_a = gate04_wind_shell.x16_macro_from_nodes(
+            gate04_wind_shell.build_nodes("cylindrical_shell", tasks[0]["geometry_params"])
+        )
+        x_b = gate04_wind_shell.x16_macro_from_nodes(
+            gate04_wind_shell.build_nodes("cylindrical_shell", {"theta": 0.62, "lam": 1.04, "tau": 0.024})
+        )
+        assert x_a.shape == (16, 3)
+        assert np.linalg.norm(x_a - x_b) > 1.0e-3
+        assert gate04_wind_shell.geometry_metrics("cylindrical_shell", tasks[0]["geometry_params"])["detJ_positive"]
+
+
 def test_v1_2_pilot_linear_frame_audit_allows_zero_q_path() -> None:
     q = np.zeros((10, 48), dtype=np.float64)
     audit = assert_pilot_linear_frames(q, 1.0e-12)

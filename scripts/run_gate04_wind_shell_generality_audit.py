@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import csv
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from copy import copy
 import json
 import math
 import os
@@ -63,7 +64,29 @@ DEFAULT_TEMPLATE_CASES = "1,2,3,4"
 
 NX = 4
 NY = 4
-GAUSS_FAMILIES = ("cylindrical_shell", "conical_shell", "thickness_varying_shell", "mild_double_curvature_shell")
+GAUSS_FAMILIES = (
+    "cylindrical_shell",
+    "conical_shell",
+    "thickness_varying_shell",
+    "mild_double_curvature_shell",
+    "distorted_shell",
+)
+GEOMETRY_PARAM_KEYS = (
+    "theta",
+    "lam",
+    "tau",
+    "mu",
+    "tau0",
+    "grad_u",
+    "grad_v",
+    "cu",
+    "cv",
+    "cxy",
+    "twist",
+    "distort_amp",
+    "distort_u",
+    "distort_v",
+)
 OLD_INDEX_FOR_SHAPE4_INDEX = np.asarray(
     [0, 3, 5, 1, 6, 2, 4, 7, 8, 11, 13, 9, 14, 10, 12, 15],
     dtype=np.int64,
@@ -215,7 +238,42 @@ def normalize(vec: np.ndarray) -> np.ndarray:
     return vals / norm
 
 
-def cylindrical_point(u: float, v: float, w: float, *, theta: float = 0.55, lam: float = 1.0, tau: float = 0.02) -> np.ndarray:
+def geometry_params_from_row(row: dict[str, Any]) -> dict[str, float]:
+    params: dict[str, float] = {}
+    for key in GEOMETRY_PARAM_KEYS:
+        if key not in row:
+            continue
+        value = row[key]
+        text = "" if value is None else str(value).strip()
+        if not text:
+            continue
+        params[key] = float(text)
+    return params
+
+
+def geometry_params_from_json(text: str | None) -> dict[str, float]:
+    if text is None or not str(text).strip():
+        return {}
+    loaded = json.loads(str(text))
+    if not isinstance(loaded, dict):
+        raise ValueError("geometry_params_json must decode to an object")
+    return geometry_params_from_row(loaded)
+
+
+def _param(params: dict[str, float] | None, key: str, default: float) -> float:
+    vals = params or {}
+    return float(vals.get(key, default))
+
+
+def cylindrical_point(
+    u: float,
+    v: float,
+    w: float,
+    *,
+    theta: float = 0.55,
+    lam: float = 1.0,
+    tau: float = 0.02,
+) -> np.ndarray:
     radius = lam / theta
     phi = -theta * float(v)
     normal = np.asarray([math.cos(phi), 0.0, math.sin(phi)], dtype=np.float64)
@@ -233,42 +291,142 @@ def conical_point(u: float, v: float, w: float, *, theta: float = 0.50, lam: flo
     return mid + float(w) * tau * normal
 
 
-def thickness_varying_point(u: float, v: float, w: float, *, theta: float = 0.45, lam: float = 1.0, tau0: float = 0.022) -> np.ndarray:
+def thickness_varying_point(
+    u: float,
+    v: float,
+    w: float,
+    *,
+    theta: float = 0.45,
+    lam: float = 1.0,
+    tau0: float = 0.022,
+    grad_u: float = 0.30,
+    grad_v: float = 0.12,
+) -> np.ndarray:
     radius = lam / theta
     phi = -theta * float(v)
     normal = np.asarray([math.cos(phi), 0.0, math.sin(phi)], dtype=np.float64)
-    thickness = tau0 * (1.0 + 0.30 * float(u) + 0.12 * float(v))
+    thickness = tau0 * (1.0 + float(grad_u) * float(u) + float(grad_v) * float(v))
+    if thickness <= 1.0e-8:
+        raise ValueError(f"non-positive local thickness {thickness:g}")
     mid = np.asarray([radius * math.cos(phi), float(u), radius * math.sin(phi)], dtype=np.float64)
     return mid + float(w) * thickness * normal
 
 
-def mild_double_curvature_point(u: float, v: float, w: float, *, lam: float = 1.0, tau: float = 0.02) -> np.ndarray:
-    cu = 0.080
-    cv = 0.055
-    cxy = 0.030
+def mild_double_curvature_point(
+    u: float,
+    v: float,
+    w: float,
+    *,
+    lam: float = 1.0,
+    tau: float = 0.02,
+    cu: float = 0.080,
+    cv: float = 0.055,
+    cxy: float = 0.030,
+    twist: float = 0.0,
+) -> np.ndarray:
     x = lam * float(v)
     y = float(u)
-    z = cu * (float(u) ** 2 - 1.0 / 12.0) + cv * (float(v) ** 2 - 1.0 / 12.0) + cxy * float(u) * float(v)
-    p_v = np.asarray([lam, 0.0, 2.0 * cv * float(v) + cxy * float(u)], dtype=np.float64)
-    p_u = np.asarray([0.0, 1.0, 2.0 * cu * float(u) + cxy * float(v)], dtype=np.float64)
+    z = (
+        cu * (float(u) ** 2 - 1.0 / 12.0)
+        + cv * (float(v) ** 2 - 1.0 / 12.0)
+        + cxy * float(u) * float(v)
+        + twist * float(u) * (float(v) ** 2 - 1.0 / 12.0)
+    )
+    p_v = np.asarray([lam, 0.0, 2.0 * cv * float(v) + cxy * float(u) + 2.0 * twist * float(u) * float(v)], dtype=np.float64)
+    p_u = np.asarray([0.0, 1.0, 2.0 * cu * float(u) + cxy * float(v) + twist * (float(v) ** 2 - 1.0 / 12.0)], dtype=np.float64)
     normal = normalize(np.cross(p_v, p_u))
     return np.asarray([x, y, z], dtype=np.float64) + float(w) * tau * normal
 
 
-def family_point_function(family: str) -> Callable[[float, float, float], np.ndarray]:
-    funcs: dict[str, Callable[[float, float, float], np.ndarray]] = {
-        "cylindrical_shell": cylindrical_point,
-        "conical_shell": conical_point,
-        "thickness_varying_shell": thickness_varying_point,
-        "mild_double_curvature_shell": mild_double_curvature_point,
-    }
-    if family not in funcs:
-        raise ValueError(f"unknown wind shell family {family!r}")
-    return funcs[family]
+def distorted_shell_point(
+    u: float,
+    v: float,
+    w: float,
+    *,
+    lam: float = 1.0,
+    tau: float = 0.02,
+    distort_amp: float = 0.035,
+    distort_u: float = 1.0,
+    distort_v: float = 1.0,
+) -> np.ndarray:
+    amp = float(distort_amp)
+    du = float(distort_u)
+    dv = float(distort_v)
+    x = lam * float(v) + 0.20 * amp * math.sin(math.pi * du * float(u)) * math.sin(math.pi * dv * float(v))
+    y = float(u) + 0.15 * amp * math.sin(math.pi * dv * float(v))
+    z = amp * math.sin(math.pi * du * float(u)) * math.sin(math.pi * dv * float(v))
+    p_v = np.asarray(
+        [
+            lam + 0.20 * amp * math.sin(math.pi * du * float(u)) * math.pi * dv * math.cos(math.pi * dv * float(v)),
+            0.15 * amp * math.pi * dv * math.cos(math.pi * dv * float(v)),
+            amp * math.sin(math.pi * du * float(u)) * math.pi * dv * math.cos(math.pi * dv * float(v)),
+        ],
+        dtype=np.float64,
+    )
+    p_u = np.asarray(
+        [
+            0.20 * amp * math.pi * du * math.cos(math.pi * du * float(u)) * math.sin(math.pi * dv * float(v)),
+            1.0,
+            amp * math.pi * du * math.cos(math.pi * du * float(u)) * math.sin(math.pi * dv * float(v)),
+        ],
+        dtype=np.float64,
+    )
+    normal = normalize(np.cross(p_v, p_u))
+    return np.asarray([x, y, z], dtype=np.float64) + float(w) * tau * normal
 
 
-def build_nodes(family: str) -> dict[int, np.ndarray]:
-    fn = family_point_function(family)
+def family_point(family: str, u: float, v: float, w: float, geometry_params: dict[str, float] | None = None) -> np.ndarray:
+    params = geometry_params or {}
+    if family == "cylindrical_shell":
+        return cylindrical_point(u, v, w, theta=_param(params, "theta", 0.55), lam=_param(params, "lam", 1.0), tau=_param(params, "tau", 0.02))
+    if family == "conical_shell":
+        return conical_point(
+            u,
+            v,
+            w,
+            theta=_param(params, "theta", 0.50),
+            lam=_param(params, "lam", 1.05),
+            tau=_param(params, "tau", 0.02),
+            mu=_param(params, "mu", 0.14),
+        )
+    if family == "thickness_varying_shell":
+        return thickness_varying_point(
+            u,
+            v,
+            w,
+            theta=_param(params, "theta", 0.45),
+            lam=_param(params, "lam", 1.0),
+            tau0=_param(params, "tau0", _param(params, "tau", 0.022)),
+            grad_u=_param(params, "grad_u", 0.30),
+            grad_v=_param(params, "grad_v", 0.12),
+        )
+    if family == "mild_double_curvature_shell":
+        return mild_double_curvature_point(
+            u,
+            v,
+            w,
+            lam=_param(params, "lam", 1.0),
+            tau=_param(params, "tau", 0.02),
+            cu=_param(params, "cu", 0.080),
+            cv=_param(params, "cv", 0.055),
+            cxy=_param(params, "cxy", 0.030),
+            twist=_param(params, "twist", 0.0),
+        )
+    if family == "distorted_shell":
+        return distorted_shell_point(
+            u,
+            v,
+            w,
+            lam=_param(params, "lam", 1.0),
+            tau=_param(params, "tau", 0.02),
+            distort_amp=_param(params, "distort_amp", 0.035),
+            distort_u=_param(params, "distort_u", 1.0),
+            distort_v=_param(params, "distort_v", 1.0),
+        )
+    raise ValueError(f"unknown wind shell family {family!r}")
+
+
+def build_nodes(family: str, geometry_params: dict[str, float] | None = None) -> dict[int, np.ndarray]:
     nodes: dict[int, np.ndarray] = {}
     for k in range(2):
         w = -0.5 + float(k)
@@ -276,7 +434,7 @@ def build_nodes(family: str) -> dict[int, np.ndarray]:
             u = -0.5 + float(j) / float(NY)
             for i in range(NX + 1):
                 v = -0.5 + float(i) / float(NX)
-                nodes[node_id(i, j, k)] = fn(u, v, w).astype(np.float64)
+                nodes[node_id(i, j, k)] = family_point(family, u, v, w, geometry_params).astype(np.float64)
     return nodes
 
 
@@ -286,8 +444,8 @@ def x16_macro_from_nodes(nodes: dict[int, np.ndarray]) -> np.ndarray:
     return x_keep[TRUE176_MACRO_TO_KEEP_NODE].astype(np.float64)
 
 
-def geometry_metrics(family: str) -> dict[str, Any]:
-    nodes = build_nodes(family)
+def geometry_metrics(family: str, geometry_params: dict[str, float] | None = None) -> dict[str, Any]:
+    nodes = build_nodes(family, geometry_params)
     x16 = x16_macro_from_nodes(nodes)
     geom = Macro16GeometryMap(x16)
     fields = geom.eval_points(macro16_source128_point_table())
@@ -295,6 +453,7 @@ def geometry_metrics(family: str) -> dict[str, Any]:
     thickness = np.asarray(fields["thickness_hat"], dtype=np.float64)
     return {
         "family": family,
+        "geometry_params": dict(geometry_params or {}),
         "detJ_positive": bool(np.min(det) > 0.0),
         "detJ_min": float(np.min(det)),
         "detJ_max": float(np.max(det)),
@@ -440,9 +599,10 @@ def transfer_true176_template_to_family(
     template_case_id: int,
     args: Any,
     context: dict[str, Any] | None = None,
+    geometry_params: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     ctx = template_transfer_context(args) if context is None else context
-    nodes = build_nodes(family)
+    nodes = build_nodes(family, geometry_params)
     q_old = load_true176_q48(
         Path(ctx["true176_root"]),
         str(ctx["true176_domain"]),
@@ -470,6 +630,7 @@ def transfer_true176_template_to_family(
             "legacy_meta_case": int(ctx["legacy_meta_case"]),
             "legacy_h_ref": float(ctx["legacy_h_ref"]),
             "target_L_ref": geom_l_ref,
+            "target_geometry_params": dict(geometry_params or {}),
             "template_amplitude_scale": float(args.template_amplitude_scale),
             "uses_path_scale": False,
             "old_index_for_shape4_index": OLD_INDEX_FOR_SHAPE4_INDEX.tolist(),
@@ -500,9 +661,10 @@ def build_q48_source(
     args: Any,
     context: dict[str, Any] | None = None,
     template_case_id: int | None = None,
+    geometry_params: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     mode = str(args.q_source_mode).strip().lower()
-    nodes = build_nodes(family)
+    nodes = build_nodes(family, geometry_params)
     if mode == "true176-template":
         template_case = select_template_case(family, args) if template_case_id is None else int(template_case_id)
         return transfer_true176_template_to_family(
@@ -510,6 +672,7 @@ def build_q48_source(
             template_case_id=template_case,
             args=args,
             context=context,
+            geometry_params=geometry_params,
         )
     if mode == "synthetic-mixed":
         q_final = mixed_q48_keep(nodes, q_scale=float(args.q_scale))
@@ -583,8 +746,9 @@ def write_generic_css8_shell_inp(
     perturb_direction: int | None,
     delta: float,
     nlgeom: str,
+    geometry_params: dict[str, float] | None = None,
 ) -> dict[str, Any]:
-    nodes = build_nodes(family)
+    nodes = build_nodes(family, geometry_params)
     boundary_nodes, keep_nodes = boundary_keep_nodes()
     tmat, t_rows = build_t_boundary()
     times, q48 = q48_frames(q48_final, increments=increments, perturb_direction=perturb_direction, delta=delta)
@@ -594,6 +758,7 @@ def write_generic_css8_shell_inp(
     lines = [
         "*Heading",
         f"** Gate 04 wind shell family = {family}",
+        f"** geometry_params = {json.dumps(dict(geometry_params or {}), sort_keys=True)}",
         "*Preprint, echo=NO, model=NO, history=NO, contact=NO",
         "*Node",
     ]
@@ -644,6 +809,7 @@ def write_generic_css8_shell_inp(
     return {
         "inp": str(out_path),
         "family": family,
+        "geometry_params": dict(geometry_params or {}),
         "nodes": nodes,
         "boundary_nodes": boundary_nodes,
         "keep_nodes": keep_nodes,
@@ -915,12 +1081,13 @@ def run_family(
     old: dict[str, Any],
     q_context: dict[str, Any] | None = None,
     template_case_id: int | None = None,
+    geometry_params: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     sample_root = Path(args.out_root).resolve() / family / case_id
     sample_root.mkdir(parents=True, exist_ok=True)
-    q_source = build_q48_source(family, args, q_context, template_case_id=template_case_id)
+    q_source = build_q48_source(family, args, q_context, template_case_id=template_case_id, geometry_params=geometry_params)
     q_final = np.asarray(q_source["q48_final"], dtype=np.float64).reshape(48)
-    metrics = geometry_metrics(family)
+    metrics = geometry_metrics(family, geometry_params)
     if not metrics["detJ_positive"]:
         raise ValueError(f"{family}: Macro16 detJ is not positive")
     existing_base_npz = sample_root / "base_frames.npz"
@@ -965,12 +1132,14 @@ def run_family(
         perturb_direction=None,
         delta=float(args.delta),
         nlgeom=str(args.nlgeom),
+        geometry_params=geometry_params,
     )
     bc_dir = sample_root / "boundary_contract"
     bc_dir.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         str(bc_dir / "boundary_contract_arrays.npz"),
         geometry_family=np.asarray(family, dtype=object),
+        geometry_params_json=np.asarray(json.dumps(dict(geometry_params or {}), sort_keys=True), dtype=object),
         q_generation_method=np.asarray(str(q_source["source"]["q_generation_method"]), dtype=object),
         q_source_true176_case_id=np.asarray([int(q_source["source"].get("true176_case_id", -1))], dtype=np.int64),
         q_source_true176_vector_path=np.asarray(str(q_source["source"].get("true176_vector_path", "")), dtype=object),
@@ -1018,6 +1187,7 @@ def run_family(
             perturb_direction=direction,
             delta=float(args.delta),
             nlgeom=str(args.nlgeom),
+            geometry_params=geometry_params,
         )
         perturb_jobs.append({"direction": int(direction), "job_name": job_name, "inp": inp, "odb": job_dir / f"{job_name}.odb", "npz": job_dir / f"{job_name}.npz"})
     perturb_results = run_jobs(
@@ -1035,6 +1205,7 @@ def run_family(
     summary = {
         "family": family,
         "case_id": case_id,
+        "geometry_params": dict(geometry_params or {}),
         "sample_root": str(sample_root),
         "geometry_metrics": metrics,
         "q_source": q_source["source"],
@@ -1184,12 +1355,57 @@ def collect_report_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def load_geometry_spec(path: Path) -> list[dict[str, Any]]:
+    rows = load_csv_dict(path)
+    tasks: list[dict[str, Any]] = []
+    for idx, row in enumerate(rows):
+        family = str(row.get("family", "")).strip()
+        if not family:
+            raise ValueError(f"{path}: row {idx + 2} missing family")
+        geometry_id = str(row.get("geometry_id", "")).strip() or f"{family}_g{idx:03d}"
+        template_text = str(row.get("template_case_id", row.get("true176_case_id", ""))).strip()
+        template_case_id = int(float(template_text)) if template_text else None
+        params = geometry_params_from_row(row)
+        params.update(geometry_params_from_json(row.get("geometry_params_json")))
+        tasks.append(
+            {
+                "family": family,
+                "geometry_id": geometry_id,
+                "case_id": str(row.get("case_id", "")).strip() or geometry_id,
+                "template_case_id": template_case_id,
+                "template_amplitude_scale": float(row["template_amplitude_scale"])
+                if str(row.get("template_amplitude_scale", "")).strip()
+                else None,
+                "geometry_params": params,
+                "machine_group": str(row.get("machine_group", "")).strip(),
+            }
+        )
+    if not tasks:
+        raise ValueError(f"{path}: no geometry tasks found")
+    return tasks
+
+
 def generation_tasks(families: tuple[str, ...], args: argparse.Namespace) -> list[dict[str, Any]]:
+    spec_text = str(getattr(args, "geometry_spec", "")).strip()
+    spec_path = Path(spec_text).resolve() if spec_text and spec_text != "." else None
+    if spec_path is not None:
+        tasks = load_geometry_spec(spec_path)
+        group = str(getattr(args, "machine_group", "")).strip()
+        if group:
+            tasks = [task for task in tasks if str(task.get("machine_group", "")).strip() == group]
+        requested = set(families)
+        if requested:
+            tasks = [task for task in tasks if str(task["family"]) in requested]
+        if not tasks:
+            raise ValueError(f"{spec_path}: no tasks remain after families/machine_group filters")
+        return tasks
+
     case_ids = {
         "cylindrical_shell": "case070_cylindrical_shell",
         "conical_shell": "case071_conical_shell",
         "thickness_varying_shell": "case072_thickness_varying_shell",
         "mild_double_curvature_shell": "case073_mild_double_curvature_shell",
+        "distorted_shell": "case074_distorted_shell",
     }
     mode = str(args.q_source_mode).strip().lower()
     if mode != "true176-template":
@@ -1235,18 +1451,28 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     families = GAUSS_FAMILIES if str(args.families).strip().lower() == "all" else tuple(v.strip() for v in str(args.families).split(",") if v.strip())
     out_root = Path(args.out_root).resolve()
     out_root.mkdir(parents=True, exist_ok=True)
-    q_context = template_transfer_context(args) if str(args.q_source_mode).strip().lower() == "true176-template" else None
     tasks = generation_tasks(families, args)
+    q_context_cache: dict[int, dict[str, Any]] = {}
     generation: list[dict[str, Any]] = []
     for task in tasks:
+        task_args = copy(args)
+        if task.get("template_amplitude_scale") is not None:
+            setattr(task_args, "template_amplitude_scale", float(task["template_amplitude_scale"]))
+        q_context = None
+        if str(task_args.q_source_mode).strip().lower() == "true176-template":
+            template_case = int(task.get("template_case_id") or select_template_case(str(task["family"]), task_args))
+            if template_case not in q_context_cache:
+                q_context_cache[template_case] = template_transfer_context(task_args, template_case)
+            q_context = q_context_cache[template_case]
         generation.append(
             run_family(
                 str(task["family"]),
                 str(task["case_id"]),
-                args,
+                task_args,
                 old,
                 q_context,
                 template_case_id=task.get("template_case_id"),
+                geometry_params=dict(task.get("geometry_params") or {}),
             )
         )
     post = build_source128_and_audit(generation, args)
@@ -1258,7 +1484,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "q_source_mode": str(args.q_source_mode),
         "template_assignment": str(args.template_assignment),
         "template_cases": parse_int_list(str(args.template_cases)) if str(args.q_source_mode).strip().lower() == "true176-template" else [],
-        "true176_template_context": {k: v for k, v in (q_context or {}).items() if k != "legacy_frames"},
+        "true176_template_contexts": {
+            str(case): {k: v for k, v in ctx.items() if k != "legacy_frames"}
+            for case, ctx in sorted(q_context_cache.items())
+        },
         "network_training": False,
         "model_changed": False,
         "integration_rule": "fixed standard Macro16 source128 128-point rule",
@@ -1277,6 +1506,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out-root", type=Path, default=Path("runs") / "gate04_wind_shell_generality")
     parser.add_argument("--families", default="all")
+    parser.add_argument("--geometry-spec", default="")
+    parser.add_argument("--machine-group", default="", help="Optional geometry_spec machine_group filter, e.g. winA or winB.")
     parser.add_argument("--old-src-root", type=Path, default=DEFAULT_OLD_SRC_ROOT)
     parser.add_argument("--export-lib", type=Path, default=DEFAULT_EXPORT_LIB)
     parser.add_argument("--abaqus", type=Path, default=DEFAULT_ABAQUS)
